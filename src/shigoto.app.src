@@ -1,0 +1,11 @@
+{application, shigoto, [
+    {description, "Background job processing for the Nova ecosystem"},
+    {vsn, "git"},
+    {registered, [shigoto_sup]},
+    {mod, {shigoto_app, []}},
+    {applications, [kernel, stdlib, crypto, kura, telemetry]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, []}
+]}.
