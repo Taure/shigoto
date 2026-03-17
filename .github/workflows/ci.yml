@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@feat/elp-support
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      version-file: '.tool-versions'
+      enable-ct: true
+      enable-ex-doc: true
+      enable-hank: true
+      enable-audit: true
+      enable-coverage: true
+      enable-sbom: true
+      enable-sbom-scan: true
+      enable-dependency-submission: true
+      enable-summary: true
+
+      postgres: true
+      postgres-version: '16'
+      postgres-db: 'shigoto_test'
+      postgres-password: 'root'
+      postgres-port: '5555'
