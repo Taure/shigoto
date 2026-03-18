@@ -61,7 +61,10 @@ check_cron_entries() ->
         Entries
     ).
 
-should_run(_Schedule, _Now) ->
-    %% Simple minute-matching for now
-    %% Full cron expression parsing is a future enhancement
-    false.
+should_run(Schedule, Now) ->
+    case shigoto_cron_parser:parse(Schedule) of
+        {ok, Expr} ->
+            shigoto_cron_parser:matches(Expr, Now);
+        {error, _Reason} ->
+            false
+    end.

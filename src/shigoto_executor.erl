@@ -93,8 +93,10 @@ resolve_worker(#{worker := Worker}) when is_binary(Worker) ->
 resolve_args(#{args := Args}) when is_map(Args) ->
     Args;
 resolve_args(#{args := Args}) when is_binary(Args) ->
-    try json:decode(Args)
-    catch _:_ -> #{}
+    try
+        json:decode(Args)
+    catch
+        _:_ -> #{}
     end;
 resolve_args(_) ->
     #{}.
