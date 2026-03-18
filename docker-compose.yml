@@ -1,0 +1,10 @@
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      - "5555:5432"
+    environment:
+      POSTGRES_DB: shigoto_test
+      POSTGRES_PASSWORD: root
+    tmpfs:
+      - /var/lib/postgresql/data
