@@ -65,7 +65,7 @@ handle_info(poll, #state{queue = Queue, concurrency = Conc, active = Active, rep
     schedule_poll(),
     {noreply, State#state{active = NewActive}};
 handle_info(rescue, #state{repo = Repo} = State) ->
-    shigoto_repo:rescue_stale_jobs(Repo, 300),
+    _ = shigoto_repo:rescue_stale_jobs(Repo, 300),
     schedule_rescue(),
     {noreply, State};
 handle_info(_Info, State) ->
