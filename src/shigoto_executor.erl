@@ -27,21 +27,21 @@ execute_sync(Job, Pool, Timeout) ->
     try
         case apply_with_timeout(Worker, perform, [Args], Timeout) of
             ok ->
-                shigoto_repo:complete_job(Pool, JobId),
-                shigoto_telemetry:job_completed(Job),
+                _ = shigoto_repo:complete_job(Pool, JobId),
+                _ = shigoto_telemetry:job_completed(Job),
                 ok;
             {snooze, Seconds} ->
-                shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
                 {snooze, Seconds};
             {error, FailReason} ->
-                shigoto_repo:fail_job(Pool, JobId, FailReason),
-                shigoto_telemetry:job_failed(Job, FailReason),
+                _ = shigoto_repo:fail_job(Pool, JobId, FailReason),
+                _ = shigoto_telemetry:job_failed(Job, FailReason),
                 {error, FailReason}
         end
     catch
         Class:CatchReason:_Stack ->
-            shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
-            shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
+            _ = shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
+            _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
             {error, {Class, CatchReason}}
     end.
 
@@ -65,24 +65,24 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
     try
         case apply_with_timeout(Worker, perform, [Args], Timeout) of
             ok ->
-                shigoto_repo:complete_job(Pool, JobId),
-                shigoto_telemetry:job_completed(Job),
+                _ = shigoto_repo:complete_job(Pool, JobId),
+                _ = shigoto_telemetry:job_completed(Job),
                 gen_server:cast(QueuePid, {job_finished, JobId, self()}),
                 {stop, normal, State};
             {snooze, Seconds} ->
-                shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
                 gen_server:cast(QueuePid, {job_finished, JobId, self()}),
                 {stop, normal, State};
             {error, Reason} ->
-                shigoto_repo:fail_job(Pool, JobId, Reason),
-                shigoto_telemetry:job_failed(Job, Reason),
+                _ = shigoto_repo:fail_job(Pool, JobId, Reason),
+                _ = shigoto_telemetry:job_failed(Job, Reason),
                 gen_server:cast(QueuePid, {job_finished, JobId, self()}),
                 {stop, normal, State}
         end
     catch
         Class:CatchReason:_Stack ->
-            shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
-            shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
+            _ = shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
+            _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
             gen_server:cast(QueuePid, {job_finished, JobId, self()}),
             {stop, normal, State}
     end;

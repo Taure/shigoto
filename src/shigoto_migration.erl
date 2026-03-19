@@ -22,12 +22,12 @@ up(Pool) ->
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.
 down(Pool) ->
-    pgo:query(~"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs", [], #{
+    _ = pgo:query(~"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs", [], #{
         pool => Pool
     }),
-    pgo:query(~"DROP FUNCTION IF EXISTS shigoto_notify_insert", [], #{pool => Pool}),
-    pgo:query(~"DROP TABLE IF EXISTS shigoto_cron", [], #{pool => Pool}),
-    pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP FUNCTION IF EXISTS shigoto_notify_insert", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_cron", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs", [], #{pool => Pool}),
     ok.
 
 %%----------------------------------------------------------------------

@@ -107,7 +107,7 @@ drain_loop(Pool, Queue, Timeout) ->
         {ok, []} ->
             ok;
         {ok, [Job]} ->
-            shigoto_executor:execute_sync(Job, Pool, Timeout),
+            _ = shigoto_executor:execute_sync(Job, Pool, Timeout),
             drain_loop(Pool, Queue, Timeout);
         {error, _} ->
             ok

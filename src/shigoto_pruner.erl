@@ -30,7 +30,7 @@ handle_cast(_Msg, State) ->
 handle_info(prune, State) ->
     Pool = shigoto_config:pool(),
     Days = shigoto_config:prune_after_days(),
-    shigoto_repo:prune_jobs(Pool, Days),
+    _ = shigoto_repo:prune_jobs(Pool, Days),
     erlang:send_after(?PRUNE_INTERVAL, self(), prune),
     {noreply, State};
 handle_info(_Info, State) ->
