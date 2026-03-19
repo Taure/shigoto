@@ -73,10 +73,8 @@ start_listener() ->
     case pgo_notifications:start_link(Config) of
         {ok, Pid} ->
             erlang:monitor(process, Pid),
-            case pgo_notifications:listen(Pid, ?CHANNEL) of
-                {ok, Ref} -> {ok, Pid, Ref};
-                {eventually, Ref} -> {ok, Pid, Ref}
-            end;
+            {ok, Ref} = pgo_notifications:listen(Pid, ?CHANNEL),
+            {ok, Pid, Ref};
         {error, _} = Err ->
             Err
     end.
