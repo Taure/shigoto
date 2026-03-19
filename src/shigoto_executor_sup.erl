@@ -18,9 +18,9 @@ start_executor(Job, RepoMod, QueuePid) ->
 
 -doc false.
 init([]) ->
-    case ets:whereis(shigoto_executors) of
+    _ = case ets:whereis(shigoto_executors) of
         undefined ->
-            _ = ets:new(shigoto_executors, [named_table, public, {read_concurrency, true}]);
+            ets:new(shigoto_executors, [named_table, public, {read_concurrency, true}]);
         _ ->
             ok
     end,
