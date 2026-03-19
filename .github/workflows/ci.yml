@@ -24,8 +24,4 @@ jobs:
       enable-dependency-submission: true
       enable-summary: true
 
-      postgres: true
-      postgres-version: '16'
-      postgres-db: 'shigoto_test'
-      postgres-password: 'root'
-      postgres-port: '5555'
+      extra-services-compose: 'docker-compose.ci.yml'
