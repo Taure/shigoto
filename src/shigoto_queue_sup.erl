@@ -13,11 +13,13 @@ start_link(Queues) ->
 
 -doc false.
 init(Queues) ->
+    ShutdownMs = shigoto_config:shutdown_timeout() + 1000,
     Children = [
         #{
             id => {shigoto_queue, Queue},
             start => {shigoto_queue, start_link, [Queue, Concurrency]},
-            type => worker
+            type => worker,
+            shutdown => ShutdownMs
         }
      || {Queue, Concurrency} <- Queues
     ],

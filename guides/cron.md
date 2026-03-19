@@ -9,7 +9,7 @@ Add cron entries to your `sys.config`:
 
 ```erlang
 {shigoto, [
-    {repo, my_repo},
+    {pool, my_app_db},
     {queues, [{<<"default">>, 10}]},
     {cron, [
         {<<"daily_cleanup">>, <<"0 2 * * *">>, cleanup_worker, #{<<"days">> => 30}},

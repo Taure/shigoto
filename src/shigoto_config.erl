@@ -3,18 +3,26 @@
 Configuration access for Shigoto. Reads from application env.
 """.
 
--export([repo/0, queues/0, poll_interval/0, cron_entries/0, prune_after_days/0]).
+-export([
+    pool/0,
+    queues/0,
+    poll_interval/0,
+    cron_entries/0,
+    prune_after_days/0,
+    shutdown_timeout/0,
+    notifier_config/0
+]).
 
--doc "The Kura repo module for job storage.".
--spec repo() -> module().
-repo() ->
-    {ok, Repo} = application:get_env(shigoto, repo),
-    Repo.
+-doc "The pgo pool name for job storage.".
+-spec pool() -> atom().
+pool() ->
+    {ok, Pool} = application:get_env(shigoto, pool),
+    Pool.
 
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
 -spec queues() -> [{binary(), pos_integer()}].
 queues() ->
-    application:get_env(shigoto, queues, [{<<"default">>, 10}]).
+    application:get_env(shigoto, queues, [{~"default", 10}]).
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
@@ -30,3 +38,13 @@ cron_entries() ->
 -spec prune_after_days() -> pos_integer().
 prune_after_days() ->
     application:get_env(shigoto, prune_after_days, 14).
+
+-doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
+-spec notifier_config() -> map() | undefined.
+notifier_config() ->
+    application:get_env(shigoto, notifier, undefined).
+
+-doc "Milliseconds to wait for in-flight jobs during shutdown. Default: 15000.".
+-spec shutdown_timeout() -> pos_integer().
+shutdown_timeout() ->
+    application:get_env(shigoto, shutdown_timeout, 15000).

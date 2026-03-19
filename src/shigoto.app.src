@@ -3,7 +3,7 @@
     {vsn, "git"},
     {registered, [shigoto_sup]},
     {mod, {shigoto_app, []}},
-    {applications, [kernel, stdlib, crypto, kura, telemetry]},
+    {applications, [kernel, stdlib, crypto, pgo, telemetry]},
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},

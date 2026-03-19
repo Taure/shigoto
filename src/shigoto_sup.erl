@@ -15,7 +15,7 @@ start_link() ->
 -doc false.
 init([]) ->
     Queues = shigoto_config:queues(),
-    Children = [
+    BaseChildren = [
         #{
             id => shigoto_executor_sup,
             start => {shigoto_executor_sup, start_link, []},
@@ -37,4 +37,18 @@ init([]) ->
             type => worker
         }
     ],
+    Children =
+        case shigoto_config:notifier_config() of
+            undefined ->
+                BaseChildren;
+            _ ->
+                BaseChildren ++
+                    [
+                        #{
+                            id => shigoto_notifier,
+                            start => {shigoto_notifier, start_link, []},
+                            type => worker
+                        }
+                    ]
+        end,
     {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, Children}}.

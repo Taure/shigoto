@@ -6,72 +6,84 @@ back to the queue process when done.
 -behaviour(gen_server).
 
 -export([start_link/3, execute_sync/3]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
     job :: map(),
-    repo :: module(),
+    pool :: atom(),
     queue_pid :: pid()
 }).
 
 -doc false.
-start_link(Job, RepoMod, QueuePid) ->
-    gen_server:start_link(?MODULE, {Job, RepoMod, QueuePid}, []).
+start_link(Job, Pool, QueuePid) ->
+    gen_server:start_link(?MODULE, {Job, Pool, QueuePid}, []).
 
 -doc "Execute a job synchronously (for drain_queue).".
--spec execute_sync(map(), module(), timeout()) -> ok | {error, term()}.
-execute_sync(Job, RepoMod, Timeout) ->
+-spec execute_sync(map(), atom(), timeout()) -> ok | {snooze, pos_integer()} | {error, term()}.
+execute_sync(Job, Pool, Timeout) ->
     Worker = resolve_worker(Job),
     Args = resolve_args(Job),
     JobId = maps:get(id, Job),
     try
         case apply_with_timeout(Worker, perform, [Args], Timeout) of
             ok ->
-                shigoto_repo:complete_job(RepoMod, JobId),
+                shigoto_repo:complete_job(Pool, JobId),
                 shigoto_telemetry:job_completed(Job),
                 ok;
+            {snooze, Seconds} ->
+                shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                {snooze, Seconds};
             {error, FailReason} ->
-                shigoto_repo:fail_job(RepoMod, JobId, FailReason),
+                shigoto_repo:fail_job(Pool, JobId, FailReason),
                 shigoto_telemetry:job_failed(Job, FailReason),
                 {error, FailReason}
         end
     catch
         Class:CatchReason:_Stack ->
-            shigoto_repo:fail_job(RepoMod, JobId, {Class, CatchReason}),
+            shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
             shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
             {error, {Class, CatchReason}}
     end.
 
 -doc false.
-init({Job, RepoMod, QueuePid}) ->
+init({Job, Pool, QueuePid}) ->
+    JobId = maps:get(id, Job),
+    ets:insert(shigoto_executors, {JobId, self()}),
     gen_server:cast(self(), execute),
-    {ok, #state{job = Job, repo = RepoMod, queue_pid = QueuePid}}.
+    {ok, #state{job = Job, pool = Pool, queue_pid = QueuePid}}.
 
 -doc false.
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 -doc false.
-handle_cast(execute, #state{job = Job, repo = RepoMod, queue_pid = QueuePid} = State) ->
+handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = State) ->
     Worker = resolve_worker(Job),
     Args = resolve_args(Job),
     JobId = maps:get(id, Job),
-    try Worker:perform(Args) of
-        ok ->
-            shigoto_repo:complete_job(RepoMod, JobId),
-            shigoto_telemetry:job_completed(Job),
-            gen_server:cast(QueuePid, {job_finished, JobId}),
-            {stop, normal, State};
-        {error, Reason} ->
-            shigoto_repo:fail_job(RepoMod, JobId, Reason),
-            shigoto_telemetry:job_failed(Job, Reason),
-            gen_server:cast(QueuePid, {job_finished, JobId}),
-            {stop, normal, State}
+    Timeout = resolve_timeout(Worker),
+    try
+        case apply_with_timeout(Worker, perform, [Args], Timeout) of
+            ok ->
+                shigoto_repo:complete_job(Pool, JobId),
+                shigoto_telemetry:job_completed(Job),
+                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
+                {stop, normal, State};
+            {snooze, Seconds} ->
+                shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
+                {stop, normal, State};
+            {error, Reason} ->
+                shigoto_repo:fail_job(Pool, JobId, Reason),
+                shigoto_telemetry:job_failed(Job, Reason),
+                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
+                {stop, normal, State}
+        end
     catch
-        Class:Reason:_Stack ->
-            shigoto_repo:fail_job(RepoMod, JobId, {Class, Reason}),
-            shigoto_telemetry:job_failed(Job, {Class, Reason}),
-            gen_server:cast(QueuePid, {job_finished, JobId}),
+        Class:CatchReason:_Stack ->
+            shigoto_repo:fail_job(Pool, JobId, {Class, CatchReason}),
+            shigoto_telemetry:job_failed(Job, {Class, CatchReason}),
+            gen_server:cast(QueuePid, {job_finished, JobId, self()}),
             {stop, normal, State}
     end;
 handle_cast(_Msg, State) ->
@@ -81,9 +93,23 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
+-doc false.
+terminate(_Reason, #state{job = Job}) ->
+    ets:delete(shigoto_executors, maps:get(id, Job)),
+    ok.
+
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+-define(DEFAULT_TIMEOUT, 300000).
+
+resolve_timeout(Worker) ->
+    _ = code:ensure_loaded(Worker),
+    case erlang:function_exported(Worker, timeout, 0) of
+        true -> Worker:timeout();
+        false -> ?DEFAULT_TIMEOUT
+    end.
 
 resolve_worker(#{worker := Worker}) when is_atom(Worker) ->
     Worker;

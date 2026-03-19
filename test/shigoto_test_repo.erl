@@ -1,19 +1,15 @@
 -module(shigoto_test_repo).
--behaviour(kura_repo).
 
--export([otp_app/0, start/0]).
-
-otp_app() -> shigoto.
+-export([start/0]).
 
 start() ->
-    application:set_env(shigoto, shigoto_test_repo, #{
-        pool => shigoto_test_repo,
-        database => <<"shigoto_test">>,
-        hostname => <<"localhost">>,
+    {ok, _} = pgo:start_pool(shigoto_test_pool, #{
+        host => "localhost",
         port => 5555,
-        username => <<"postgres">>,
-        password => <<"root">>,
+        database => "shigoto_test",
+        user => "postgres",
+        password => "root",
         pool_size => 5
     }),
-    application:set_env(shigoto, repo, shigoto_test_repo),
-    kura_repo_worker:start(?MODULE).
+    application:set_env(shigoto, pool, shigoto_test_pool),
+    ok.

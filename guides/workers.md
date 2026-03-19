@@ -98,13 +98,13 @@ delay = min(attempt^4 + random(0..30), 1800) seconds
 Discarded or cancelled jobs can be manually retried:
 
 ```erlang
-shigoto:retry(my_repo, JobId).
+shigoto:retry(my_app_db, JobId).
 ```
 
 Cancel a pending job:
 
 ```erlang
-shigoto:cancel(my_repo, JobId).
+shigoto:cancel(my_app_db, JobId).
 ```
 
 ## Stale Job Rescue

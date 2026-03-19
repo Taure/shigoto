@@ -28,7 +28,7 @@ Supported syntax per field:
 -doc "Parse a 5-field cron expression binary into a structured map.".
 -spec parse(binary()) -> {ok, cron_expr()} | {error, term()}.
 parse(Bin) when is_binary(Bin) ->
-    Fields = binary:split(Bin, <<" ">>, [global, trim_all]),
+    Fields = binary:split(Bin, ~" ", [global, trim_all]),
     case Fields of
         [Min, Hour, Dom, Mon, Dow] ->
             try
@@ -68,20 +68,20 @@ parse_field(<<"*/", Rest/binary>>, Min, Max) ->
     validate_step(Step, Min, Max),
     expand_step(Min, Max, Step);
 parse_field(Bin, Min, Max) ->
-    Parts = binary:split(Bin, <<",">>, [global]),
+    Parts = binary:split(Bin, ~",", [global]),
     Values = lists:usort(lists:flatmap(fun(P) -> parse_part(P, Min, Max) end, Parts)),
     {values, Values}.
 
 -spec parse_part(binary(), non_neg_integer(), non_neg_integer()) -> [non_neg_integer()].
 parse_part(Bin, Min, Max) ->
-    case binary:split(Bin, <<"/">>) of
+    case binary:split(Bin, ~"/") of
         [Range, StepBin] ->
             Step = to_int(StepBin),
             validate_step(Step, Min, Max),
             {Lo, Hi} = parse_range(Range, Min, Max),
             expand_step_range(Lo, Hi, Step);
         [_] ->
-            case binary:split(Bin, <<"-">>) of
+            case binary:split(Bin, ~"-") of
                 [LoBin, HiBin] ->
                     Lo = clamp(to_int(LoBin), Min, Max),
                     Hi = clamp(to_int(HiBin), Min, Max),
@@ -96,7 +96,7 @@ parse_part(Bin, Min, Max) ->
 parse_range(<<"*">>, Min, Max) ->
     {Min, Max};
 parse_range(Bin, Min, Max) ->
-    case binary:split(Bin, <<"-">>) of
+    case binary:split(Bin, ~"-") of
         [LoBin, HiBin] ->
             {clamp(to_int(LoBin), Min, Max), clamp(to_int(HiBin), Min, Max)};
         [ValBin] ->

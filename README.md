@@ -6,7 +6,7 @@ Reliable job queuing with `FOR UPDATE SKIP LOCKED` for safe multi-node operation
 
 ## Features
 
-- **PostgreSQL-backed** — Jobs stored in PostgreSQL via Kura. No Redis or external broker needed.
+- **PostgreSQL-backed** — Jobs stored in PostgreSQL via pgo. No Redis or external broker needed.
 - **Multi-node safe** — `FOR UPDATE SKIP LOCKED` ensures each job is claimed by exactly one node.
 - **Exponential backoff** — Failed jobs retry with `min(attempt^4 + jitter, 1800)` second delays.
 - **Cron scheduling** — Built-in cron expression parser supporting standard 5-field syntax.
@@ -30,7 +30,7 @@ Configure in `sys.config`:
 
 ```erlang
 {shigoto, [
-    {repo, my_repo},
+    {pool, my_app_db},
     {queues, [{<<"default">>, 10}, {<<"emails">>, 5}]},
     {poll_interval, 5000}
 ]}
@@ -39,7 +39,7 @@ Configure in `sys.config`:
 Run the migration:
 
 ```erlang
-shigoto_migration:up(my_repo).
+shigoto_migration:up(my_app_db).
 ```
 
 Define a worker:
@@ -92,7 +92,7 @@ Configure recurring jobs in `sys.config`:
 
 ```erlang
 {shigoto, [
-    {repo, my_repo},
+    {pool, my_app_db},
     {cron, [
         {<<"daily_cleanup">>, <<"0 3 * * *">>, my_cleanup_worker, #{}},
         {<<"hourly_stats">>,  <<"0 * * * *">>, my_stats_worker, #{}}
@@ -130,7 +130,7 @@ shigoto_sup (one_for_one)
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `repo` | *required* | Kura repo module |
+| `pool` | *required* | pgo pool name |
 | `queues` | `[{<<"default">>, 10}]` | Queue names and concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `cron` | `[]` | List of `{Name, Schedule, Worker, Args}` tuples |

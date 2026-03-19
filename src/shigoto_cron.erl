@@ -50,9 +50,15 @@ check_cron_entries() ->
                         #{
                             worker => Worker,
                             args => Args,
-                            queue => <<"default">>
+                            queue => ~"default"
                         },
-                        #{}
+                        #{
+                            unique => #{
+                                keys => [worker, args],
+                                period => 60,
+                                states => [available, executing]
+                            }
+                        }
                     );
                 false ->
                     ok

@@ -16,7 +16,7 @@ Configure Shigoto in your `sys.config`:
 
 ```erlang
 {shigoto, [
-    {repo, my_repo},
+    {pool, my_app_db},
     {queues, [{<<"default">>, 10}, {<<"mailers">>, 5}]},
     {poll_interval, 5000},
     {prune_after_days, 14},
@@ -26,7 +26,7 @@ Configure Shigoto in your `sys.config`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `repo` | *required* | Your Kura repo module |
+| `pool` | *required* | Your pgo pool name |
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are pruned |
@@ -37,10 +37,10 @@ Configure Shigoto in your `sys.config`:
 Create the `shigoto_jobs` and `shigoto_cron` tables:
 
 ```erlang
-shigoto_migration:up(my_repo).
+shigoto_migration:up(my_app_db).
 ```
 
-This creates the necessary tables and indexes. Call `shigoto_migration:down(my_repo)`
+This creates the necessary tables and indexes. Call `shigoto_migration:down(my_app_db)`
 to drop them.
 
 ## Create a Worker

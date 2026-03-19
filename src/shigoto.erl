@@ -33,29 +33,41 @@ shigoto:insert(#{
     cancel/2,
     retry/2,
     drain_queue/1,
-    drain_queue/2
+    drain_queue/2,
+    pause_queue/1,
+    resume_queue/1
 ]).
 
 -doc "Insert a job with default options.".
--spec insert(map()) -> {ok, map()} | {error, term()}.
+-spec insert(map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams) ->
     insert(JobParams, #{}).
 
--doc "Insert a job with options. Params: worker, args, queue, priority, scheduled_at, max_attempts.".
--spec insert(map(), map()) -> {ok, map()} | {error, term()}.
+-doc "Insert a job with options. Params: worker, args, queue, priority, scheduled_at, max_attempts, unique.".
+-spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
-    RepoMod = shigoto_config:repo(),
-    shigoto_repo:insert_job(RepoMod, JobParams, Opts).
+    Pool = shigoto_config:pool(),
+    shigoto_repo:insert_job(Pool, JobParams, Opts).
 
--doc "Cancel a job by ID.".
--spec cancel(module(), integer()) -> ok | {error, term()}.
-cancel(RepoMod, JobId) ->
-    shigoto_repo:cancel_job(RepoMod, JobId).
+-doc "Cancel a job by ID. Also stops executing jobs on this node.".
+-spec cancel(atom(), integer()) -> ok | {error, term()}.
+cancel(Pool, JobId) ->
+    %% Kill the executor if running on this node
+    case ets:whereis(shigoto_executors) of
+        undefined ->
+            ok;
+        _ ->
+            case ets:lookup(shigoto_executors, JobId) of
+                [{_, Pid}] -> exit(Pid, shutdown);
+                [] -> ok
+            end
+    end,
+    shigoto_repo:cancel_job(Pool, JobId).
 
 -doc "Retry a discarded or cancelled job.".
--spec retry(module(), integer()) -> ok | {error, term()}.
-retry(RepoMod, JobId) ->
-    shigoto_repo:retry_job(RepoMod, JobId).
+-spec retry(atom(), integer()) -> ok | {error, term()}.
+retry(Pool, JobId) ->
+    shigoto_repo:retry_job(Pool, JobId).
 
 -doc "Drain a queue synchronously. Useful for testing.".
 -spec drain_queue(binary()) -> ok.
@@ -66,20 +78,37 @@ drain_queue(Queue) ->
 -spec drain_queue(binary(), map()) -> ok.
 drain_queue(Queue, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
-    RepoMod = shigoto_config:repo(),
-    drain_loop(RepoMod, Queue, Timeout).
+    Pool = shigoto_config:pool(),
+    drain_loop(Pool, Queue, Timeout).
+
+-doc "Pause a queue by name — stops claiming new jobs.".
+-spec pause_queue(binary()) -> ok | {error, not_found}.
+pause_queue(Queue) ->
+    with_queue_pid(Queue, fun shigoto_queue:pause/1).
+
+-doc "Resume a paused queue by name.".
+-spec resume_queue(binary()) -> ok | {error, not_found}.
+resume_queue(Queue) ->
+    with_queue_pid(Queue, fun shigoto_queue:resume/1).
 
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
 
-drain_loop(RepoMod, Queue, Timeout) ->
-    case shigoto_repo:claim_jobs(RepoMod, Queue, 1) of
+with_queue_pid(Queue, Fun) ->
+    Children = supervisor:which_children(shigoto_queue_sup),
+    case lists:keyfind({shigoto_queue, Queue}, 1, Children) of
+        {_, Pid, worker, _} when is_pid(Pid) -> Fun(Pid);
+        _ -> {error, not_found}
+    end.
+
+drain_loop(Pool, Queue, Timeout) ->
+    case shigoto_repo:claim_jobs(Pool, Queue, 1) of
         {ok, []} ->
             ok;
         {ok, [Job]} ->
-            shigoto_executor:execute_sync(Job, RepoMod, Timeout),
-            drain_loop(RepoMod, Queue, Timeout);
+            shigoto_executor:execute_sync(Job, Pool, Timeout),
+            drain_loop(Pool, Queue, Timeout);
         {error, _} ->
             ok
     end.
