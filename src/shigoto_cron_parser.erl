@@ -65,7 +65,7 @@ parse_field(<<"*">>, _Min, _Max) ->
     star;
 parse_field(<<"*/", Rest/binary>>, Min, Max) ->
     Step = to_int(Rest),
-    validate_step(Step, Min, Max),
+    validate_step(Step),
     expand_step(Min, Max, Step);
 parse_field(Bin, Min, Max) ->
     Parts = binary:split(Bin, ~",", [global]),
@@ -77,7 +77,7 @@ parse_part(Bin, Min, Max) ->
     case binary:split(Bin, ~"/") of
         [Range, StepBin] ->
             Step = to_int(StepBin),
-            validate_step(Step, Min, Max),
+            validate_step(Step),
             {Lo, Hi} = parse_range(Range, Min, Max),
             expand_step_range(Lo, Hi, Step);
         [_] ->
@@ -132,10 +132,10 @@ clamp(V, Min, _Max) when V < Min -> Min;
 clamp(V, _Min, Max) when V > Max -> Max;
 clamp(V, _Min, _Max) -> V.
 
--spec validate_step(integer(), non_neg_integer(), non_neg_integer()) -> ok.
-validate_step(Step, _Min, _Max) when Step < 1 ->
+-spec validate_step(integer()) -> ok.
+validate_step(Step) when Step < 1 ->
     throw({parse_error, {bad_step, Step}});
-validate_step(_Step, _Min, _Max) ->
+validate_step(_Step) ->
     ok.
 
 %% Returns 0=Sunday, 1=Monday, ..., 6=Saturday
