@@ -1,8 +1,8 @@
 -module(shigoto_queue).
--moduledoc ~"""
+-moduledoc """
 Per-queue gen_server that polls for available jobs and dispatches
-them to the executor supervisor. Supports graceful shutdown by
-waiting for in-flight jobs to complete.
+them to the executor supervisor. Supports graceful shutdown, queue
+weights, and pause/resume.
 """.
 -behaviour(gen_server).
 
@@ -16,7 +16,9 @@ waiting for in-flight jobs to complete.
     pool :: atom(),
     paused :: boolean(),
     shutting_down :: boolean(),
-    executors :: #{pid() => reference()}
+    executors :: #{pid() => reference()},
+    weight :: pos_integer(),
+    weight_counter :: non_neg_integer()
 }).
 
 -doc false.
@@ -27,6 +29,8 @@ start_link(Queue, Concurrency) ->
 init({Queue, Concurrency}) ->
     process_flag(trap_exit, true),
     Pool = shigoto_config:pool(),
+    Weights = shigoto_config:queue_weights(),
+    Weight = maps:get(Queue, Weights, 1),
     schedule_poll(),
     schedule_rescue(),
     {ok, #state{
@@ -36,7 +40,9 @@ init({Queue, Concurrency}) ->
         pool = Pool,
         paused = false,
         shutting_down = false,
-        executors = #{}
+        executors = #{},
+        weight = Weight,
+        weight_counter = 0
     }}.
 
 -doc "Pause a queue — stops claiming new jobs but lets in-flight jobs finish.".
@@ -79,41 +85,60 @@ handle_info(poll, #state{paused = true} = State) ->
     {noreply, State};
 handle_info(
     poll,
-    #state{queue = Queue, concurrency = Conc, active = Active, pool = Pool, executors = Execs} =
-        State
+    #state{
+        queue = Queue,
+        concurrency = Conc,
+        active = Active,
+        pool = Pool,
+        executors = Execs,
+        weight = Weight,
+        weight_counter = Counter
+    } = State
 ) ->
-    Available = Conc - Active,
-    {NewActive, NewExecs} =
-        case Available > 0 of
-            true ->
-                case shigoto_repo:claim_jobs(Pool, Queue, Available) of
-                    {ok, Jobs} ->
-                        {Started, Execs1} = lists:foldl(
-                            fun(Job, {Count, AccExecs}) ->
-                                case shigoto_executor_sup:start_executor(Job, Pool, self()) of
-                                    {ok, Pid} ->
-                                        Ref = erlang:monitor(process, Pid),
-                                        {Count + 1, AccExecs#{Pid => Ref}};
-                                    {error, _} ->
-                                        {Count, AccExecs}
-                                end
-                            end,
-                            {0, Execs},
-                            Jobs
-                        ),
-                        {Active + Started, Execs1};
-                    {error, _} ->
+    NewCounter = Counter + 1,
+    case should_poll(Weight, NewCounter) of
+        false ->
+            schedule_poll(),
+            {noreply, State#state{weight_counter = NewCounter}};
+        true ->
+            Available = Conc - Active,
+            {NewActive, NewExecs} =
+                case Available > 0 of
+                    true ->
+                        case shigoto_repo:claim_jobs(Pool, Queue, Available) of
+                            {ok, Jobs} ->
+                                {Started, Execs1} = lists:foldl(
+                                    fun(Job, {Count, AccExecs}) ->
+                                        case
+                                            shigoto_executor_sup:start_executor(Job, Pool, self())
+                                        of
+                                            {ok, Pid} ->
+                                                Ref = erlang:monitor(process, Pid),
+                                                {Count + 1, AccExecs#{Pid => Ref}};
+                                            {error, _} ->
+                                                {Count, AccExecs}
+                                        end
+                                    end,
+                                    {0, Execs},
+                                    Jobs
+                                ),
+                                {Active + Started, Execs1};
+                            {error, _} ->
+                                {Active, Execs}
+                        end;
+                    false ->
                         {Active, Execs}
-                end;
-            false ->
-                {Active, Execs}
-        end,
-    schedule_poll(),
-    {noreply, State#state{active = NewActive, executors = NewExecs}};
+                end,
+            schedule_poll(),
+            {noreply, State#state{
+                active = NewActive, executors = NewExecs, weight_counter = NewCounter
+            }}
+    end;
 handle_info(rescue, #state{shutting_down = true} = State) ->
     {noreply, State};
 handle_info(rescue, #state{pool = Pool} = State) ->
-    _ = shigoto_repo:rescue_stale_jobs(Pool, 300),
+    StaleSeconds = stale_threshold(),
+    _ = shigoto_repo:rescue_stale_jobs(Pool, StaleSeconds),
     schedule_rescue(),
     {noreply, State};
 handle_info(
@@ -144,6 +169,15 @@ schedule_poll() ->
 
 schedule_rescue() ->
     erlang:send_after(60000, self(), rescue).
+
+stale_threshold() ->
+    HeartbeatInterval = shigoto_config:heartbeat_interval(),
+    HeartbeatInterval * 2 div 1000.
+
+should_poll(1, _Counter) ->
+    true;
+should_poll(Weight, Counter) ->
+    Counter rem Weight =:= 0.
 
 wait_for_executors(Execs, _Timeout) when map_size(Execs) =:= 0 ->
     ok;

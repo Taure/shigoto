@@ -1,5 +1,5 @@
 -module(shigoto_config).
--moduledoc ~"""
+-moduledoc """
 Configuration access for Shigoto. Reads from application env.
 """.
 
@@ -10,7 +10,12 @@ Configuration access for Shigoto. Reads from application env.
     cron_entries/0,
     prune_after_days/0,
     shutdown_timeout/0,
-    notifier_config/0
+    notifier_config/0,
+    middleware/0,
+    encryption_key/0,
+    heartbeat_interval/0,
+    load_shedding/0,
+    queue_weights/0
 ]).
 
 -doc "The pgo pool name for job storage.".
@@ -22,7 +27,7 @@ pool() ->
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
 -spec queues() -> [{binary(), pos_integer()}].
 queues() ->
-    application:get_env(shigoto, queues, [{~"default", 10}]).
+    application:get_env(shigoto, queues, [{<<"default">>, 10}]).
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
@@ -48,3 +53,28 @@ notifier_config() ->
 -spec shutdown_timeout() -> pos_integer().
 shutdown_timeout() ->
     application:get_env(shigoto, shutdown_timeout, 15000).
+
+-doc "Global middleware chain applied to all jobs. Default: [].".
+-spec middleware() -> [shigoto_middleware:middleware()].
+middleware() ->
+    application:get_env(shigoto, middleware, []).
+
+-doc "AES-256-GCM encryption key for job args/meta. Returns `undefined` if not configured.".
+-spec encryption_key() -> binary() | undefined.
+encryption_key() ->
+    application:get_env(shigoto, encryption_key, undefined).
+
+-doc "Heartbeat interval in milliseconds for executing jobs. Default: 30000.".
+-spec heartbeat_interval() -> pos_integer().
+heartbeat_interval() ->
+    application:get_env(shigoto, heartbeat_interval, 30000).
+
+-doc "Load shedding config. Default: undefined (disabled).".
+-spec load_shedding() -> map() | undefined.
+load_shedding() ->
+    application:get_env(shigoto, load_shedding, undefined).
+
+-doc "Queue weight config. Map of queue name to weight. Default: #{} (equal weight).".
+-spec queue_weights() -> #{binary() => pos_integer()}.
+queue_weights() ->
+    application:get_env(shigoto, queue_weights, #{}).
