@@ -116,7 +116,7 @@ release_bulkhead(Worker) ->
 
 -doc "Check circuit breaker for a worker. Returns ok or {snooze, 10}.".
 -spec check_circuit(module(), map()) -> ok | {snooze, pos_integer()}.
-check_circuit(Worker, _Job) ->
+check_circuit(Worker, _Job = #{}) ->
     case is_seki_running() of
         false ->
             ok;
@@ -146,7 +146,7 @@ check_load(Job) ->
 
 -doc "Report load shedder completion.".
 -spec complete_load(map(), non_neg_integer()) -> ok.
-complete_load(_Job, DurationMs) ->
+complete_load(_Job = #{}, DurationMs) ->
     case shigoto_config:load_shedding() of
         undefined ->
             ok;
