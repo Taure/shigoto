@@ -62,7 +62,7 @@ ensure_worker_primitives(Worker) ->
 
 -doc "Check per-worker rate limit. Returns ok or {snooze, Seconds}.".
 -spec check_rate_limit(module(), map()) -> ok | {snooze, pos_integer()}.
-check_rate_limit(Worker, _Job) ->
+check_rate_limit(Worker, _Job = #{}) ->
     case is_seki_running() of
         false ->
             ok;
@@ -82,7 +82,7 @@ check_rate_limit(Worker, _Job) ->
 
 -doc "Check per-worker bulkhead. Returns ok or {snooze, 5}.".
 -spec check_bulkhead(module(), map()) -> ok | {snooze, pos_integer()}.
-check_bulkhead(Worker, _Job) ->
+check_bulkhead(Worker, _Job = #{}) ->
     case is_seki_running() of
         false ->
             ok;

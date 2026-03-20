@@ -88,7 +88,7 @@ catch_up_missed() ->
             ok
     end.
 
-catch_up_entry(_Name, Schedule, Worker, Args, DbEntries, Now) ->
+catch_up_entry(_Name = <<_/binary>>, Schedule, Worker, Args, DbEntries, Now) ->
     case shigoto_cron_parser:parse(Schedule) of
         {ok, Expr} ->
             LastRun = find_last_run(Worker, DbEntries),
