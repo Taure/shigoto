@@ -71,6 +71,7 @@ all() ->
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(pgo),
     ok = shigoto_test_repo:start(),
+    ok = shigoto_migration:up(shigoto_test_pool),
     Config.
 
 end_per_suite(_Config) ->

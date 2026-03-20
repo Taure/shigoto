@@ -3,6 +3,10 @@
  {<<"opentelemetry_api">>,{pkg,<<"opentelemetry_api">>,<<"1.5.0">>},1},
  {<<"pg_types">>,{pkg,<<"pg_types">>,<<"0.6.0">>},1},
  {<<"pgo">>,{pkg,<<"pgo">>,<<"0.20.0">>},0},
+ {<<"seki">>,
+  {git,"https://github.com/Taure/seki.git",
+       {ref,"80649f9955c9c319ab2ca83dfb11ba3103ca7949"}},
+  0},
  {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.1">>},0}]}.
 [
 {pkg_hash,[

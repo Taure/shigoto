@@ -1,16 +1,16 @@
 # Cron Scheduling
 
 Shigoto includes a built-in cron scheduler that checks configured entries every
-minute and inserts jobs for matching schedules.
+minute and inserts jobs for matching schedules. On startup, it catches up on
+any intervals missed while the node was down (up to 60 missed minutes).
 
 ## Configuration
 
-Add cron entries to your `sys.config`:
+### Erlang (sys.config)
 
 ```erlang
 {shigoto, [
     {pool, my_app_db},
-    {queues, [{<<"default">>, 10}]},
     {cron, [
         {<<"daily_cleanup">>, <<"0 2 * * *">>, cleanup_worker, #{<<"days">> => 30}},
         {<<"hourly_sync">>, <<"0 * * * *">>, sync_worker, #{}},
@@ -19,18 +19,26 @@ Add cron entries to your `sys.config`:
 ]}
 ```
 
-Each cron entry is a 4-tuple:
+### Elixir (config.exs)
 
-```erlang
-{Name, Schedule, Worker, Args}
+```elixir
+config :shigoto,
+  pool: :my_app_db,
+  cron: [
+    {"daily_cleanup", "0 2 * * *", :cleanup_worker, %{"days" => 30}},
+    {"hourly_sync", "0 * * * *", :sync_worker, %{}},
+    {"weekday_report", "30 9 * * 1-5", ReportWorker, %{}}
+  ]
 ```
+
+Each cron entry is a 4-tuple: `{Name, Schedule, Worker, Args}`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Name` | `binary()` | Unique identifier for the cron entry |
-| `Schedule` | `binary()` | 5-field cron expression |
-| `Worker` | `module()` | Worker module implementing `shigoto_worker` |
-| `Args` | `map()` | Args map passed to the worker |
+| Name | binary | Unique identifier |
+| Schedule | binary | 5-field cron expression |
+| Worker | module | Worker implementing `shigoto_worker` |
+| Args | map | Args map passed to `perform/1` |
 
 ## Cron Expression Syntax
 
@@ -46,8 +54,6 @@ Standard 5-field format: `minute hour day-of-month month day-of-week`
 * * * * *
 ```
 
-### Supported Syntax
-
 | Syntax | Description | Example |
 |--------|-------------|---------|
 | `*` | Any value | `* * * * *` (every minute) |
@@ -57,39 +63,16 @@ Standard 5-field format: `minute hour day-of-month month day-of-week`
 | `N-M/S` | Step within range | `0-30/10 * * * *` (minutes 0, 10, 20, 30) |
 | `N,M,O` | List | `0,15,30,45 * * * *` (specific minutes) |
 
-## Examples
+## Missed Cron Catch-Up
 
-```erlang
-%% Every minute
-<<"* * * * *">>
-
-%% Every day at midnight
-<<"0 0 * * *">>
-
-%% Every hour at minute 0
-<<"0 * * * *">>
-
-%% Every 15 minutes
-<<"*/15 * * * *">>
-
-%% Weekdays at 9:30 AM
-<<"30 9 * * 1-5">>
-
-%% First day of every month at 3:00 AM
-<<"0 3 1 * *">>
-
-%% Every Monday and Friday at 6:00 PM
-<<"0 18 * * 1,5">>
-
-%% Every 5 minutes during business hours on weekdays
-<<"*/5 9-17 * * 1-5">>
-```
+When the cron scheduler starts, it checks the `last_scheduled_at` for each
+entry in the database. If any intervals were missed (e.g., the node was down),
+it inserts jobs for up to 60 missed minutes. Jobs are deduplicated via unique
+constraints to prevent double-execution.
 
 ## How It Works
 
-The `shigoto_cron` gen_server checks all configured cron entries once per
-minute. When an entry's schedule matches the current UTC time, a job is
-inserted into the `default` queue with the configured worker and args.
-
-Jobs created by cron entries are regular Shigoto jobs -- they follow the same
-retry, backoff, and pruning rules as manually inserted jobs.
+1. `shigoto_cron` gen_server checks all entries once per minute
+2. Matching entries trigger a job insert into the `default` queue
+3. Jobs use a 60-second unique constraint to prevent duplicates
+4. Cron jobs follow the same retry, backoff, and pruning rules as regular jobs
