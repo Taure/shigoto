@@ -225,24 +225,28 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
             "RETURNING *"
         >>,
     case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds]) of
-        #{rows := [Updated]} ->
+        #{rows := [#{state := <<"discarded">>} = Updated]} ->
+            _ = resolve_dependencies(Pool, JobId),
             _ = maybe_on_discard(Job, Updated),
             _ = maybe_batch_discard(Pool, Updated),
+            ok;
+        #{rows := [_Updated]} ->
             ok;
         {error, _} = Err ->
             Err
     end.
 
--doc "Mark a job as discarded.".
+-doc "Mark a job as discarded. Resolves dependencies so dependent jobs aren't stuck.".
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
     SQL = <<"UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now() WHERE id = $1">>,
+    _ = resolve_dependencies(Pool, JobId),
     case query(Pool, SQL, [JobId]) of
         #{command := update} -> ok;
         {error, _} = Err -> Err
     end.
 
--doc "Cancel a job.".
+-doc "Cancel a job. Resolves dependencies so dependent jobs aren't stuck.".
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
     SQL =
@@ -250,6 +254,7 @@ cancel_job(Pool, JobId) ->
             "UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() "
             "WHERE id = $1 AND state IN ('available', 'retryable', 'executing')"
         >>,
+    _ = resolve_dependencies(Pool, JobId),
     case query(Pool, SQL, [JobId]) of
         #{command := update} -> ok;
         {error, _} = Err -> Err
