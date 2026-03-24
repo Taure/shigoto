@@ -6,7 +6,7 @@ start() ->
     case
         pgo:start_pool(shigoto_test_pool, #{
             host => "localhost",
-            port => 5555,
+            port => 5556,
             database => "shigoto_test",
             user => "postgres",
             password => "root",
