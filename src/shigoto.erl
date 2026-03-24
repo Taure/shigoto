@@ -76,7 +76,13 @@ insert(JobParams) ->
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
     Pool = shigoto_config:pool(),
-    shigoto_repo:insert_job(Pool, JobParams, Opts).
+    case shigoto_repo:insert_job(Pool, JobParams, Opts) of
+        {ok, Job} ->
+            shigoto_telemetry:job_inserted(Job),
+            {ok, Job};
+        Other ->
+            Other
+    end.
 
 -doc "Bulk insert multiple jobs with default options.".
 -spec insert_all([map()]) -> {ok, [map()]} | {error, term()}.
@@ -101,7 +107,14 @@ cancel(Pool, JobId) ->
                 [] -> ok
             end
     end,
-    shigoto_repo:cancel_job(Pool, JobId).
+    Result = shigoto_repo:cancel_job(Pool, JobId),
+    case Result of
+        ok ->
+            shigoto_telemetry:job_cancelled(#{id => JobId, worker => unknown, queue => unknown});
+        _ ->
+            ok
+    end,
+    Result.
 
 -doc "Cancel jobs matching a pattern. Filters: worker, queue, tags, args.".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
@@ -151,7 +164,9 @@ get_batch(BatchId) ->
 -spec report_progress(integer(), 0..100) -> ok | {error, term()}.
 report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
     Pool = shigoto_config:pool(),
-    shigoto_repo:update_progress(Pool, JobId, Progress).
+    Result = shigoto_repo:update_progress(Pool, JobId, Progress),
+    shigoto_telemetry:job_progress(#{id => JobId, worker => unknown, queue => unknown}, Progress),
+    Result.
 
 -doc "Get a job by ID.".
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.

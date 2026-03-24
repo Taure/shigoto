@@ -15,7 +15,8 @@ Configuration access for Shigoto. Reads from application env.
     encryption_key/0,
     heartbeat_interval/0,
     load_shedding/0,
-    queue_weights/0
+    queue_weights/0,
+    fair_queues/0
 ]).
 
 -doc "The pgo pool name for job storage.".
@@ -78,3 +79,8 @@ load_shedding() ->
 -spec queue_weights() -> #{binary() => pos_integer()}.
 queue_weights() ->
     application:get_env(shigoto, queue_weights, #{}).
+
+-doc "Queues that use fair partition-based claiming. Default: [] (all use standard claiming).".
+-spec fair_queues() -> [binary()].
+fair_queues() ->
+    application:get_env(shigoto, fair_queues, []).

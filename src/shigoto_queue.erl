@@ -18,7 +18,8 @@ weights, and pause/resume.
     shutting_down :: boolean(),
     executors :: #{pid() => reference()},
     weight :: pos_integer(),
-    weight_counter :: non_neg_integer()
+    weight_counter :: non_neg_integer(),
+    fair :: boolean()
 }).
 
 -doc false.
@@ -31,6 +32,8 @@ init({Queue, Concurrency}) ->
     Pool = shigoto_config:pool(),
     Weights = shigoto_config:queue_weights(),
     Weight = maps:get(Queue, Weights, 1),
+    FairQueues = shigoto_config:fair_queues(),
+    Fair = lists:member(Queue, FairQueues),
     schedule_poll(),
     schedule_rescue(),
     {ok, #state{
@@ -42,7 +45,8 @@ init({Queue, Concurrency}) ->
         shutting_down = false,
         executors = #{},
         weight = Weight,
-        weight_counter = 0
+        weight_counter = 0,
+        fair = Fair
     }}.
 
 -doc "Pause a queue — stops claiming new jobs but lets in-flight jobs finish.".
@@ -92,7 +96,8 @@ handle_info(
         pool = Pool,
         executors = Execs,
         weight = Weight,
-        weight_counter = Counter
+        weight_counter = Counter,
+        fair = Fair
     } = State
 ) ->
     NewCounter = Counter + 1,
@@ -105,7 +110,7 @@ handle_info(
             {NewActive, NewExecs} =
                 case Available > 0 of
                     true ->
-                        case shigoto_repo:claim_jobs(Pool, Queue, Available) of
+                        case claim(Pool, Queue, Available, Fair) of
                             {ok, Jobs} ->
                                 {Started, Execs1} = lists:foldl(
                                     fun(Job, {Count, AccExecs}) ->
@@ -163,6 +168,11 @@ terminate(_Reason, #state{executors = Execs}) ->
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+claim(Pool, Queue, Limit, true) ->
+    shigoto_repo:claim_jobs_fair(Pool, Queue, Limit);
+claim(Pool, Queue, Limit, false) ->
+    shigoto_repo:claim_jobs(Pool, Queue, Limit).
 
 schedule_poll() ->
     erlang:send_after(shigoto_config:poll_interval(), self(), poll).

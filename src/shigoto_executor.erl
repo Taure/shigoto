@@ -35,12 +35,14 @@ execute_sync(Job, Pool, Timeout) ->
                 ok;
             {snooze, Seconds} ->
                 _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                _ = shigoto_telemetry:job_snoozed(Job, <<"snooze">>),
                 {snooze, Seconds};
             {error, FailReason} ->
                 Duration = erlang:monotonic_time(native) - T0,
                 BackoffSecs = compute_backoff(Worker, Job, FailReason),
                 _ = shigoto_repo:fail_job(Pool, Job, FailReason, BackoffSecs),
                 _ = shigoto_telemetry:job_failed(Job, FailReason, Duration),
+                _ = maybe_emit_discarded(Job),
                 {error, FailReason}
         end
     catch
@@ -50,6 +52,7 @@ execute_sync(Job, Pool, Timeout) ->
             BackoffSecs2 = compute_backoff(Worker, Job, Err),
             _ = shigoto_repo:fail_job(Pool, Job, Err, BackoffSecs2),
             _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}, Duration2),
+            _ = maybe_emit_discarded(Job),
             {error, {Class, CatchReason}}
     after
         clear_logger_metadata()
@@ -88,6 +91,7 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
                 {stop, normal, State};
             {snooze, Seconds} ->
                 _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
+                _ = shigoto_telemetry:job_snoozed(Job, <<"snooze">>),
                 gen_server:cast(QueuePid, {job_finished, JobId, self()}),
                 {stop, normal, State};
             {error, Reason} ->
@@ -95,6 +99,7 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
                 BackoffSecs = compute_backoff(Worker, Job, Reason),
                 _ = shigoto_repo:fail_job(Pool, Job, Reason, BackoffSecs),
                 _ = shigoto_telemetry:job_failed(Job, Reason, Duration),
+                _ = maybe_emit_discarded(Job),
                 _ = shigoto_resilience:complete_load(
                     Job, erlang:convert_time_unit(Duration, native, millisecond)
                 ),
@@ -109,6 +114,7 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
             BackoffSecs2 = compute_backoff(Worker, Job, Err),
             _ = shigoto_repo:fail_job(Pool, Job, Err, BackoffSecs2),
             _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}, Duration2),
+            _ = maybe_emit_discarded(Job),
             _ = shigoto_resilience:complete_load(
                 Job, erlang:convert_time_unit(Duration2, native, millisecond)
             ),
@@ -213,6 +219,13 @@ default_backoff(Attempt) ->
 %%----------------------------------------------------------------------
 %% Internal: resolution
 %%----------------------------------------------------------------------
+
+maybe_emit_discarded(#{attempt := Attempt, max_attempts := MaxAttempts} = Job) when
+    Attempt >= MaxAttempts
+->
+    shigoto_telemetry:job_discarded(Job);
+maybe_emit_discarded(_) ->
+    ok.
 
 resolve_timeout(Worker) ->
     _ = code:ensure_loaded(Worker),
