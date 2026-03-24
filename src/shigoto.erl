@@ -93,7 +93,13 @@ insert_all(JobParamsList) ->
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->
     Pool = shigoto_config:pool(),
-    shigoto_repo:insert_all(Pool, JobParamsList, Opts).
+    case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
+        {ok, Jobs} ->
+            lists:foreach(fun shigoto_telemetry:job_inserted/1, Jobs),
+            {ok, Jobs};
+        Other ->
+            Other
+    end.
 
 -doc "Cancel a job by ID. Also stops executing jobs on this node.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.

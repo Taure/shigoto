@@ -66,6 +66,7 @@ config :shigoto,
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs |
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |
+| `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
 
 ## Run the Migration
 
@@ -162,6 +163,29 @@ shigoto:insert_all([
   %{worker: MyWorker, args: %{"id" => 2}},
   %{worker: MyWorker, args: %{"id" => 3}}
 ])
+```
+
+## Transactional Enqueue
+
+If shigoto uses the same pgo pool as your application, job inserts participate in
+your database transactions. The job is only enqueued if the transaction commits:
+
+```erlang
+pgo:transaction(fun() ->
+    pgo:query(~"INSERT INTO users (name, email) VALUES ($1, $2)", [Name, Email]),
+    shigoto:insert(#{worker => welcome_email_worker, args => #{<<"email">> => Email}})
+end).
+```
+
+If the transaction rolls back (e.g. a unique constraint violation on the user),
+the job is never inserted. No "user created but email lost" or "email sent but
+user creation failed" bugs.
+
+This works with Kura too — just configure shigoto to use the same pool:
+
+```erlang
+{pgo, [{pools, [{default, #{...}}]}]},
+{shigoto, [{pool, default}]}
 ```
 
 ## Testing with drain_queue

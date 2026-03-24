@@ -31,7 +31,8 @@
     test_depends_on_resolved_on_complete/1,
     test_depends_on_resolved_on_discard/1,
     test_depends_on_resolved_on_cancel/1,
-    test_depends_on_chain/1
+    test_depends_on_chain/1,
+    test_on_discard_callback/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -58,7 +59,8 @@ all() ->
         test_depends_on_resolved_on_complete,
         test_depends_on_resolved_on_discard,
         test_depends_on_resolved_on_cancel,
-        test_depends_on_chain
+        test_depends_on_chain,
+        test_on_discard_callback
     ].
 
 init_per_suite(Config) ->
@@ -526,6 +528,36 @@ test_depends_on_chain(_Config) ->
     ok = shigoto_repo:complete_job(?POOL, BId),
     {ok, Claimed3} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed3)).
+
+%%----------------------------------------------------------------------
+%% on_discard callback test
+%%----------------------------------------------------------------------
+
+test_on_discard_callback(_Config) ->
+    %% Register self so the discard worker can find us
+    register(shigoto_discard_test, self()),
+    {ok, Job} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_discard_worker, args => #{<<"key">> => <<"value">>}},
+        #{}
+    ),
+    JobId = maps:get(id, Job),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 1),
+    ?assertEqual(JobId, maps:get(id, Claimed)),
+    _ = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+    Result =
+        receive
+            {discarded, Args} ->
+                ?assertEqual(<<"value">>, maps:get(<<"key">>, Args)),
+                ok
+        after 2000 ->
+            {error, on_discard_not_called}
+        end,
+    unregister(shigoto_discard_test),
+    case Result of
+        ok -> ok;
+        {error, Reason} -> ct:fail(Reason)
+    end.
 
 %%----------------------------------------------------------------------
 %% Helpers
