@@ -151,13 +151,18 @@ run_with_resilience(Job, Worker, Args, Timeout) ->
                 {snooze, _} = Snooze ->
                     Snooze;
                 ok ->
-                    case shigoto_resilience:check_bulkhead(Worker, Job) of
+                    case shigoto_resilience:check_global_concurrency(Worker, Job) of
                         {snooze, _} = Snooze ->
                             Snooze;
                         ok ->
-                            case shigoto_resilience:check_circuit(Worker, Job) of
-                                {snooze, _} = Snooze -> Snooze;
-                                ok -> run_middleware_chain(Job, Worker, Args, Timeout)
+                            case shigoto_resilience:check_bulkhead(Worker, Job) of
+                                {snooze, _} = Snooze ->
+                                    Snooze;
+                                ok ->
+                                    case shigoto_resilience:check_circuit(Worker, Job) of
+                                        {snooze, _} = Snooze -> Snooze;
+                                        ok -> run_middleware_chain(Job, Worker, Args, Timeout)
+                                    end
                             end
                     end
             end

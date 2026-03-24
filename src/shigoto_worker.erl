@@ -18,7 +18,8 @@ Workers can declare defaults via optional callbacks:
 - `tags/0` — Default tags for this worker
 - `backoff/2` — Custom backoff strategy (attempt, error -> seconds)
 - `rate_limit/0` — Per-worker rate limit config for seki
-- `concurrency/0` — Max concurrent executions across all queues
+- `concurrency/0` — Max concurrent executions (local, per-node via seki bulkhead)
+- `global_concurrency/0` — Max concurrent executions across all nodes (via PostgreSQL)
 - `middleware/0` — Worker-specific middleware list
 - `on_discard/2` — Called when a job is permanently discarded
 
@@ -88,6 +89,7 @@ unique() -> #{keys => [worker, args], period => 300}.
 -callback backoff(Attempt :: pos_integer(), Error :: term()) -> pos_integer().
 -callback rate_limit() -> rate_limit_opts().
 -callback concurrency() -> pos_integer().
+-callback global_concurrency() -> pos_integer().
 -callback middleware() -> [shigoto_middleware:middleware()].
 -callback on_discard(Args :: map(), Errors :: [map()]) -> ok.
 
@@ -101,6 +103,7 @@ unique() -> #{keys => [worker, args], period => 300}.
     backoff/2,
     rate_limit/0,
     concurrency/0,
+    global_concurrency/0,
     middleware/0,
     on_discard/2
 ]).
