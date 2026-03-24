@@ -33,6 +33,7 @@ jobs are shed first when the system is overloaded.
     check_bulkhead/2,
     release_bulkhead/1,
     check_circuit/2,
+    check_global_concurrency/2,
     check_load/1,
     complete_load/2,
     ensure_worker_primitives/1,
@@ -111,6 +112,30 @@ release_bulkhead(Worker) ->
             case erlang:function_exported(Worker, concurrency, 0) of
                 false -> ok;
                 true -> seki_bulkhead:release(bulkhead_name(Worker))
+            end
+    end.
+
+-doc "Check global concurrency across all nodes via PostgreSQL. Returns ok or {snooze, 5}.".
+-spec check_global_concurrency(module(), map()) -> ok | {snooze, pos_integer()}.
+check_global_concurrency(Worker, _Job = #{}) ->
+    _ = code:ensure_loaded(Worker),
+    case erlang:function_exported(Worker, global_concurrency, 0) of
+        false ->
+            ok;
+        true ->
+            MaxGlobal = Worker:global_concurrency(),
+            Pool = shigoto_config:pool(),
+            WorkerBin = atom_to_binary(Worker, utf8),
+            SQL = <<"SELECT count(*) FROM shigoto_jobs WHERE worker = $1 AND state = 'executing'">>,
+            case
+                pgo:query(SQL, [WorkerBin], #{
+                    pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
+                })
+            of
+                #{rows := [#{count := Current}]} when Current >= MaxGlobal ->
+                    {snooze, 5};
+                _ ->
+                    ok
             end
     end.
 

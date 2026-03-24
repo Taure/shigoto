@@ -16,7 +16,8 @@ Configuration access for Shigoto. Reads from application env.
     heartbeat_interval/0,
     load_shedding/0,
     queue_weights/0,
-    fair_queues/0
+    fair_queues/0,
+    encryption_keys/0
 ]).
 
 -doc "The pgo pool name for job storage.".
@@ -84,3 +85,8 @@ queue_weights() ->
 -spec fair_queues() -> [binary()].
 fair_queues() ->
     application:get_env(shigoto, fair_queues, []).
+
+-doc "Ordered list of encryption keys (newest first) for key rotation. Default: [].".
+-spec encryption_keys() -> [binary()].
+encryption_keys() ->
+    application:get_env(shigoto, encryption_keys, []).
