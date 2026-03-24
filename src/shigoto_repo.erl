@@ -713,7 +713,7 @@ maybe_on_discard(OrigJob, #{state := <<"discarded">>, errors := Errors}) ->
     _ = code:ensure_loaded(Worker),
     case erlang:function_exported(Worker, on_discard, 2) of
         true ->
-            Args = maps:get(args, OrigJob, #{}),
+            Args = decode_args(maps:get(args, OrigJob, #{})),
             DecodedErrors =
                 case is_binary(Errors) of
                     true -> json:decode(Errors);
@@ -761,6 +761,16 @@ resolve_tags(JobParams) ->
         Tags when is_list(Tags) ->
             Tags
     end.
+
+decode_args(Args) when is_map(Args) -> Args;
+decode_args(Args) when is_binary(Args) ->
+    try
+        json:decode(Args)
+    catch
+        _:_ -> #{}
+    end;
+decode_args(_) ->
+    #{}.
 
 decrypt_job_args(#{args := Args} = Job) when is_binary(Args) ->
     Job#{args => shigoto_crypto:decrypt(Args)};

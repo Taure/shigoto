@@ -174,3 +174,33 @@ sunday_test() ->
     Dt = {{2026, 3, 22}, {0, 0, 0}},
     {ok, Expr} = shigoto_cron_parser:parse(<<"0 0 * * 0">>),
     ?assert(shigoto_cron_parser:matches(Expr, Dt)).
+
+%%----------------------------------------------------------------------
+%% Aliases
+%%----------------------------------------------------------------------
+
+alias_yearly_test() ->
+    {ok, Expr} = shigoto_cron_parser:parse(~"@yearly"),
+    ?assert(shigoto_cron_parser:matches(Expr, {{2026, 1, 1}, {0, 0, 0}})),
+    ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 30, 0}})).
+
+alias_monthly_test() ->
+    {ok, Expr} = shigoto_cron_parser:parse(~"@monthly"),
+    ?assert(shigoto_cron_parser:matches(Expr, {{2026, 3, 1}, {0, 0, 0}})),
+    ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 2}, {0, 0, 0}})).
+
+alias_weekly_test() ->
+    %% 2026-03-22 is Sunday
+    {ok, Expr} = shigoto_cron_parser:parse(~"@weekly"),
+    ?assert(shigoto_cron_parser:matches(Expr, {{2026, 3, 22}, {0, 0, 0}})),
+    ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {0, 0, 0}})).
+
+alias_daily_test() ->
+    {ok, Expr} = shigoto_cron_parser:parse(~"@daily"),
+    ?assert(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {0, 0, 0}})),
+    ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 30, 0}})).
+
+alias_hourly_test() ->
+    {ok, Expr} = shigoto_cron_parser:parse(~"@hourly"),
+    ?assert(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 0, 0}})),
+    ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 30, 0}})).

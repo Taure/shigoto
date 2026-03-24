@@ -7,11 +7,8 @@ perform(_Args) -> {error, always_fails}.
 max_attempts() -> 1.
 
 on_discard(Args, _Errors) ->
-    case maps:get(<<"notify_pid">>, Args, undefined) of
-        undefined ->
-            ok;
-        PidBin ->
-            Pid = list_to_pid(binary_to_list(PidBin)),
-            Pid ! {discarded, Args}
+    case whereis(shigoto_discard_test) of
+        undefined -> ok;
+        Pid -> Pid ! {discarded, Args}
     end,
     ok.

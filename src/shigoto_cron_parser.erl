@@ -10,6 +10,8 @@ Supported syntax per field:
 - `*/N` — step from start
 - `N-M/S` — step within range
 - `N,M,O` — comma-separated list (each element may be a value, range, or step)
+
+Aliases: `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`, `@midnight`, `@hourly`.
 """.
 
 -export([parse/1, matches/2]).
@@ -25,8 +27,22 @@ Supported syntax per field:
 
 -export_type([cron_expr/0, field/0]).
 
--doc "Parse a 5-field cron expression binary into a structured map.".
+-doc "Parse a 5-field cron expression or alias into a structured map.".
 -spec parse(binary()) -> {ok, cron_expr()} | {error, term()}.
+parse(~"@yearly") ->
+    parse(~"0 0 1 1 *");
+parse(~"@annually") ->
+    parse(~"0 0 1 1 *");
+parse(~"@monthly") ->
+    parse(~"0 0 1 * *");
+parse(~"@weekly") ->
+    parse(~"0 0 * * 0");
+parse(~"@daily") ->
+    parse(~"0 0 * * *");
+parse(~"@midnight") ->
+    parse(~"0 0 * * *");
+parse(~"@hourly") ->
+    parse(~"0 * * * *");
 parse(Bin) when is_binary(Bin) ->
     Fields = binary:split(Bin, ~" ", [global, trim_all]),
     case Fields of

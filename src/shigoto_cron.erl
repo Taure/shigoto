@@ -3,6 +3,9 @@
 Cron scheduler. Checks configured cron expressions every minute and
 inserts jobs for entries that are due. On startup, catches up on any
 missed intervals since the last run.
+
+Uses `pg_try_advisory_lock` so only one node runs cron checks
+in a multi-node deployment.
 """.
 -behaviour(gen_server).
 
@@ -10,6 +13,7 @@ missed intervals since the last run.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(CHECK_INTERVAL, 60000).
+-define(CRON_LOCK_ID, 839274628).
 
 -doc false.
 start_link() ->
@@ -31,10 +35,10 @@ handle_cast(_Msg, State) ->
 
 -doc false.
 handle_info(catch_up, State) ->
-    catch_up_missed(),
+    with_leader_lock(fun catch_up_missed/0),
     {noreply, State};
 handle_info(check, State) ->
-    check_cron_entries(),
+    with_leader_lock(fun check_cron_entries/0),
     erlang:send_after(?CHECK_INTERVAL, self(), check),
     {noreply, State};
 handle_info(_Info, State) ->
@@ -43,6 +47,26 @@ handle_info(_Info, State) ->
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+with_leader_lock(Fun) ->
+    Pool = shigoto_config:pool(),
+    pgo:transaction(
+        fun() ->
+            case
+                pgo:query(
+                    <<"SELECT pg_try_advisory_xact_lock($1)::text">>,
+                    [?CRON_LOCK_ID],
+                    #{pool => Pool}
+                )
+            of
+                #{rows := [{<<"true">>}]} ->
+                    Fun();
+                _ ->
+                    ok
+            end
+        end,
+        #{pool => Pool}
+    ).
 
 check_cron_entries() ->
     Entries = shigoto_config:cron_entries(),
@@ -127,7 +151,6 @@ find_last_run(Worker, DbEntries) ->
 missed_minutes(undefined, _Now) ->
     [];
 missed_minutes(LastRun, Now) ->
-    %% Generate minute-aligned datetimes between LastRun and Now, max 60 to avoid flooding
     LastSecs = calendar:datetime_to_gregorian_seconds(LastRun),
     NowSecs = calendar:datetime_to_gregorian_seconds(Now),
     StartSecs = LastSecs + 60,
@@ -139,7 +162,6 @@ generate_minutes(_Current, _End, 0, Acc) ->
 generate_minutes(Current, End, _Remaining, Acc) when Current > End ->
     lists:reverse(Acc);
 generate_minutes(Current, End, Remaining, Acc) ->
-    %% Align to minute boundary
     AlignedSecs = (Current div 60) * 60,
     DateTime = calendar:gregorian_seconds_to_datetime(AlignedSecs),
     generate_minutes(AlignedSecs + 60, End, Remaining - 1, [DateTime | Acc]).
