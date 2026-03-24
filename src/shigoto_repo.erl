@@ -54,6 +54,7 @@ insert_all(_Pool, [], _Opts) ->
     {ok, []};
 insert_all(Pool, JobParamsList, Opts) ->
     Jobs = [apply_worker_defaults(J) || J <- JobParamsList],
+    ParamsPerJob = 10,
     {ValueClauses, AllParams, _} = lists:foldl(
         fun(JobParams, {Clauses, Params, Idx}) ->
             Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
@@ -66,33 +67,13 @@ insert_all(Pool, JobParamsList, Opts) ->
             Tags = resolve_tags(JobParams),
             TagsArr = encode_pg_array(Tags),
             BatchId = maps:get(batch, JobParams, null),
-            I1 = integer_to_binary(Idx),
-            I2 = integer_to_binary(Idx + 1),
-            I3 = integer_to_binary(Idx + 2),
-            I4 = integer_to_binary(Idx + 3),
-            I5 = integer_to_binary(Idx + 4),
-            I6 = integer_to_binary(Idx + 5),
-            I7 = integer_to_binary(Idx + 6),
-            I8 = integer_to_binary(Idx + 7),
-            Clause = iolist_to_binary([
-                <<"($">>,
-                I1,
-                <<", $">>,
-                I2,
-                <<", $">>,
-                I3,
-                <<", $">>,
-                I4,
-                <<", $">>,
-                I5,
-                <<", $">>,
-                I6,
-                <<", $">>,
-                I7,
-                <<", $">>,
-                I8,
-                <<")">>
+            PartitionKey = maps:get(partition_key, JobParams, null),
+            DependsOn = maps:get(depends_on, JobParams, []),
+            Placeholders = lists:join(<<", ">>, [
+                <<"$", (integer_to_binary(Idx + N))/binary>>
+             || N <- lists:seq(0, ParamsPerJob - 1)
             ]),
+            Clause = iolist_to_binary([<<"(">>, Placeholders, <<")">>]),
             NewParams =
                 Params ++
                     [
@@ -103,9 +84,11 @@ insert_all(Pool, JobParamsList, Opts) ->
                         MaxAttempts,
                         ScheduledAt,
                         TagsArr,
-                        BatchId
+                        BatchId,
+                        PartitionKey,
+                        DependsOn
                     ],
-            {[Clause | Clauses], NewParams, Idx + 8}
+            {[Clause | Clauses], NewParams, Idx + ParamsPerJob}
         end,
         {[], [], 1},
         Jobs
@@ -114,7 +97,7 @@ insert_all(Pool, JobParamsList, Opts) ->
     SQL = iolist_to_binary([
         <<
             "INSERT INTO shigoto_jobs "
-            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id) VALUES "
+            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
         >>,
         ValuesSQL,
         <<" RETURNING *">>
@@ -396,11 +379,16 @@ archive_jobs(Pool, Days) ->
             "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
             "AND inserted_at < now() - make_interval(days => $1)"
         >>,
-    _ = query(Pool, InsertSQL, [Days]),
-    case query(Pool, DeleteSQL, [Days]) of
-        #{num_rows := Count} -> {ok, Count};
-        {error, _} = Err -> Err
-    end.
+    pgo:transaction(
+        fun() ->
+            _ = query(Pool, InsertSQL, [Days]),
+            case query(Pool, DeleteSQL, [Days]) of
+                #{num_rows := Count} -> {ok, Count};
+                {error, _} = Err -> Err
+            end
+        end,
+        #{pool => Pool}
+    ).
 
 -doc "Upsert a cron entry.".
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.

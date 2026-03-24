@@ -71,7 +71,7 @@ job_completed(Pool, BatchId) ->
         "WHERE id = $1 RETURNING *"
     >>,
     case query(Pool, SQL, [BatchId]) of
-        #{rows := [Batch]} -> maybe_fire_callback(Pool, Batch, complete);
+        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch, complete);
         {error, _} = Err -> Err
     end.
 
@@ -83,7 +83,7 @@ job_discarded(Pool, BatchId) ->
         "WHERE id = $1 RETURNING *"
     >>,
     case query(Pool, SQL, [BatchId]) of
-        #{rows := [Batch]} -> maybe_fire_callback(Pool, Batch, discard);
+        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch, discard);
         {error, _} = Err -> Err
     end.
 
@@ -101,49 +101,64 @@ get(Pool, BatchId) ->
 %% Internal
 %%----------------------------------------------------------------------
 
-maybe_fire_callback(Pool, Batch, Event) ->
+maybe_fire_callback(Pool, BatchId, Batch, Event) ->
     #{
         total_jobs := Total,
         completed_jobs := Completed,
         discarded_jobs := Discarded,
-        state := State,
         callback_worker := CallbackWorkerBin
     } = Batch,
     AllDone = (Completed + Discarded) >= Total,
-    case {AllDone, State, CallbackWorkerBin} of
-        {true, <<"active">>, null} ->
-            finish_batch(Pool, Batch);
-        {true, <<"active">>, _} ->
-            CallbackArgs0 = decode_callback_args(Batch),
-            CallbackArgs =
-                case Event of
-                    complete -> CallbackArgs0;
-                    discard -> CallbackArgs0#{<<"_batch_event">> => <<"discard">>}
-                end,
+    case {AllDone, CallbackWorkerBin} of
+        {true, null} ->
+            %% Atomically transition to finished — only one concurrent caller wins
+            case try_transition(Pool, BatchId, <<"active">>, <<"finished">>) of
+                ok ->
+                    shigoto_telemetry:batch_completed(Batch),
+                    finish_batch(Pool, Batch);
+                already_transitioned ->
+                    ok
+            end;
+        {true, _} ->
             NewState =
                 case Event of
                     complete -> <<"callback_completing">>;
                     discard -> <<"callback_discarding">>
                 end,
-            mark_state(Pool, maps:get(id, Batch), NewState),
-            CallbackWorker = binary_to_existing_atom(CallbackWorkerBin, utf8),
-            _ = shigoto:insert(#{
-                worker => CallbackWorker,
-                args => CallbackArgs
-            }),
-            ok;
-        _ ->
+            %% Atomically transition — only one concurrent caller wins
+            case try_transition(Pool, BatchId, <<"active">>, NewState) of
+                ok ->
+                    shigoto_telemetry:batch_completed(Batch),
+                    CallbackArgs0 = decode_callback_args(Batch),
+                    CallbackArgs =
+                        case Event of
+                            complete -> CallbackArgs0;
+                            discard -> CallbackArgs0#{<<"_batch_event">> => <<"discard">>}
+                        end,
+                    CallbackWorker = binary_to_existing_atom(CallbackWorkerBin, utf8),
+                    _ = shigoto:insert(#{
+                        worker => CallbackWorker,
+                        args => CallbackArgs
+                    }),
+                    ok;
+                already_transitioned ->
+                    ok
+            end;
+        {false, _} ->
             ok
+    end.
+
+try_transition(Pool, BatchId, FromState, ToState) ->
+    SQL = <<"UPDATE shigoto_batches SET state = $3 WHERE id = $1 AND state = $2">>,
+    case query(Pool, SQL, [BatchId, FromState, ToState]) of
+        #{num_rows := 1} -> ok;
+        #{num_rows := 0} -> already_transitioned;
+        {error, _} -> already_transitioned
     end.
 
 finish_batch(Pool, Batch) ->
     SQL = <<"UPDATE shigoto_batches SET state = 'finished', completed_at = now() WHERE id = $1">>,
     _ = query(Pool, SQL, [maps:get(id, Batch)]),
-    ok.
-
-mark_state(Pool, BatchId, State) ->
-    SQL = <<"UPDATE shigoto_batches SET state = $2 WHERE id = $1">>,
-    _ = query(Pool, SQL, [BatchId, State]),
     ok.
 
 decode_callback_args(#{callback_args := Args}) when is_map(Args) ->
