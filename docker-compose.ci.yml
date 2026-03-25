@@ -5,6 +5,6 @@ services:
       POSTGRES_DB: shigoto_test
       POSTGRES_PASSWORD: root
     ports:
-      - "5555:5432"
+      - "5556:5432"
     tmpfs:
       - /var/lib/postgresql/data
