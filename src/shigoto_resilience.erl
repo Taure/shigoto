@@ -75,8 +75,11 @@ check_rate_limit(Worker, _Job = #{}) ->
                 true ->
                     LimiterName = limiter_name(Worker),
                     case seki:check(LimiterName, Worker) of
-                        {allow, _} -> ok;
-                        {deny, #{retry_after := Ms}} -> {snooze, max(1, Ms div 1000)}
+                        {allow, _} ->
+                            ok;
+                        {deny, #{retry_after := Ms}} ->
+                            shigoto_telemetry:resilience_rate_limited(Worker, Ms),
+                            {snooze, max(1, Ms div 1000)}
                     end
             end
     end.
@@ -95,8 +98,11 @@ check_bulkhead(Worker, _Job = #{}) ->
                 true ->
                     BulkheadName = bulkhead_name(Worker),
                     case seki_bulkhead:acquire(BulkheadName) of
-                        ok -> ok;
-                        {error, bulkhead_full} -> {snooze, 5}
+                        ok ->
+                            ok;
+                        {error, bulkhead_full} ->
+                            shigoto_telemetry:resilience_bulkhead_full(Worker),
+                            {snooze, 5}
                     end
             end
     end.
@@ -148,9 +154,13 @@ check_circuit(Worker, _Job = #{}) ->
         true ->
             BreakerName = breaker_name(Worker),
             case seki:state(BreakerName) of
-                closed -> ok;
-                half_open -> ok;
-                open -> {snooze, 10}
+                closed ->
+                    ok;
+                half_open ->
+                    ok;
+                open ->
+                    shigoto_telemetry:resilience_circuit_open(Worker),
+                    {snooze, 10}
             end
     end.
 
@@ -164,8 +174,11 @@ check_load(Job) ->
             Priority = maps:get(priority, Job, 0),
             SekiPriority = priority_to_seki(Priority),
             case seki_shed:admit(shigoto_load_shedder, SekiPriority) of
-                ok -> ok;
-                {error, shed} -> {snooze, 5}
+                ok ->
+                    ok;
+                {error, shed} ->
+                    shigoto_telemetry:resilience_load_shed(Priority),
+                    {snooze, 5}
             end
     end.
 

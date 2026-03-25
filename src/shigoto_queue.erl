@@ -112,6 +112,8 @@ handle_info(
                     true ->
                         case claim(Pool, Queue, Available, Fair) of
                             {ok, Jobs} ->
+                                shigoto_telemetry:queue_poll(Queue, length(Jobs)),
+                                lists:foreach(fun shigoto_telemetry:job_claimed/1, Jobs),
                                 {Started, Execs1} = lists:foldl(
                                     fun(Job, {Count, AccExecs}) ->
                                         case
