@@ -147,12 +147,22 @@ drain_queue(Queue, Opts) ->
 -doc "Pause a queue by name — stops claiming new jobs.".
 -spec pause_queue(binary()) -> ok | {error, not_found}.
 pause_queue(Queue) ->
-    with_queue_pid(Queue, fun shigoto_queue:pause/1).
+    Result = with_queue_pid(Queue, fun shigoto_queue:pause/1),
+    case Result of
+        ok -> shigoto_telemetry:queue_paused(Queue);
+        _ -> ok
+    end,
+    Result.
 
 -doc "Resume a paused queue by name.".
 -spec resume_queue(binary()) -> ok | {error, not_found}.
 resume_queue(Queue) ->
-    with_queue_pid(Queue, fun shigoto_queue:resume/1).
+    Result = with_queue_pid(Queue, fun shigoto_queue:resume/1),
+    case Result of
+        ok -> shigoto_telemetry:queue_resumed(Queue);
+        _ -> ok
+    end,
+    Result.
 
 -doc "Create a new batch for grouping jobs.".
 -spec new_batch(map()) -> {ok, map()} | {error, term()}.

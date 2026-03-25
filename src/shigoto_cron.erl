@@ -72,9 +72,10 @@ check_cron_entries() ->
     Entries = shigoto_config:cron_entries(),
     Now = calendar:universal_time(),
     lists:foreach(
-        fun({_Name, Schedule, Worker, Args}) ->
+        fun({Name, Schedule, Worker, Args}) ->
             case should_run(Schedule, Now) of
                 true ->
+                    shigoto_telemetry:cron_scheduled(Name, Worker, Schedule),
                     _ = shigoto:insert(
                         #{
                             worker => Worker,
