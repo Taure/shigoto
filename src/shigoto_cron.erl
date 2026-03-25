@@ -104,8 +104,8 @@ catch_up_missed() ->
             ConfigEntries = shigoto_config:cron_entries(),
             Now = calendar:universal_time(),
             lists:foreach(
-                fun({Name, Schedule, Worker, Args}) ->
-                    catch_up_entry(Name, Schedule, Worker, Args, DbEntries, Now)
+                fun({_Name, Schedule, Worker, Args}) ->
+                    catch_up_entry(Schedule, Worker, Args, DbEntries, Now)
                 end,
                 ConfigEntries
             );
@@ -113,7 +113,7 @@ catch_up_missed() ->
             ok
     end.
 
-catch_up_entry(_Name, Schedule, Worker, Args, DbEntries, Now) ->
+catch_up_entry(Schedule, Worker, Args, DbEntries, Now) ->
     case shigoto_cron_parser:parse(Schedule) of
         {ok, Expr} ->
             LastRun = find_last_run(Worker, DbEntries),
