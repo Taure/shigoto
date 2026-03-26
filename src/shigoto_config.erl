@@ -24,69 +24,69 @@ Configuration access for Shigoto. Reads from application env.
 -spec pool() -> atom().
 pool() ->
     {ok, Pool} = application:get_env(shigoto, pool),
-    Pool.
+    eqwalizer:fix_me(Pool).
 
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
 -spec queues() -> [{binary(), pos_integer()}].
 queues() ->
-    application:get_env(shigoto, queues, [{~"default", 10}]).
+    eqwalizer:fix_me(application:get_env(shigoto, queues, [{~"default", 10}])).
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
 poll_interval() ->
-    application:get_env(shigoto, poll_interval, 5000).
+    eqwalizer:fix_me(application:get_env(shigoto, poll_interval, 5000)).
 
 -doc "Cron job entries. Each: `{Name, Schedule, Worker, Args}`.".
 -spec cron_entries() -> list().
 cron_entries() ->
-    application:get_env(shigoto, cron, []).
+    eqwalizer:fix_me(application:get_env(shigoto, cron, [])).
 
 -doc "Days to keep completed/discarded jobs. Default: 14.".
 -spec prune_after_days() -> pos_integer().
 prune_after_days() ->
-    application:get_env(shigoto, prune_after_days, 14).
+    eqwalizer:fix_me(application:get_env(shigoto, prune_after_days, 14)).
 
 -doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
 -spec notifier_config() -> map() | undefined.
 notifier_config() ->
-    application:get_env(shigoto, notifier, undefined).
+    eqwalizer:fix_me(application:get_env(shigoto, notifier, undefined)).
 
 -doc "Milliseconds to wait for in-flight jobs during shutdown. Default: 15000.".
 -spec shutdown_timeout() -> pos_integer().
 shutdown_timeout() ->
-    application:get_env(shigoto, shutdown_timeout, 15000).
+    eqwalizer:fix_me(application:get_env(shigoto, shutdown_timeout, 15000)).
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].
 middleware() ->
-    application:get_env(shigoto, middleware, []).
+    eqwalizer:fix_me(application:get_env(shigoto, middleware, [])).
 
 -doc "AES-256-GCM encryption key for job args/meta. Returns `undefined` if not configured.".
 -spec encryption_key() -> binary() | undefined.
 encryption_key() ->
-    application:get_env(shigoto, encryption_key, undefined).
+    eqwalizer:fix_me(application:get_env(shigoto, encryption_key, undefined)).
 
 -doc "Heartbeat interval in milliseconds for executing jobs. Default: 30000.".
 -spec heartbeat_interval() -> pos_integer().
 heartbeat_interval() ->
-    application:get_env(shigoto, heartbeat_interval, 30000).
+    eqwalizer:fix_me(application:get_env(shigoto, heartbeat_interval, 30000)).
 
 -doc "Load shedding config. Default: undefined (disabled).".
 -spec load_shedding() -> map() | undefined.
 load_shedding() ->
-    application:get_env(shigoto, load_shedding, undefined).
+    eqwalizer:fix_me(application:get_env(shigoto, load_shedding, undefined)).
 
 -doc "Queue weight config. Map of queue name to weight. Default: #{} (equal weight).".
 -spec queue_weights() -> #{binary() => pos_integer()}.
 queue_weights() ->
-    application:get_env(shigoto, queue_weights, #{}).
+    eqwalizer:fix_me(application:get_env(shigoto, queue_weights, #{})).
 
 -doc "Queues that use fair partition-based claiming. Default: [] (all use standard claiming).".
 -spec fair_queues() -> [binary()].
 fair_queues() ->
-    application:get_env(shigoto, fair_queues, []).
+    eqwalizer:fix_me(application:get_env(shigoto, fair_queues, [])).
 
 -doc "Ordered list of encryption keys (newest first) for key rotation. Default: [].".
 -spec encryption_keys() -> [binary()].
 encryption_keys() ->
-    application:get_env(shigoto, encryption_keys, []).
+    eqwalizer:fix_me(application:get_env(shigoto, encryption_keys, [])).

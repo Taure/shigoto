@@ -75,7 +75,9 @@ check_cron_entries() ->
         fun({Name, Schedule, Worker, Args}) ->
             case should_run(Schedule, Now) of
                 true ->
-                    shigoto_telemetry:cron_scheduled(Name, Worker, Schedule),
+                    shigoto_telemetry:cron_scheduled(
+                        eqwalizer:fix_me(Name), eqwalizer:fix_me(Worker), eqwalizer:fix_me(Schedule)
+                    ),
                     _ = shigoto:insert(
                         #{
                             worker => Worker,
@@ -120,7 +122,7 @@ catch_up_entry(Schedule, Worker, Args, DbEntries, Now) ->
             MinutesToCheck = missed_minutes(LastRun, Now),
             lists:foreach(
                 fun(Minute) ->
-                    case shigoto_cron_parser:matches(Expr, Minute) of
+                    case shigoto_cron_parser:matches(Expr, eqwalizer:fix_me(Minute)) of
                         true ->
                             _ = shigoto:insert(
                                 #{worker => Worker, args => Args, queue => ~"default"},
