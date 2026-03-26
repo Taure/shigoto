@@ -97,7 +97,7 @@ search_jobs(Filters) ->
     WhereSQL =
         case WhereClauses of
             [] -> ~"true";
-            _ -> iolist_to_binary(eqwalizer:fix_me(lists:join(~" AND ", WhereClauses)))
+            _ -> iolist_to_binary(lists:join(~" AND ", WhereClauses))
         end,
     LimitIdx = integer_to_binary(NextIdx),
     OffsetIdx = integer_to_binary(NextIdx + 1),
@@ -172,17 +172,15 @@ query(SQL, Params) ->
 
 pivot_queue_stats(Rows) ->
     GroupedByQueue = lists:foldl(
-        fun(#{queue := Queue, state := State, count := Count}, Acc0) ->
-            Acc = eqwalizer:fix_me(Acc0),
-            % elp:ignore W0030
+        fun(#{queue := Queue, state := State, count := Count}, Acc) ->
             QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
-            StateAtom = binary_to_existing_atom(eqwalizer:fix_me(State), utf8),
-            maps:put(Queue, QueueMap#{StateAtom => Count}, Acc)
+            StateAtom = binary_to_existing_atom(State, utf8),
+            Acc#{Queue => QueueMap#{StateAtom => Count}}
         end,
         #{},
         Rows
     ),
-    maps:values(eqwalizer:fix_me(GroupedByQueue)).
+    maps:values(GroupedByQueue).
 
 build_search_clauses(Filters, StartIdx) ->
     maps:fold(

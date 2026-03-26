@@ -70,7 +70,7 @@ handle_info(_Info, State) ->
 
 start_listener() ->
     Config = shigoto_config:notifier_config(),
-    case pgo_notifications:start_link(eqwalizer:fix_me(Config)) of
+    case pgo_notifications:start_link(Config) of
         {ok, Pid} ->
             erlang:monitor(process, Pid),
             {ok, Ref} = pgo_notifications:listen(Pid, ?CHANNEL),

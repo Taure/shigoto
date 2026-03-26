@@ -15,7 +15,7 @@ Migrations are idempotent and safe to run multiple times.
 up(Pool) ->
     lists:foreach(
         fun(SQL) ->
-            pgo:query(eqwalizer:fix_me(SQL), [], #{pool => Pool, decode_opts => ?DECODE_OPTS})
+            pgo:query(SQL, [], #{pool => Pool, decode_opts => ?DECODE_OPTS})
         end,
         v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++ v5_statements()
     ),

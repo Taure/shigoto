@@ -24,8 +24,6 @@
     bench_insert_with_deps/1
 ]).
 
--eqwalizer({nowarn_function, insert_chain/2}).
-
 -define(POOL, shigoto_test_pool).
 
 all() ->
