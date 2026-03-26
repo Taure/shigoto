@@ -16,6 +16,7 @@ for safe multi-node job claiming.
     cancel_by/2,
     snooze_job/3,
     retry_job/2,
+    retry_by/2,
     rescue_stale_jobs/2,
     prune_jobs/2,
     upsert_cron_entry/2,
@@ -36,16 +37,22 @@ for safe multi-node job claiming.
     debounce => undefined
 }).
 
--doc "Insert a new job. Respects worker defaults and unique constraints.".
+-doc "Insert a new job. Respects worker defaults and unique constraints. Validates dependency cycles.".
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert_job(Pool, JobParams0, Opts) ->
     JobParams = apply_worker_defaults(JobParams0),
-    case resolve_unique(JobParams, Opts) of
-        none ->
-            do_insert(Pool, JobParams, Opts, null);
-        UniqueOpts ->
-            insert_unique(Pool, JobParams, Opts, UniqueOpts)
+    DependsOn = maps:get(depends_on, JobParams, []),
+    case validate_dependencies(Pool, DependsOn) of
+        ok ->
+            case resolve_unique(JobParams, Opts) of
+                none ->
+                    do_insert(Pool, JobParams, Opts, null);
+                UniqueOpts ->
+                    insert_unique(Pool, JobParams, Opts, UniqueOpts)
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 -doc "Bulk insert multiple jobs in a single SQL statement. Returns inserted jobs.".
@@ -293,6 +300,29 @@ retry_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
+-doc "Retry all jobs matching a filter. Supports worker, queue, state, tags.".
+-spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
+retry_by(Pool, Filters) ->
+    {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
+    WhereSQL =
+        case WhereClauses of
+            [] ->
+                <<"state IN ('discarded', 'cancelled')">>;
+            _ ->
+                iolist_to_binary([
+                    <<"state IN ('discarded', 'cancelled') AND ">>,
+                    lists:join(<<" AND ">>, WhereClauses)
+                ])
+        end,
+    SQL = iolist_to_binary([
+        <<"UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ">>,
+        WhereSQL
+    ]),
+    case query(Pool, SQL, Params) of
+        #{num_rows := Count} -> {ok, Count};
+        {error, _} = Err -> Err
+    end.
+
 -doc "Rescue stale executing jobs. Uses heartbeat if available, otherwise attempted_at.".
 -spec rescue_stale_jobs(atom(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
 rescue_stale_jobs(Pool, StaleSeconds) ->
@@ -424,6 +454,56 @@ get_due_cron_entries(Pool) ->
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
+    end.
+
+%%----------------------------------------------------------------------
+%% Internal: dependency validation
+%%----------------------------------------------------------------------
+
+validate_dependencies(_Pool, []) ->
+    ok;
+validate_dependencies(Pool, DepIds) ->
+    %% Check that all dependency IDs exist
+    Placeholders = lists:join(<<", ">>, [
+        <<"$", (integer_to_binary(I))/binary>>
+     || I <- lists:seq(1, length(DepIds))
+    ]),
+    SQL = iolist_to_binary([
+        <<"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (">>,
+        Placeholders,
+        <<")">>
+    ]),
+    case query(Pool, SQL, DepIds) of
+        #{rows := Rows} ->
+            FoundIds = [maps:get(id, R) || R <- Rows],
+            Missing = DepIds -- FoundIds,
+            case Missing of
+                [] ->
+                    %% Check for cycles: if any dep transitively depends on us,
+                    %% we'd create a cycle. Since the new job doesn't have an ID yet,
+                    %% we check if any dep depends on any other dep (mutual deps).
+                    check_transitive_cycles(Rows, DepIds);
+                _ ->
+                    {error, {missing_dependencies, Missing}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+check_transitive_cycles(Rows, DepIds) ->
+    DepSet = sets:from_list(DepIds),
+    HasCycle = lists:any(
+        fun
+            (#{depends_on := TransDeps}) when is_list(TransDeps) ->
+                lists:any(fun(D) -> sets:is_element(D, DepSet) end, TransDeps);
+            (_) ->
+                false
+        end,
+        Rows
+    ),
+    case HasCycle of
+        true -> {error, dependency_cycle};
+        false -> ok
     end.
 
 %%----------------------------------------------------------------------

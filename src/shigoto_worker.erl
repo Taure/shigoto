@@ -22,6 +22,7 @@ Workers can declare defaults via optional callbacks:
 - `global_concurrency/0` — Max concurrent executions across all nodes (via PostgreSQL)
 - `middleware/0` — Worker-specific middleware list
 - `on_discard/2` — Called when a job is permanently discarded
+- `circuit_breaker/0` — Per-worker circuit breaker config
 
 These are used as defaults when inserting jobs. Per-insert options
 in the params map always take precedence.
@@ -92,6 +93,7 @@ unique() -> #{keys => [worker, args], period => 300}.
 -callback global_concurrency() -> pos_integer().
 -callback middleware() -> [shigoto_middleware:middleware()].
 -callback on_discard(Args :: map(), Errors :: [map()]) -> ok.
+-callback circuit_breaker() -> circuit_breaker_opts().
 
 -optional_callbacks([
     max_attempts/0,
@@ -105,7 +107,8 @@ unique() -> #{keys => [worker, args], period => 300}.
     concurrency/0,
     global_concurrency/0,
     middleware/0,
-    on_discard/2
+    on_discard/2,
+    circuit_breaker/0
 ]).
 
 -type unique_opts() :: #{
@@ -123,4 +126,11 @@ unique() -> #{keys => [worker, args], period => 300}.
     burst => pos_integer()
 }.
 
--export_type([unique_opts/0, rate_limit_opts/0]).
+-type circuit_breaker_opts() :: #{
+    failure_threshold => 1..100,
+    window_size => pos_integer(),
+    wait_duration => pos_integer(),
+    half_open_requests => pos_integer()
+}.
+
+-export_type([unique_opts/0, rate_limit_opts/0, circuit_breaker_opts/0]).

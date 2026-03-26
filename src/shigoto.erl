@@ -57,14 +57,18 @@ shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
     cancel/2,
     cancel_by/2,
     retry/2,
+    retry_by/2,
     drain_queue/1,
     drain_queue/2,
     pause_queue/1,
     resume_queue/1,
+    add_queue/2,
+    remove_queue/1,
     new_batch/1,
     get_batch/1,
     report_progress/2,
-    get_job/1
+    get_job/1,
+    health/0
 ]).
 
 -doc "Insert a job with default options.".
@@ -189,6 +193,72 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
 get_job(JobId) ->
     Pool = shigoto_config:pool(),
     shigoto_repo:get_job(Pool, JobId).
+
+-doc "Retry all jobs matching a filter. Filters: worker, queue, state, tags.".
+-spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
+retry_by(Pool, Filters) ->
+    shigoto_repo:retry_by(Pool, Filters).
+
+-doc "Add a queue at runtime without restart.".
+-spec add_queue(binary(), pos_integer()) -> {ok, pid()} | {error, term()}.
+add_queue(Queue, Concurrency) ->
+    ShutdownMs = shigoto_config:shutdown_timeout() + 1000,
+    ChildSpec = #{
+        id => {shigoto_queue, Queue},
+        start => {shigoto_queue, start_link, [Queue, Concurrency]},
+        type => worker,
+        shutdown => ShutdownMs
+    },
+    case supervisor:start_child(shigoto_queue_sup, ChildSpec) of
+        {ok, Pid} -> {ok, Pid};
+        {error, {already_started, Pid}} -> {ok, Pid};
+        {error, _} = Err -> Err
+    end.
+
+-doc "Remove a queue at runtime. Waits for in-flight jobs to finish.".
+-spec remove_queue(binary()) -> ok | {error, term()}.
+remove_queue(Queue) ->
+    ChildId = {shigoto_queue, Queue},
+    case supervisor:terminate_child(shigoto_queue_sup, ChildId) of
+        ok -> supervisor:delete_child(shigoto_queue_sup, ChildId);
+        {error, _} = Err -> Err
+    end.
+
+-doc "Health check. Returns ok with stats or error with details.".
+-spec health() -> {ok, map()} | {error, map()}.
+health() ->
+    Pool = shigoto_config:pool(),
+    try
+        {ok, Counts} = shigoto_dashboard:job_counts(),
+        {ok, Stale} = shigoto_dashboard:stale_jobs(),
+        StaleCount = length(Stale),
+        Queues = shigoto_config:queues(),
+        QueueStatuses = lists:map(
+            fun({Queue, _Conc}) ->
+                case with_queue_pid(Queue, fun erlang:is_process_alive/1) of
+                    true -> {Queue, healthy};
+                    _ -> {Queue, down}
+                end
+            end,
+            Queues
+        ),
+        DownQueues = [Q || {Q, down} <- QueueStatuses],
+        Status =
+            case {StaleCount, DownQueues} of
+                {0, []} -> ok;
+                _ -> degraded
+            end,
+        {ok, #{
+            status => Status,
+            pool => Pool,
+            counts => Counts,
+            stale_jobs => StaleCount,
+            queues => maps:from_list(QueueStatuses)
+        }}
+    catch
+        _:Reason ->
+            {error, #{status => unhealthy, reason => Reason, pool => Pool}}
+    end.
 
 %%----------------------------------------------------------------------
 %% Internal
