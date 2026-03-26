@@ -24,16 +24,7 @@
     bench_insert_with_deps/1
 ]).
 
--eqwalizer({nowarn_function, bench_insert_single/1}).
--eqwalizer({nowarn_function, bench_insert_bulk_100/1}).
--eqwalizer({nowarn_function, bench_insert_bulk_1000/1}).
--eqwalizer({nowarn_function, bench_insert_unique/1}).
--eqwalizer({nowarn_function, bench_claim_and_complete/1}).
--eqwalizer({nowarn_function, bench_claim_and_complete_concurrent/1}).
--eqwalizer({nowarn_function, bench_full_lifecycle/1}).
--eqwalizer({nowarn_function, bench_full_lifecycle_10_queues/1}).
--eqwalizer({nowarn_function, bench_insert_with_encryption/1}).
--eqwalizer({nowarn_function, bench_insert_with_deps/1}).
+-eqwalizer({nowarn_function, insert_chain/2}).
 
 -define(POOL, shigoto_test_pool).
 
