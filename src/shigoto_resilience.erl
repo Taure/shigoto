@@ -240,13 +240,22 @@ maybe_create_bulkhead(Worker) ->
 
 maybe_create_breaker(Worker) ->
     Name = breaker_name(Worker),
-    seki:new_breaker(Name, #{
+    Defaults = #{
         window_type => count,
         window_size => 20,
         failure_threshold => 50,
         wait_duration => 30000,
         half_open_requests => 3
-    }).
+    },
+    Opts =
+        case erlang:function_exported(Worker, circuit_breaker, 0) of
+            true ->
+                WorkerOpts = Worker:circuit_breaker(),
+                maps:merge(Defaults, WorkerOpts#{window_type => count});
+            false ->
+                Defaults
+        end,
+    seki:new_breaker(Name, Opts).
 
 limiter_name(Worker) ->
     binary_to_atom(<<"shigoto_rl_", (atom_to_binary(Worker))/binary>>).
