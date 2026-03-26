@@ -173,10 +173,9 @@ query(SQL, Params) ->
 pivot_queue_stats(Rows) ->
     GroupedByQueue = lists:foldl(
         fun(#{queue := Queue, state := State, count := Count}, Acc) ->
-            % elp:ignore W0030
             QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
             StateAtom = binary_to_existing_atom(State, utf8),
-            maps:put(Queue, QueueMap#{StateAtom => Count}, Acc)
+            Acc#{Queue => QueueMap#{StateAtom => Count}}
         end,
         #{},
         Rows

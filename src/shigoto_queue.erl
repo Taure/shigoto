@@ -114,9 +114,7 @@ handle_info(
                             {ok, Jobs} ->
                                 shigoto_telemetry:queue_poll(Queue, length(Jobs)),
                                 lists:foreach(
-                                    fun(J) ->
-                                        shigoto_telemetry:job_claimed(J)
-                                    end,
+                                    fun shigoto_telemetry:job_claimed/1,
                                     Jobs
                                 ),
                                 {Started, Execs1} = lists:foldl(

@@ -49,7 +49,7 @@ build_chain(_Job, [], Final) ->
     Final;
 build_chain(Job, [Mw | Rest], Final) ->
     Next = build_chain(Job, Rest, Final),
-    fun() -> Mw(Job, fun() -> Next() end) end.
+    fun() -> Mw(Job, Next) end.
 
 %%----------------------------------------------------------------------
 %% Internal

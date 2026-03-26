@@ -99,7 +99,7 @@ insert_all(JobParamsList, Opts) ->
     Pool = shigoto_config:pool(),
     case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
         {ok, Jobs} ->
-            lists:foreach(fun(J) -> shigoto_telemetry:job_inserted(J) end, Jobs),
+            lists:foreach(fun shigoto_telemetry:job_inserted/1, Jobs),
             {ok, Jobs};
         Other ->
             Other
