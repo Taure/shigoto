@@ -57,7 +57,7 @@ create(Pool, Opts) ->
 -doc "Increment total job count for a batch.".
 -spec increment_total(atom(), integer()) -> ok | {error, term()}.
 increment_total(Pool, BatchId) ->
-    SQL = <<"UPDATE shigoto_batches SET total_jobs = total_jobs + 1 WHERE id = $1">>,
+    SQL = ~"UPDATE shigoto_batches SET total_jobs = total_jobs + 1 WHERE id = $1",
     case query(Pool, SQL, [BatchId]) of
         #{command := update} -> ok;
         {error, _} = Err -> Err
@@ -90,7 +90,7 @@ job_discarded(Pool, BatchId) ->
 -doc "Get a batch by ID.".
 -spec get(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
 get(Pool, BatchId) ->
-    SQL = <<"SELECT * FROM shigoto_batches WHERE id = $1">>,
+    SQL = ~"SELECT * FROM shigoto_batches WHERE id = $1",
     case query(Pool, SQL, [BatchId]) of
         #{rows := [Row]} -> {ok, Row};
         #{rows := []} -> {error, not_found};
@@ -112,7 +112,7 @@ maybe_fire_callback(Pool, BatchId, Batch, Event) ->
     case {AllDone, CallbackWorkerBin} of
         {true, null} ->
             %% Atomically transition to finished — only one concurrent caller wins
-            case try_transition(Pool, BatchId, <<"active">>, <<"finished">>) of
+            case try_transition(Pool, BatchId, ~"active", ~"finished") of
                 ok ->
                     shigoto_telemetry:batch_completed(Batch),
                     finish_batch(Pool, Batch);
@@ -122,18 +122,18 @@ maybe_fire_callback(Pool, BatchId, Batch, Event) ->
         {true, _} ->
             NewState =
                 case Event of
-                    complete -> <<"callback_completing">>;
-                    discard -> <<"callback_discarding">>
+                    complete -> ~"callback_completing";
+                    discard -> ~"callback_discarding"
                 end,
             %% Atomically transition — only one concurrent caller wins
-            case try_transition(Pool, BatchId, <<"active">>, NewState) of
+            case try_transition(Pool, BatchId, ~"active", NewState) of
                 ok ->
                     shigoto_telemetry:batch_completed(Batch),
                     CallbackArgs0 = decode_callback_args(Batch),
                     CallbackArgs =
                         case Event of
                             complete -> CallbackArgs0;
-                            discard -> CallbackArgs0#{<<"_batch_event">> => <<"discard">>}
+                            discard -> CallbackArgs0#{~"_batch_event" => ~"discard"}
                         end,
                     CallbackWorker = binary_to_existing_atom(CallbackWorkerBin, utf8),
                     _ = shigoto:insert(#{
@@ -149,7 +149,7 @@ maybe_fire_callback(Pool, BatchId, Batch, Event) ->
     end.
 
 try_transition(Pool, BatchId, FromState, ToState) ->
-    SQL = <<"UPDATE shigoto_batches SET state = $3 WHERE id = $1 AND state = $2">>,
+    SQL = ~"UPDATE shigoto_batches SET state = $3 WHERE id = $1 AND state = $2",
     case query(Pool, SQL, [BatchId, FromState, ToState]) of
         #{num_rows := 1} -> ok;
         #{num_rows := 0} -> already_transitioned;
@@ -157,7 +157,7 @@ try_transition(Pool, BatchId, FromState, ToState) ->
     end.
 
 finish_batch(Pool, Batch) ->
-    SQL = <<"UPDATE shigoto_batches SET state = 'finished', completed_at = now() WHERE id = $1">>,
+    SQL = ~"UPDATE shigoto_batches SET state = 'finished', completed_at = now() WHERE id = $1",
     _ = query(Pool, SQL, [maps:get(id, Batch)]),
     ok.
 

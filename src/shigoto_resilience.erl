@@ -132,7 +132,7 @@ check_global_concurrency(Worker, _Job = #{}) ->
             MaxGlobal = Worker:global_concurrency(),
             Pool = shigoto_config:pool(),
             WorkerBin = atom_to_binary(Worker, utf8),
-            SQL = <<"SELECT count(*) FROM shigoto_jobs WHERE worker = $1 AND state = 'executing'">>,
+            SQL = ~"SELECT count(*) FROM shigoto_jobs WHERE worker = $1 AND state = 'executing'",
             case
                 pgo:query(SQL, [WorkerBin], #{
                     pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
@@ -257,13 +257,18 @@ maybe_create_breaker(Worker) ->
         end,
     seki:new_breaker(Name, Opts).
 
+%% Atom creation is safe: bounded by the number of worker modules (loaded at compile time).
+%% Each worker creates at most 3 atoms, once, on first use.
 limiter_name(Worker) ->
+    % elp:ignore W0023
     binary_to_atom(<<"shigoto_rl_", (atom_to_binary(Worker))/binary>>).
 
 bulkhead_name(Worker) ->
+    % elp:ignore W0023
     binary_to_atom(<<"shigoto_bh_", (atom_to_binary(Worker))/binary>>).
 
 breaker_name(Worker) ->
+    % elp:ignore W0023
     binary_to_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>).
 
 priority_to_seki(P) when P >= 10 -> 0;

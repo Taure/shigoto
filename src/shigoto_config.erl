@@ -29,7 +29,7 @@ pool() ->
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
 -spec queues() -> [{binary(), pos_integer()}].
 queues() ->
-    application:get_env(shigoto, queues, [{<<"default">>, 10}]).
+    application:get_env(shigoto, queues, [{~"default", 10}]).
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().

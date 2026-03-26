@@ -67,7 +67,7 @@ insert_all(Pool, JobParamsList, Opts) ->
             Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
             Args = encode_json(maps:get(args, JobParams, #{})),
             EncArgs = shigoto_crypto:encrypt(Args),
-            Queue = maps:get(queue, JobParams, maps:get(queue, Opts, <<"default">>)),
+            Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
             Priority = maps:get(priority, JobParams, 0),
             MaxAttempts = maps:get(max_attempts, JobParams, 3),
             ScheduledAt = maps:get(scheduled_at, JobParams, now_timestamptz()),
@@ -76,11 +76,11 @@ insert_all(Pool, JobParamsList, Opts) ->
             BatchId = maps:get(batch, JobParams, null),
             PartitionKey = maps:get(partition_key, JobParams, null),
             DependsOn = maps:get(depends_on, JobParams, []),
-            Placeholders = lists:join(<<", ">>, [
+            Placeholders = lists:join(~", ", [
                 <<"$", (integer_to_binary(Idx + N))/binary>>
              || N <- lists:seq(0, ParamsPerJob - 1)
             ]),
-            Clause = iolist_to_binary([<<"(">>, Placeholders, <<")">>]),
+            Clause = iolist_to_binary([~"(", Placeholders, ~")"]),
             NewParams =
                 Params ++
                     [
@@ -100,14 +100,14 @@ insert_all(Pool, JobParamsList, Opts) ->
         {[], [], 1},
         Jobs
     ),
-    ValuesSQL = lists:join(<<", ">>, lists:reverse(ValueClauses)),
+    ValuesSQL = lists:join(~", ", lists:reverse(ValueClauses)),
     SQL = iolist_to_binary([
         <<
             "INSERT INTO shigoto_jobs "
             "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
         >>,
         ValuesSQL,
-        <<" RETURNING *">>
+        ~" RETURNING *"
     ]),
     case query(Pool, SQL, AllParams) of
         #{rows := Rows} ->
@@ -187,7 +187,7 @@ claim_jobs_fair(Pool, Queue, Limit) ->
 -spec complete_job(atom(), integer()) -> ok | {error, term()}.
 complete_job(Pool, JobId) ->
     SQL =
-        <<"UPDATE shigoto_jobs SET state = 'completed', completed_at = now() WHERE id = $1 RETURNING batch_id">>,
+        ~"UPDATE shigoto_jobs SET state = 'completed', completed_at = now() WHERE id = $1 RETURNING batch_id",
     _ = resolve_dependencies(Pool, JobId),
     case query(Pool, SQL, [JobId]) of
         #{rows := [#{batch_id := BatchId}]} when BatchId =/= null ->
@@ -215,7 +215,7 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
             "RETURNING *"
         >>,
     case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds]) of
-        #{rows := [#{state := <<"discarded">>} = Updated]} ->
+        #{rows := [#{state := ~"discarded"} = Updated]} ->
             _ = resolve_dependencies(Pool, JobId),
             _ = maybe_on_discard(Job, Updated),
             _ = maybe_batch_discard(Pool, Updated),
@@ -229,7 +229,7 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
 -doc "Mark a job as discarded. Resolves dependencies so dependent jobs aren't stuck.".
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
-    SQL = <<"UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now() WHERE id = $1">>,
+    SQL = ~"UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now() WHERE id = $1",
     _ = resolve_dependencies(Pool, JobId),
     case query(Pool, SQL, [JobId]) of
         #{command := update} -> ok;
@@ -257,15 +257,15 @@ cancel_by(Pool, Filters) ->
     WhereSQL =
         case WhereClauses of
             [] ->
-                <<"state IN ('available', 'retryable')">>;
+                ~"state IN ('available', 'retryable')";
             _ ->
                 iolist_to_binary([
-                    <<"state IN ('available', 'retryable') AND ">>,
-                    lists:join(<<" AND ">>, WhereClauses)
+                    ~"state IN ('available', 'retryable') AND ",
+                    lists:join(~" AND ", WhereClauses)
                 ])
         end,
     SQL = iolist_to_binary([
-        <<"UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ">>,
+        ~"UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
         WhereSQL
     ]),
     case query(Pool, SQL, Params) of
@@ -307,15 +307,15 @@ retry_by(Pool, Filters) ->
     WhereSQL =
         case WhereClauses of
             [] ->
-                <<"state IN ('discarded', 'cancelled')">>;
+                ~"state IN ('discarded', 'cancelled')";
             _ ->
                 iolist_to_binary([
-                    <<"state IN ('discarded', 'cancelled') AND ">>,
-                    lists:join(<<" AND ">>, WhereClauses)
+                    ~"state IN ('discarded', 'cancelled') AND ",
+                    lists:join(~" AND ", WhereClauses)
                 ])
         end,
     SQL = iolist_to_binary([
-        <<"UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ">>,
+        ~"UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ",
         WhereSQL
     ]),
     case query(Pool, SQL, Params) of
@@ -359,7 +359,7 @@ prune_jobs(Pool, Days) ->
 -spec resolve_dependencies(atom(), integer()) -> {ok, non_neg_integer()} | {error, term()}.
 resolve_dependencies(Pool, CompletedJobId) ->
     SQL =
-        <<"UPDATE shigoto_jobs SET depends_on = array_remove(depends_on, $1) WHERE $1 = ANY(depends_on)">>,
+        ~"UPDATE shigoto_jobs SET depends_on = array_remove(depends_on, $1) WHERE $1 = ANY(depends_on)",
     case query(Pool, SQL, [CompletedJobId]) of
         #{num_rows := Count} -> {ok, Count};
         {error, _} = Err -> Err
@@ -368,7 +368,7 @@ resolve_dependencies(Pool, CompletedJobId) ->
 -doc "Update job progress (0-100).".
 -spec update_progress(atom(), integer(), 0..100) -> ok | {error, term()}.
 update_progress(Pool, JobId, Progress) ->
-    SQL = <<"UPDATE shigoto_jobs SET progress = $2 WHERE id = $1">>,
+    SQL = ~"UPDATE shigoto_jobs SET progress = $2 WHERE id = $1",
     case query(Pool, SQL, [JobId, Progress]) of
         #{command := update} -> ok;
         {error, _} = Err -> Err
@@ -377,7 +377,7 @@ update_progress(Pool, JobId, Progress) ->
 -doc "Get a job by ID.".
 -spec get_job(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
 get_job(Pool, JobId) ->
-    SQL = <<"SELECT * FROM shigoto_jobs WHERE id = $1">>,
+    SQL = ~"SELECT * FROM shigoto_jobs WHERE id = $1",
     case query(Pool, SQL, [JobId]) of
         #{rows := [Row]} -> {ok, decrypt_job_args(Row)};
         #{rows := []} -> {error, not_found};
@@ -438,7 +438,7 @@ upsert_cron_entry(Pool, Entry) ->
             atom_to_binary(maps:get(worker, Entry), utf8),
             ArgsJson,
             maps:get(schedule, Entry),
-            maps:get(queue, Entry, <<"default">>),
+            maps:get(queue, Entry, ~"default"),
             maps:get(priority, Entry, 0),
             maps:get(max_attempts, Entry, 3)
         ])
@@ -450,7 +450,7 @@ upsert_cron_entry(Pool, Entry) ->
 -doc "Get cron entries that are due for scheduling.".
 -spec get_due_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
 get_due_cron_entries(Pool) ->
-    SQL = <<"SELECT * FROM shigoto_cron">>,
+    SQL = ~"SELECT * FROM shigoto_cron",
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
@@ -464,14 +464,14 @@ validate_dependencies(_Pool, []) ->
     ok;
 validate_dependencies(Pool, DepIds) ->
     %% Check that all dependency IDs exist
-    Placeholders = lists:join(<<", ">>, [
+    Placeholders = lists:join(~", ", [
         <<"$", (integer_to_binary(I))/binary>>
      || I <- lists:seq(1, length(DepIds))
     ]),
     SQL = iolist_to_binary([
-        <<"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (">>,
+        ~"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (",
         Placeholders,
-        <<")">>
+        ~")"
     ]),
     case query(Pool, SQL, DepIds) of
         #{rows := Rows} ->
@@ -545,12 +545,12 @@ resolve_unique(JobParams, Opts) ->
 insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
-    Queue = maps:get(queue, JobParams, maps:get(queue, Opts, <<"default">>)),
+    Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
     UniqueKey = build_unique_key(UniqueOpts, Worker, Args, Queue),
     LockKey = erlang:phash2(UniqueKey),
     pgo:transaction(
         fun() ->
-            _ = query(Pool, <<"SELECT pg_advisory_xact_lock($1)::text">>, [LockKey]),
+            _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
             case find_existing_job(Pool, UniqueOpts, UniqueKey) of
                 {ok, Existing} ->
                     maybe_replace(Pool, Existing, JobParams, UniqueOpts);
@@ -570,7 +570,7 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
         end,
         lists:sort(Keys)
     ),
-    iolist_to_binary(lists:join(<<":">>, Parts)).
+    iolist_to_binary(lists:join(~":", Parts)).
 
 find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
     StatesClause = states_in_clause(States),
@@ -579,18 +579,18 @@ find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
             infinity ->
                 {
                     iolist_to_binary([
-                        <<"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (">>,
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
                         StatesClause,
-                        <<") ORDER BY id ASC LIMIT 1">>
+                        ~") ORDER BY id ASC LIMIT 1"
                     ]),
                     [UniqueKey]
                 };
             Secs ->
                 {
                     iolist_to_binary([
-                        <<"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (">>,
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
                         StatesClause,
-                        <<") AND inserted_at >= now() - make_interval(secs => $2) ORDER BY id ASC LIMIT 1">>
+                        ~") AND inserted_at >= now() - make_interval(secs => $2) ORDER BY id ASC LIMIT 1"
                     ]),
                     [UniqueKey, Secs]
                 }
@@ -602,17 +602,17 @@ find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
 
 states_in_clause(States) ->
     Quoted = [<<"'", (atom_to_binary(S))/binary, "'">> || S <- States],
-    lists:join(<<", ">>, Quoted).
+    lists:join(~", ", Quoted).
 
 maybe_replace(Pool, Existing, _JobParams, #{replace := [], debounce := Seconds}) when
     is_integer(Seconds), Seconds > 0
 ->
     %% Debounce: reset scheduled_at to now() + Seconds
-    IBin = <<"2">>,
+    IBin = ~"2",
     SQL = iolist_to_binary([
-        <<"UPDATE shigoto_jobs SET scheduled_at = now() + make_interval(secs => $">>,
+        ~"UPDATE shigoto_jobs SET scheduled_at = now() + make_interval(secs => $",
         IBin,
-        <<") WHERE id = $1 RETURNING *">>
+        ~") WHERE id = $1 RETURNING *"
     ]),
     case query(Pool, SQL, [maps:get(id, Existing), Seconds]) of
         #{rows := [Updated]} -> {ok, {conflict, Updated}};
@@ -641,11 +641,11 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
             false ->
                 {SetParts0, Params0}
         end,
-    SetClause = lists:join(<<", ">>, lists:reverse(SetParts)),
+    SetClause = lists:join(~", ", lists:reverse(SetParts)),
     SQL = iolist_to_binary([
-        <<"UPDATE shigoto_jobs SET ">>,
+        ~"UPDATE shigoto_jobs SET ",
         SetClause,
-        <<" WHERE id = $1 RETURNING *">>
+        ~" WHERE id = $1 RETURNING *"
     ]),
     case query(Pool, SQL, Params) of
         #{rows := [Updated]} -> {ok, {conflict, Updated}};
@@ -653,13 +653,13 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
     end.
 
 replace_field_value(args, JobParams) ->
-    {<<"args">>, encode_json(maps:get(args, JobParams, #{}))};
+    {~"args", encode_json(maps:get(args, JobParams, #{}))};
 replace_field_value(priority, JobParams) ->
-    {<<"priority">>, maps:get(priority, JobParams, 0)};
+    {~"priority", maps:get(priority, JobParams, 0)};
 replace_field_value(max_attempts, JobParams) ->
-    {<<"max_attempts">>, maps:get(max_attempts, JobParams, 3)};
+    {~"max_attempts", maps:get(max_attempts, JobParams, 3)};
 replace_field_value(scheduled_at, JobParams) ->
-    {<<"scheduled_at">>, maps:get(scheduled_at, JobParams, now_timestamptz())}.
+    {~"scheduled_at", maps:get(scheduled_at, JobParams, now_timestamptz())}.
 
 %%----------------------------------------------------------------------
 %% Internal: insert
@@ -668,7 +668,7 @@ replace_field_value(scheduled_at, JobParams) ->
 do_insert(Pool, JobParams, Opts, UniqueKey) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
-    Queue = maps:get(queue, JobParams, maps:get(queue, Opts, <<"default">>)),
+    Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
     Priority = maps:get(priority, JobParams, 0),
     MaxAttempts = maps:get(max_attempts, JobParams, 3),
     ScheduledAt = maps:get(scheduled_at, JobParams, now_timestamptz()),
@@ -749,14 +749,14 @@ build_structured_error(Job, Reason) ->
     Attempt = maps:get(attempt, Job, 0),
     {ErrorBin, StackBin} = format_structured_reason(Reason),
     Error = #{
-        <<"error">> => ErrorBin,
-        <<"at">> => now_timestamptz_str(),
-        <<"attempt">> => Attempt,
-        <<"worker">> => format_worker(Worker)
+        ~"error" => ErrorBin,
+        ~"at" => now_timestamptz_str(),
+        ~"attempt" => Attempt,
+        ~"worker" => format_worker(Worker)
     },
     case StackBin of
         <<>> -> Error;
-        _ -> Error#{<<"stacktrace">> => StackBin}
+        _ -> Error#{~"stacktrace" => StackBin}
     end.
 
 format_structured_reason({Class, Reason, Stacktrace}) when is_list(Stacktrace) ->
@@ -772,7 +772,7 @@ format_structured_reason(Reason) ->
 
 format_worker(W) when is_atom(W) -> atom_to_binary(W, utf8);
 format_worker(W) when is_binary(W) -> W;
-format_worker(_) -> <<"unknown">>.
+format_worker(_) -> ~"unknown".
 
 %%----------------------------------------------------------------------
 %% Internal: batch helpers
@@ -781,14 +781,14 @@ format_worker(_) -> <<"unknown">>.
 maybe_increment_batch(_Pool, null) -> ok;
 maybe_increment_batch(Pool, BatchId) -> shigoto_batch:increment_total(Pool, BatchId).
 
-maybe_batch_discard(Pool, #{state := <<"discarded">>, batch_id := BatchId}) when
+maybe_batch_discard(Pool, #{state := ~"discarded", batch_id := BatchId}) when
     BatchId =/= null
 ->
     shigoto_batch:job_discarded(Pool, BatchId);
 maybe_batch_discard(_Pool, _Job) ->
     ok.
 
-maybe_on_discard(OrigJob, #{state := <<"discarded">>, errors := Errors}) ->
+maybe_on_discard(OrigJob, #{state := ~"discarded", errors := Errors}) ->
     Worker = resolve_worker_atom(OrigJob),
     _ = code:ensure_loaded(Worker),
     case erlang:function_exported(Worker, on_discard, 2) of
@@ -818,7 +818,7 @@ update_batch_counts(Pool, BatchIds) ->
     lists:foreach(
         fun(BatchId) ->
             Count = length([B || B <- BatchIds, B =:= BatchId]),
-            SQL = <<"UPDATE shigoto_batches SET total_jobs = total_jobs + $2 WHERE id = $1">>,
+            SQL = ~"UPDATE shigoto_batches SET total_jobs = total_jobs + $2 WHERE id = $1",
             _ = query(Pool, SQL, [BatchId, Count])
         end,
         UniqueBatchIds

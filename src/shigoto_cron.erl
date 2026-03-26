@@ -54,12 +54,12 @@ with_leader_lock(Fun) ->
         fun() ->
             case
                 pgo:query(
-                    <<"SELECT pg_try_advisory_xact_lock($1)::text">>,
+                    ~"SELECT pg_try_advisory_xact_lock($1)::text",
                     [?CRON_LOCK_ID],
                     #{pool => Pool}
                 )
             of
-                #{rows := [{<<"true">>}]} ->
+                #{rows := [{~"true"}]} ->
                     Fun();
                 _ ->
                     ok
@@ -80,7 +80,7 @@ check_cron_entries() ->
                         #{
                             worker => Worker,
                             args => Args,
-                            queue => <<"default">>
+                            queue => ~"default"
                         },
                         #{
                             unique => #{
@@ -123,7 +123,7 @@ catch_up_entry(Schedule, Worker, Args, DbEntries, Now) ->
                     case shigoto_cron_parser:matches(Expr, Minute) of
                         true ->
                             _ = shigoto:insert(
-                                #{worker => Worker, args => Args, queue => <<"default">>},
+                                #{worker => Worker, args => Args, queue => ~"default"},
                                 #{
                                     unique => #{
                                         keys => [worker, args],
