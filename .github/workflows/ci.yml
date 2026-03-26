@@ -6,12 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.5
-    permissions:
-      contents: write
-      pull-requests: write
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.9
     with:
       version-file: '.tool-versions'
       enable-ct: true
@@ -25,5 +26,11 @@ jobs:
       enable-sbom-scan: true
       enable-dependency-submission: true
       enable-summary: true
-
       extra-services-compose: 'docker-compose.ci.yml'
+
+  release:
+    needs: ci
+    if: ${{ github.event_name == 'push' }}
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.0.9
+    permissions:
+      contents: write
