@@ -79,28 +79,29 @@ check_entries([Entry | Rest], NowUtc) ->
     {Name, Schedule, Worker, Args} = normalize_entry(Entry),
     Tz = entry_timezone(Entry),
     CheckTime = to_timezone(NowUtc, Tz),
-    case should_run(Schedule, CheckTime) of
-        true ->
-            shigoto_telemetry:cron_scheduled(
-                eqwalizer:fix_me(Name), eqwalizer:fix_me(Worker), eqwalizer:fix_me(Schedule)
-            ),
-            _ = shigoto:insert(
-                #{
-                    worker => Worker,
-                    args => Args,
-                    queue => ~"default"
-                },
-                #{
-                    unique => #{
-                        keys => [worker, args],
-                        period => 60,
-                        states => [available, executing]
+    _ =
+        case should_run(Schedule, CheckTime) of
+            true ->
+                shigoto_telemetry:cron_scheduled(
+                    eqwalizer:fix_me(Name), eqwalizer:fix_me(Worker), eqwalizer:fix_me(Schedule)
+                ),
+                shigoto:insert(
+                    #{
+                        worker => Worker,
+                        args => Args,
+                        queue => ~"default"
+                    },
+                    #{
+                        unique => #{
+                            keys => [worker, args],
+                            period => 60,
+                            states => [available, executing]
+                        }
                     }
-                }
-            );
-        false ->
-            ok
-    end,
+                );
+            false ->
+                ok
+        end,
     check_entries(Rest, NowUtc).
 
 catch_up_missed() ->
