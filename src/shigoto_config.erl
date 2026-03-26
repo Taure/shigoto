@@ -36,7 +36,7 @@ queues() ->
 poll_interval() ->
     eqwalizer:fix_me(application:get_env(shigoto, poll_interval, 5000)).
 
--doc "Cron job entries. Each: `{Name, Schedule, Worker, Args}`.".
+-doc "Cron job entries. Each: `{Name, Schedule, Worker, Args}` or `{Name, Schedule, Worker, Args, #{timezone => Offset}}`.".
 -spec cron_entries() -> list().
 cron_entries() ->
     eqwalizer:fix_me(application:get_env(shigoto, cron, [])).

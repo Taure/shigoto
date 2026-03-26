@@ -277,8 +277,23 @@ apply_with_timeout(Module, Function, Args, Timeout) ->
         {'DOWN', Ref, process, Pid, Reason} ->
             {error, Reason}
     after Timeout ->
-        erlang:demonitor(Ref, [flush]),
+        graceful_kill(Pid, Ref)
+    end.
+
+graceful_kill(Pid, Ref) ->
+    %% Try graceful shutdown first (gives worker a chance to clean up)
+    exit(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, _Reason} ->
+            {error, timeout}
+    after 5000 ->
+        %% Worker didn't respond to shutdown — force kill
         exit(Pid, kill),
+        receive
+            {'DOWN', Ref, process, Pid, _} -> ok
+        after 1000 -> ok
+        end,
+        erlang:demonitor(Ref, [flush]),
         {error, timeout}
     end.
 

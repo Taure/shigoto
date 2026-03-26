@@ -70,34 +70,38 @@ with_leader_lock(Fun) ->
 
 check_cron_entries() ->
     Entries = shigoto_config:cron_entries(),
-    Now = calendar:universal_time(),
-    lists:foreach(
-        fun({Name, Schedule, Worker, Args}) ->
-            case should_run(Schedule, Now) of
-                true ->
-                    shigoto_telemetry:cron_scheduled(
-                        eqwalizer:fix_me(Name), eqwalizer:fix_me(Worker), eqwalizer:fix_me(Schedule)
-                    ),
-                    _ = shigoto:insert(
-                        #{
-                            worker => Worker,
-                            args => Args,
-                            queue => ~"default"
-                        },
-                        #{
-                            unique => #{
-                                keys => [worker, args],
-                                period => 60,
-                                states => [available, executing]
-                            }
-                        }
-                    );
-                false ->
-                    ok
-            end
-        end,
-        Entries
-    ).
+    NowUtc = calendar:universal_time(),
+    check_entries(Entries, NowUtc).
+
+check_entries([], _NowUtc) ->
+    ok;
+check_entries([Entry | Rest], NowUtc) ->
+    {Name, Schedule, Worker, Args} = normalize_entry(Entry),
+    Tz = entry_timezone(Entry),
+    CheckTime = to_timezone(NowUtc, Tz),
+    case should_run(Schedule, CheckTime) of
+        true ->
+            shigoto_telemetry:cron_scheduled(
+                eqwalizer:fix_me(Name), eqwalizer:fix_me(Worker), eqwalizer:fix_me(Schedule)
+            ),
+            _ = shigoto:insert(
+                #{
+                    worker => Worker,
+                    args => Args,
+                    queue => ~"default"
+                },
+                #{
+                    unique => #{
+                        keys => [worker, args],
+                        period => 60,
+                        states => [available, executing]
+                    }
+                }
+            );
+        false ->
+            ok
+    end,
+    check_entries(Rest, NowUtc).
 
 catch_up_missed() ->
     Pool = shigoto_config:pool(),
@@ -176,3 +180,48 @@ should_run(Schedule, Now) ->
         {error, _Reason} ->
             false
     end.
+
+%% Cron entries can be 4-tuple {Name, Schedule, Worker, Args} or
+%% 5-tuple {Name, Schedule, Worker, Args, Opts} where Opts is a map
+%% with optional timezone key.
+normalize_entry({Name, Schedule, Worker, Args}) ->
+    {Name, Schedule, Worker, Args};
+normalize_entry({Name, Schedule, Worker, Args, _Opts}) ->
+    {Name, Schedule, Worker, Args}.
+
+entry_timezone({_Name, _Schedule, _Worker, _Args, #{timezone := Tz}}) ->
+    Tz;
+entry_timezone(_) ->
+    utc.
+
+%% Convert UTC datetime to a target timezone for cron matching.
+%% Supports integer hour offsets and the atom 'utc'.
+to_timezone(UtcDatetime, utc) ->
+    UtcDatetime;
+to_timezone(UtcDatetime, Offset) when is_integer(Offset) ->
+    Secs = calendar:datetime_to_gregorian_seconds(UtcDatetime),
+    calendar:gregorian_seconds_to_datetime(Secs + Offset * 3600);
+to_timezone(UtcDatetime, OffsetBin) when is_binary(OffsetBin) ->
+    case parse_offset(OffsetBin) of
+        {ok, Hours} -> to_timezone(UtcDatetime, Hours);
+        error -> UtcDatetime
+    end;
+to_timezone(UtcDatetime, _) ->
+    UtcDatetime.
+
+parse_offset(<<"+", Rest/binary>>) ->
+    try
+        {ok, binary_to_integer(Rest)}
+    catch
+        _:_ -> error
+    end;
+parse_offset(<<"-", Rest/binary>>) ->
+    try
+        {ok, -binary_to_integer(Rest)}
+    catch
+        _:_ -> error
+    end;
+parse_offset(~"UTC") ->
+    {ok, 0};
+parse_offset(_) ->
+    error.
