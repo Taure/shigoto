@@ -35,7 +35,7 @@ execute_sync(Job, Pool, Timeout) ->
                 ok;
             {snooze, Seconds} ->
                 _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
-                _ = shigoto_telemetry:job_snoozed(Job, <<"snooze">>),
+                _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
                 {snooze, Seconds};
             {error, FailReason} ->
                 Duration = erlang:monotonic_time(native) - T0,
@@ -91,7 +91,7 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
                 {stop, normal, State};
             {snooze, Seconds} ->
                 _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
-                _ = shigoto_telemetry:job_snoozed(Job, <<"snooze">>),
+                _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
                 gen_server:cast(QueuePid, {job_finished, JobId, self()}),
                 {stop, normal, State};
             {error, Reason} ->
@@ -181,9 +181,12 @@ notify_breaker_success(Worker) ->
         undefined ->
             ok;
         _ ->
-            BreakerName = binary_to_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>),
-            catch seki:call(BreakerName, fun() -> ok end),
-            ok
+            BreakerName = breaker_name(Worker),
+            try seki:call(BreakerName, fun() -> ok end) of
+                _ -> ok
+            catch
+                _:_ -> ok
+            end
     end.
 
 notify_breaker_failure(Worker) ->
@@ -191,10 +194,16 @@ notify_breaker_failure(Worker) ->
         undefined ->
             ok;
         _ ->
-            BreakerName = binary_to_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>),
-            catch seki:call(BreakerName, fun() -> {error, job_failed} end),
-            ok
+            BreakerName = breaker_name(Worker),
+            try seki:call(BreakerName, fun() -> {error, job_failed} end) of
+                _ -> ok
+            catch
+                _:_ -> ok
+            end
     end.
+
+breaker_name(Worker) ->
+    binary_to_existing_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>).
 
 %%----------------------------------------------------------------------
 %% Internal: backoff

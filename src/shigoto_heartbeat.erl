@@ -57,9 +57,9 @@ update_heartbeats() ->
                     Pool = shigoto_config:pool(),
                     Placeholders = placeholders(length(JobIds)),
                     SQL = iolist_to_binary([
-                        <<"UPDATE shigoto_jobs SET heartbeat_at = now() WHERE id IN (">>,
+                        ~"UPDATE shigoto_jobs SET heartbeat_at = now() WHERE id IN (",
                         Placeholders,
-                        <<")">>
+                        ~")"
                     ]),
                     _ = pgo:query(SQL, JobIds, #{pool => Pool, decode_opts => ?DECODE_OPTS}),
                     ok
@@ -67,7 +67,7 @@ update_heartbeats() ->
     end.
 
 placeholders(N) ->
-    lists:join(<<", ">>, [
-        iolist_to_binary([<<"$">>, integer_to_binary(I)])
+    lists:join(~", ", [
+        iolist_to_binary([~"$", integer_to_binary(I)])
      || I <- lists:seq(1, N)
     ]).

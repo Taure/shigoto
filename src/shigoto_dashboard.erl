@@ -96,17 +96,17 @@ search_jobs(Filters) ->
     {WhereClauses, Params, NextIdx} = build_search_clauses(SearchFilters, 1),
     WhereSQL =
         case WhereClauses of
-            [] -> <<"true">>;
-            _ -> iolist_to_binary(lists:join(<<" AND ">>, WhereClauses))
+            [] -> ~"true";
+            _ -> iolist_to_binary(lists:join(~" AND ", WhereClauses))
         end,
     LimitIdx = integer_to_binary(NextIdx),
     OffsetIdx = integer_to_binary(NextIdx + 1),
     SQL = iolist_to_binary([
-        <<"SELECT * FROM shigoto_jobs WHERE ">>,
+        ~"SELECT * FROM shigoto_jobs WHERE ",
         WhereSQL,
-        <<" ORDER BY id DESC LIMIT $">>,
+        ~" ORDER BY id DESC LIMIT $",
         LimitIdx,
-        <<" OFFSET $">>,
+        ~" OFFSET $",
         OffsetIdx
     ]),
     case query(SQL, Params ++ [Limit, Offset]) of
@@ -173,6 +173,7 @@ query(SQL, Params) ->
 pivot_queue_stats(Rows) ->
     GroupedByQueue = lists:foldl(
         fun(#{queue := Queue, state := State, count := Count}, Acc) ->
+            % elp:ignore W0030
             QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
             StateAtom = binary_to_existing_atom(State, utf8),
             maps:put(Queue, QueueMap#{StateAtom => Count}, Acc)

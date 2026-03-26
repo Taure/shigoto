@@ -22,14 +22,14 @@ up(Pool) ->
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.
 down(Pool) ->
-    _ = pgo:query(<<"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs">>, [], #{
+    _ = pgo:query(~"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs", [], #{
         pool => Pool
     }),
-    _ = pgo:query(<<"DROP FUNCTION IF EXISTS shigoto_notify_insert">>, [], #{pool => Pool}),
-    _ = pgo:query(<<"DROP TABLE IF EXISTS shigoto_jobs_archive">>, [], #{pool => Pool}),
-    _ = pgo:query(<<"DROP TABLE IF EXISTS shigoto_batches CASCADE">>, [], #{pool => Pool}),
-    _ = pgo:query(<<"DROP TABLE IF EXISTS shigoto_cron">>, [], #{pool => Pool}),
-    _ = pgo:query(<<"DROP TABLE IF EXISTS shigoto_jobs">>, [], #{pool => Pool}),
+    _ = pgo:query(~"DROP FUNCTION IF EXISTS shigoto_notify_insert", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs_archive", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_batches CASCADE", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_cron", [], #{pool => Pool}),
+    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs", [], #{pool => Pool}),
     ok.
 
 %%----------------------------------------------------------------------
@@ -116,12 +116,12 @@ v3_statements() ->
 
 v4_statements() ->
     [
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'">>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_tags_idx ON shigoto_jobs USING GIN (tags)">>,
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS progress INTEGER NOT NULL DEFAULT 0">>,
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS batch_id BIGINT">>,
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ">>,
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ">>,
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_tags_idx ON shigoto_jobs USING GIN (tags)",
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS progress INTEGER NOT NULL DEFAULT 0",
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS batch_id BIGINT",
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ",
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
         <<
             "CREATE TABLE IF NOT EXISTS shigoto_batches (\n"
             "  id BIGSERIAL PRIMARY KEY,\n"
@@ -135,17 +135,17 @@ v4_statements() ->
             "  completed_at TIMESTAMPTZ\n"
             ")"
         >>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_batch_id_idx ON shigoto_jobs (batch_id) WHERE batch_id IS NOT NULL">>
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_batch_id_idx ON shigoto_jobs (batch_id) WHERE batch_id IS NOT NULL"
     ].
 
 v5_statements() ->
     [
         %% Partitioned queues
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS partition_key TEXT">>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_partition_idx ON shigoto_jobs (queue, partition_key, state, scheduled_at) WHERE state = 'available' AND partition_key IS NOT NULL">>,
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS partition_key TEXT",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_partition_idx ON shigoto_jobs (queue, partition_key, state, scheduled_at) WHERE state = 'available' AND partition_key IS NOT NULL",
         %% Job dependencies
-        <<"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS depends_on BIGINT[] NOT NULL DEFAULT '{}'">>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_depends_on_idx ON shigoto_jobs USING GIN (depends_on) WHERE depends_on != '{}'">>,
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS depends_on BIGINT[] NOT NULL DEFAULT '{}'",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_depends_on_idx ON shigoto_jobs USING GIN (depends_on) WHERE depends_on != '{}'",
         %% Archive table (same schema as jobs)
         <<
             "CREATE TABLE IF NOT EXISTS shigoto_jobs_archive (\n"
@@ -175,7 +175,7 @@ v5_statements() ->
             "  archived_at TIMESTAMPTZ NOT NULL DEFAULT now()\n"
             ")"
         >>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_worker_idx ON shigoto_jobs_archive (worker)">>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_queue_idx ON shigoto_jobs_archive (queue)">>,
-        <<"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_inserted_at_idx ON shigoto_jobs_archive (inserted_at)">>
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_worker_idx ON shigoto_jobs_archive (worker)",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_queue_idx ON shigoto_jobs_archive (queue)",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_inserted_at_idx ON shigoto_jobs_archive (inserted_at)"
     ].

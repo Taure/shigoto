@@ -233,15 +233,7 @@ health() ->
         {ok, Stale} = shigoto_dashboard:stale_jobs(),
         StaleCount = length(Stale),
         Queues = shigoto_config:queues(),
-        QueueStatuses = lists:map(
-            fun({Queue, _Conc}) ->
-                case with_queue_pid(Queue, fun erlang:is_process_alive/1) of
-                    true -> {Queue, healthy};
-                    _ -> {Queue, down}
-                end
-            end,
-            Queues
-        ),
+        QueueStatuses = check_queue_health(Queues, []),
         DownQueues = [Q || {Q, down} <- QueueStatuses],
         Status =
             case {StaleCount, DownQueues} of
@@ -270,6 +262,16 @@ with_queue_pid(Queue, Fun) ->
         {_, Pid, worker, _} when is_pid(Pid) -> Fun(Pid);
         _ -> {error, not_found}
     end.
+
+check_queue_health([], Acc) ->
+    lists:reverse(Acc);
+check_queue_health([{Queue, _Conc} | Rest], Acc) ->
+    Status =
+        case with_queue_pid(Queue, fun erlang:is_process_alive/1) of
+            true -> healthy;
+            _ -> down
+        end,
+    check_queue_health(Rest, [{Queue, Status} | Acc]).
 
 drain_loop(Pool, Queue, Timeout) ->
     case shigoto_repo:claim_jobs(Pool, Queue, 1) of

@@ -77,7 +77,7 @@ matches(Expr, {{Year, Month, Day}, {Hour, Minute, _Second}}) ->
 %%----------------------------------------------------------------------
 
 -spec parse_field(binary(), non_neg_integer(), non_neg_integer()) -> field().
-parse_field(<<"*">>, _Min, _Max) ->
+parse_field(~"*", _Min, _Max) ->
     star;
 parse_field(<<"*/", Rest/binary>>, Min, Max) ->
     Step = to_int(Rest),
@@ -109,7 +109,7 @@ parse_part(Bin, Min, Max) ->
 
 -spec parse_range(binary(), non_neg_integer(), non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.
-parse_range(<<"*">>, Min, Max) ->
+parse_range(~"*", Min, Max) ->
     {Min, Max};
 parse_range(Bin, Min, Max) ->
     case binary:split(Bin, ~"-") of
