@@ -689,6 +689,7 @@ replace_field_value(scheduled_at, JobParams) ->
 do_insert(Pool, JobParams, Opts, UniqueKey) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
+    Meta = maps:get(meta, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
     Priority = maps:get(priority, JobParams, 0),
     MaxAttempts = maps:get(max_attempts, JobParams, 3),
@@ -700,11 +701,13 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
     DependsOn = maps:get(depends_on, JobParams, []),
     ArgsJson = encode_json(Args),
     EncArgs = shigoto_crypto:encrypt(ArgsJson),
+    MetaJson = encode_json(Meta),
+    EncMeta = shigoto_crypto:encrypt(MetaJson),
     SQL =
         <<
             "INSERT INTO shigoto_jobs\n"
-            "(queue, worker, args, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on)\n"
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n"
+            "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on)\n"
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n"
             "RETURNING *"
         >>,
     case
@@ -712,6 +715,7 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
             Queue,
             Worker,
             EncArgs,
+            EncMeta,
             Priority,
             MaxAttempts,
             ScheduledAt,
@@ -873,10 +877,20 @@ decode_args(Args) when is_binary(Args) ->
 decode_args(_) ->
     #{}.
 
-decrypt_job_args(#{args := Args} = Job) when is_binary(Args) ->
-    Job#{args => shigoto_crypto:decrypt(Args)};
-decrypt_job_args(Job) ->
-    Job.
+decrypt_job_args(Job0) ->
+    Job1 =
+        case Job0 of
+            #{args := Args} when is_binary(Args) ->
+                Job0#{args => shigoto_crypto:decrypt(Args)};
+            _ ->
+                Job0
+        end,
+    case Job1 of
+        #{meta := Meta} when is_binary(Meta) ->
+            Job1#{meta => shigoto_crypto:decrypt(Meta)};
+        _ ->
+            Job1
+    end.
 
 query(Pool, SQL, Params) ->
     pgo:query(SQL, Params, #{pool => Pool, decode_opts => ?DECODE_OPTS}).
