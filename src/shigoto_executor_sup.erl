@@ -14,7 +14,7 @@ start_link() ->
 -doc "Start a new executor process for a job.".
 -spec start_executor(map(), module(), pid()) -> {ok, pid()} | {error, term()}.
 start_executor(Job, RepoMod, QueuePid) ->
-    supervisor:start_child(?MODULE, [Job, RepoMod, QueuePid]).
+    eqwalizer:fix_me(supervisor:start_child(?MODULE, [Job, RepoMod, QueuePid])).
 
 -doc false.
 init([]) ->

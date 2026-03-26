@@ -82,7 +82,7 @@ insert(JobParams, Opts) ->
     Pool = shigoto_config:pool(),
     case shigoto_repo:insert_job(Pool, JobParams, Opts) of
         {ok, Job} ->
-            shigoto_telemetry:job_inserted(Job),
+            shigoto_telemetry:job_inserted(eqwalizer:fix_me(Job)),
             {ok, Job};
         Other ->
             Other
@@ -99,7 +99,7 @@ insert_all(JobParamsList, Opts) ->
     Pool = shigoto_config:pool(),
     case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
         {ok, Jobs} ->
-            lists:foreach(fun shigoto_telemetry:job_inserted/1, Jobs),
+            lists:foreach(fun(J) -> shigoto_telemetry:job_inserted(eqwalizer:fix_me(J)) end, Jobs),
             {ok, Jobs};
         Other ->
             Other
@@ -210,8 +210,8 @@ add_queue(Queue, Concurrency) ->
         shutdown => ShutdownMs
     },
     case supervisor:start_child(shigoto_queue_sup, ChildSpec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
+        {ok, Pid} -> {ok, eqwalizer:fix_me(Pid)};
+        {error, {already_started, Pid}} -> {ok, eqwalizer:fix_me(Pid)};
         {error, _} = Err -> Err
     end.
 

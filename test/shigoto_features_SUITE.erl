@@ -35,6 +35,20 @@
     test_on_discard_callback/1
 ]).
 
+-eqwalizer({nowarn_function, {test_tags_worker_default, 1}}).
+-eqwalizer({nowarn_function, {test_tags_explicit, 1}}).
+-eqwalizer({nowarn_function, {test_progress_tracking, 1}}).
+-eqwalizer({nowarn_function, {test_structured_errors, 1}}).
+-eqwalizer({nowarn_function, {test_get_job, 1}}).
+-eqwalizer({nowarn_function, {test_encryption_roundtrip, 1}}).
+-eqwalizer({nowarn_function, {test_heartbeat_stale_threshold, 1}}).
+-eqwalizer({nowarn_function, {test_depends_on_blocks_claiming, 1}}).
+-eqwalizer({nowarn_function, {test_depends_on_resolved_on_complete, 1}}).
+-eqwalizer({nowarn_function, {test_depends_on_resolved_on_discard, 1}}).
+-eqwalizer({nowarn_function, {test_depends_on_resolved_on_cancel, 1}}).
+-eqwalizer({nowarn_function, {test_depends_on_chain, 1}}).
+-eqwalizer({nowarn_function, {test_on_discard_callback, 1}}).
+
 -define(POOL, shigoto_test_pool).
 
 all() ->

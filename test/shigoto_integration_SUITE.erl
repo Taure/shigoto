@@ -37,6 +37,24 @@
     test_snooze_job/1
 ]).
 
+-eqwalizer({nowarn_function, {test_cancel_job, 1}}).
+-eqwalizer({nowarn_function, {test_retry_job, 1}}).
+-eqwalizer({nowarn_function, {test_prune_old_jobs, 1}}).
+-eqwalizer({nowarn_function, {test_unique_prevents_duplicate, 1}}).
+-eqwalizer({nowarn_function, {test_unique_different_args_allowed, 1}}).
+-eqwalizer({nowarn_function, {test_unique_period_expiry, 1}}).
+-eqwalizer({nowarn_function, {test_unique_states_filter, 1}}).
+-eqwalizer({nowarn_function, {test_unique_replace_fields, 1}}).
+-eqwalizer({nowarn_function, {test_unique_worker_callback, 1}}).
+-eqwalizer({nowarn_function, {test_unique_opts_override, 1}}).
+-eqwalizer({nowarn_function, {test_unique_different_queues_allowed, 1}}).
+-eqwalizer({nowarn_function, {test_unique_key_stored, 1}}).
+-eqwalizer({nowarn_function, {test_non_unique_has_null_key, 1}}).
+-eqwalizer({nowarn_function, {test_worker_defaults_applied, 1}}).
+-eqwalizer({nowarn_function, {test_worker_defaults_overridden, 1}}).
+-eqwalizer({nowarn_function, {test_worker_defaults_partial, 1}}).
+-eqwalizer({nowarn_function, {test_cancel_executing_job, 1}}).
+
 -define(POOL, shigoto_test_pool).
 
 all() ->

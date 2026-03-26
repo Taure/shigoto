@@ -63,7 +63,11 @@ insert_all(Pool, JobParamsList, Opts) ->
     Jobs = [apply_worker_defaults(J) || J <- JobParamsList],
     ParamsPerJob = 10,
     {ValueClauses, AllParams, _} = lists:foldl(
-        fun(JobParams, {Clauses, Params, Idx}) ->
+        fun(JobParams0, {Clauses0, Params0, Idx0}) ->
+            JobParams = eqwalizer:fix_me(JobParams0),
+            Clauses = eqwalizer:fix_me(Clauses0),
+            Params = eqwalizer:fix_me(Params0),
+            Idx = eqwalizer:fix_me(Idx0),
             Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
             Args = encode_json(maps:get(args, JobParams, #{})),
             EncArgs = shigoto_crypto:encrypt(Args),
@@ -80,7 +84,7 @@ insert_all(Pool, JobParamsList, Opts) ->
                 <<"$", (integer_to_binary(Idx + N))/binary>>
              || N <- lists:seq(0, ParamsPerJob - 1)
             ]),
-            Clause = iolist_to_binary([~"(", Placeholders, ~")"]),
+            Clause = iolist_to_binary(eqwalizer:fix_me([~"(", Placeholders, ~")"])),
             NewParams =
                 Params ++
                     [
@@ -100,15 +104,17 @@ insert_all(Pool, JobParamsList, Opts) ->
         {[], [], 1},
         Jobs
     ),
-    ValuesSQL = lists:join(~", ", lists:reverse(ValueClauses)),
-    SQL = iolist_to_binary([
-        <<
-            "INSERT INTO shigoto_jobs "
-            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
-        >>,
-        ValuesSQL,
-        ~" RETURNING *"
-    ]),
+    ValuesSQL = lists:join(~", ", eqwalizer:fix_me(ValueClauses)),
+    SQL = iolist_to_binary(
+        eqwalizer:fix_me([
+            <<
+                "INSERT INTO shigoto_jobs "
+                "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
+            >>,
+            ValuesSQL,
+            ~" RETURNING *"
+        ])
+    ),
     case query(Pool, SQL, AllParams) of
         #{rows := Rows} ->
             BatchIds = [maps:get(batch, J, null) || J <- Jobs],
@@ -259,10 +265,12 @@ cancel_by(Pool, Filters) ->
             [] ->
                 ~"state IN ('available', 'retryable')";
             _ ->
-                iolist_to_binary([
-                    ~"state IN ('available', 'retryable') AND ",
-                    lists:join(~" AND ", WhereClauses)
-                ])
+                iolist_to_binary(
+                    eqwalizer:fix_me([
+                        ~"state IN ('available', 'retryable') AND ",
+                        lists:join(~" AND ", WhereClauses)
+                    ])
+                )
         end,
     SQL = iolist_to_binary([
         ~"UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
@@ -309,10 +317,12 @@ retry_by(Pool, Filters) ->
             [] ->
                 ~"state IN ('discarded', 'cancelled')";
             _ ->
-                iolist_to_binary([
-                    ~"state IN ('discarded', 'cancelled') AND ",
-                    lists:join(~" AND ", WhereClauses)
-                ])
+                iolist_to_binary(
+                    eqwalizer:fix_me([
+                        ~"state IN ('discarded', 'cancelled') AND ",
+                        lists:join(~" AND ", WhereClauses)
+                    ])
+                )
         end,
     SQL = iolist_to_binary([
         ~"UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ",
@@ -409,15 +419,17 @@ archive_jobs(Pool, Days) ->
             "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
             "AND inserted_at < now() - make_interval(days => $1)"
         >>,
-    pgo:transaction(
-        fun() ->
-            _ = query(Pool, InsertSQL, [Days]),
-            case query(Pool, DeleteSQL, [Days]) of
-                #{num_rows := Count} -> {ok, Count};
-                {error, _} = Err -> Err
-            end
-        end,
-        #{pool => Pool}
+    eqwalizer:fix_me(
+        pgo:transaction(
+            fun() ->
+                _ = query(Pool, InsertSQL, [Days]),
+                case query(Pool, DeleteSQL, [Days]) of
+                    #{num_rows := Count} -> {ok, Count};
+                    {error, _} = Err -> Err
+                end
+            end,
+            #{pool => Pool}
+        )
     ).
 
 -doc "Upsert a cron entry.".
@@ -468,11 +480,13 @@ validate_dependencies(Pool, DepIds) ->
         <<"$", (integer_to_binary(I))/binary>>
      || I <- lists:seq(1, length(DepIds))
     ]),
-    SQL = iolist_to_binary([
-        ~"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (",
-        Placeholders,
-        ~")"
-    ]),
+    SQL = iolist_to_binary(
+        eqwalizer:fix_me([
+            ~"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (",
+            Placeholders,
+            ~")"
+        ])
+    ),
     case query(Pool, SQL, DepIds) of
         #{rows := Rows} ->
             FoundIds = [maps:get(id, R) || R <- Rows],
@@ -514,7 +528,9 @@ apply_worker_defaults(JobParams) ->
     Worker = maps:get(worker, JobParams),
     _ = code:ensure_loaded(Worker),
     Defaults = lists:foldl(
-        fun({Callback, Key}, Acc) ->
+        fun({Callback0, Key}, Acc0) ->
+            Callback = eqwalizer:fix_me(Callback0),
+            Acc = eqwalizer:fix_me(Acc0),
             case maps:is_key(Key, JobParams) of
                 true ->
                     Acc;
@@ -570,7 +586,7 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
         end,
         lists:sort(Keys)
     ),
-    iolist_to_binary(lists:join(~":", Parts)).
+    iolist_to_binary(eqwalizer:fix_me(lists:join(~":", Parts))).
 
 find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
     StatesClause = states_in_clause(States),
@@ -622,7 +638,10 @@ maybe_replace(_Pool, Existing, _JobParams, #{replace := []}) ->
     {ok, {conflict, Existing}};
 maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Debounce}) ->
     {SetParts0, Params0, NextIdx} = lists:foldl(
-        fun(Field, {Acc, Ps, I}) ->
+        fun(Field, {Acc0, Ps0, I0}) ->
+            Acc = eqwalizer:fix_me(Acc0),
+            Ps = eqwalizer:fix_me(Ps0),
+            I = eqwalizer:fix_me(I0),
             {Col, Val} = replace_field_value(Field, JobParams),
             IBin = integer_to_binary(I),
             Part = <<Col/binary, " = $", IBin/binary>>,
@@ -635,18 +654,20 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
     {SetParts, Params} =
         case is_integer(Debounce) andalso Debounce > 0 of
             true ->
-                IBin2 = integer_to_binary(NextIdx),
+                IBin2 = integer_to_binary(eqwalizer:fix_me(NextIdx)),
                 Part = <<"scheduled_at = now() + make_interval(secs => $", IBin2/binary, ")">>,
-                {[Part | SetParts0], Params0 ++ [Debounce]};
+                {[Part | eqwalizer:fix_me(SetParts0)], eqwalizer:fix_me(Params0) ++ [Debounce]};
             false ->
-                {SetParts0, Params0}
+                {eqwalizer:fix_me(SetParts0), eqwalizer:fix_me(Params0)}
         end,
-    SetClause = lists:join(~", ", lists:reverse(SetParts)),
-    SQL = iolist_to_binary([
-        ~"UPDATE shigoto_jobs SET ",
-        SetClause,
-        ~" WHERE id = $1 RETURNING *"
-    ]),
+    SetClause = lists:join(~", ", lists:reverse(eqwalizer:fix_me(SetParts))),
+    SQL = iolist_to_binary(
+        eqwalizer:fix_me([
+            ~"UPDATE shigoto_jobs SET ",
+            SetClause,
+            ~" WHERE id = $1 RETURNING *"
+        ])
+    ),
     case query(Pool, SQL, Params) of
         #{rows := [Updated]} -> {ok, {conflict, Updated}};
         {error, _} = Err -> Err
