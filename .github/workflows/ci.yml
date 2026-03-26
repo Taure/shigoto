@@ -6,13 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.9
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.5
+    permissions:
+      contents: write
+      pull-requests: write
     with:
       version-file: '.tool-versions'
       enable-ct: true
@@ -20,6 +19,8 @@ jobs:
       enable-hank: true
       enable-audit: false
       enable-coverage: true
+      enable-elp-lint: true
+      enable-elp-eqwalize: true
       enable-sbom: true
       enable-sbom-scan: true
       enable-dependency-submission: true
