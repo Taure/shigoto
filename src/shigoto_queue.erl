@@ -52,12 +52,12 @@ init({Queue, Concurrency}) ->
 -doc "Pause a queue — stops claiming new jobs but lets in-flight jobs finish.".
 -spec pause(pid()) -> ok.
 pause(Pid) ->
-    eqwalizer:fix_me(gen_server:call(Pid, pause)).
+    gen_server:call(Pid, pause).
 
 -doc "Resume a paused queue.".
 -spec resume(pid()) -> ok.
 resume(Pid) ->
-    eqwalizer:fix_me(gen_server:call(Pid, resume)).
+    gen_server:call(Pid, resume).
 
 -doc false.
 handle_call(pause, _From, State) ->
@@ -115,17 +115,15 @@ handle_info(
                                 shigoto_telemetry:queue_poll(Queue, length(Jobs)),
                                 lists:foreach(
                                     fun(J) ->
-                                        shigoto_telemetry:job_claimed(eqwalizer:fix_me(J))
+                                        shigoto_telemetry:job_claimed(J)
                                     end,
                                     Jobs
                                 ),
                                 {Started, Execs1} = lists:foldl(
-                                    fun(Job, {Count0, AccExecs0}) ->
-                                        Count = eqwalizer:fix_me(Count0),
-                                        AccExecs = eqwalizer:fix_me(AccExecs0),
+                                    fun(Job, {Count, AccExecs}) ->
                                         case
                                             shigoto_executor_sup:start_executor(
-                                                eqwalizer:fix_me(Job), Pool, self()
+                                                Job, Pool, self()
                                             )
                                         of
                                             {ok, Pid} ->
@@ -138,7 +136,7 @@ handle_info(
                                     {0, Execs},
                                     Jobs
                                 ),
-                                {Active + eqwalizer:fix_me(Started), eqwalizer:fix_me(Execs1)};
+                                {Active + Started, Execs1};
                             {error, _} ->
                                 {Active, Execs}
                         end;
@@ -147,8 +145,8 @@ handle_info(
                 end,
             schedule_poll(),
             {noreply, State#state{
-                active = eqwalizer:fix_me(NewActive),
-                executors = eqwalizer:fix_me(NewExecs),
+                active = NewActive,
+                executors = NewExecs,
                 weight_counter = NewCounter
             }}
     end;
@@ -163,7 +161,7 @@ handle_info(
     {'DOWN', _Ref, process, Pid, _Reason}, #state{active = Active, executors = Execs} = State
 ) ->
     NewExecs = maps:remove(Pid, Execs),
-    NewActive = eqwalizer:fix_me(max(0, Active - 1)),
+    NewActive = max(0, Active - 1),
     {noreply, State#state{active = NewActive, executors = NewExecs}};
 handle_info(_Info, State) ->
     {noreply, State}.

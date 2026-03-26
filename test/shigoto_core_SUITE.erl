@@ -47,22 +47,6 @@
     test_debounce_resets_scheduled_at/1
 ]).
 
--eqwalizer({nowarn_function, {test_dependency_cycle_detected, 1}}).
--eqwalizer({nowarn_function, {test_dependency_valid_chain_accepted, 1}}).
--eqwalizer({nowarn_function, {test_dependency_multiple_parents, 1}}).
--eqwalizer({nowarn_function, {test_retry_by_worker, 1}}).
--eqwalizer({nowarn_function, {test_retry_by_queue, 1}}).
--eqwalizer({nowarn_function, {test_retry_by_tags, 1}}).
--eqwalizer({nowarn_function, {test_retry_by_empty_filter, 1}}).
--eqwalizer({nowarn_function, {test_archive_jobs, 1}}).
--eqwalizer({nowarn_function, {test_search_by_state, 1}}).
--eqwalizer({nowarn_function, {test_search_combined_filters, 1}}).
--eqwalizer({nowarn_function, {test_claim_respects_priority, 1}}).
--eqwalizer({nowarn_function, {test_snooze_preserves_attempt_count, 1}}).
--eqwalizer({nowarn_function, {test_max_attempts_discards, 1}}).
--eqwalizer({nowarn_function, {test_insert_minimal_params, 1}}).
--eqwalizer({nowarn_function, {test_debounce_resets_scheduled_at, 1}}).
-
 -define(POOL, shigoto_test_pool).
 
 all() ->
