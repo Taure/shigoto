@@ -20,11 +20,16 @@ Configuration access for Shigoto. Reads from application env.
     encryption_keys/0
 ]).
 
--doc "The pgo pool name for job storage.".
+-doc "The pgo pool name for job storage. Set `repo` for Kura-based apps or `pool` for raw pgo.".
 -spec pool() -> atom().
 pool() ->
-    {ok, Pool} = application:get_env(shigoto, pool),
-    Pool.
+    case application:get_env(shigoto, repo) of
+        {ok, Repo} ->
+            Repo;
+        undefined ->
+            {ok, Pool} = application:get_env(shigoto, pool),
+            Pool
+    end.
 
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
 -spec queues() -> [{binary(), pos_integer()}].
