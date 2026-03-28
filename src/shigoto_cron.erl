@@ -13,6 +13,7 @@ in a multi-node deployment.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(CHECK_INTERVAL, 60000).
+-define(RETRY_INTERVAL, 1000).
 -define(CRON_LOCK_ID, 839274628).
 
 -doc false.
@@ -35,10 +36,14 @@ handle_cast(_Msg, State) ->
 
 -doc false.
 handle_info(catch_up, State) ->
-    with_leader_lock(fun catch_up_missed/0),
+    _ =
+        case safe_with_leader_lock(fun catch_up_missed/0) of
+            ok -> ok;
+            retry -> erlang:send_after(?RETRY_INTERVAL, self(), catch_up)
+        end,
     {noreply, State};
 handle_info(check, State) ->
-    with_leader_lock(fun check_cron_entries/0),
+    _ = safe_with_leader_lock(fun check_cron_entries/0),
     erlang:send_after(?CHECK_INTERVAL, self(), check),
     {noreply, State};
 handle_info(_Info, State) ->
@@ -47,6 +52,16 @@ handle_info(_Info, State) ->
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+safe_with_leader_lock(Fun) ->
+    try
+        with_leader_lock(Fun),
+        ok
+    catch
+        exit:{noproc, _} ->
+            logger:debug(#{msg => ~"shigoto_cron_pool_not_ready"}),
+            retry
+    end.
 
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
