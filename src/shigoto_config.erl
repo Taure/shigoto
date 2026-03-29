@@ -20,7 +20,7 @@ Configuration access for Shigoto. Reads from application env.
     encryption_keys/0
 ]).
 
--doc "The pgo pool name for job storage. Set `repo` for Kura-based apps or `pool` for raw pgo.".
+-doc "The pgo pool name for job storage. Set via `{pool, Name}` in config. `repo` is supported for backward compatibility.".
 -spec pool() -> atom().
 pool() ->
     case application:get_env(shigoto, repo) of
