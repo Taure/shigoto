@@ -17,7 +17,8 @@ Configuration access for Shigoto. Reads from application env.
     load_shedding/0,
     queue_weights/0,
     fair_queues/0,
-    encryption_keys/0
+    encryption_keys/0,
+    fanout_queues/0
 ]).
 
 -doc "The pgo pool name for job storage. Set `repo` for Kura-based apps or `pool` for raw pgo.".
@@ -95,3 +96,12 @@ fair_queues() ->
 -spec encryption_keys() -> [binary()].
 encryption_keys() ->
     application:get_env(shigoto, encryption_keys, []).
+
+-doc """
+Fanout queues — every node processes every job. Format:
+`[{QueueName, Concurrency, Opts}]` where Opts may include
+`window` (seconds, default 120). Default: [].
+""".
+-spec fanout_queues() -> [{binary(), pos_integer(), map()}].
+fanout_queues() ->
+    application:get_env(shigoto, fanout_queues, []).
