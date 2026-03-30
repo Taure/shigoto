@@ -67,6 +67,7 @@ config :shigoto,
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
+| `fanout_queues` | `[]` | Broadcast queues where all nodes process every job (see [Fanout Queues](fanout-queues.md)) |
 
 ## Run the Migration
 
@@ -208,4 +209,5 @@ shigoto:drain_queue(<<"default">>, #{timeout => 30000}).
 - [Cron](cron.md) — Scheduled recurring jobs
 - [Batches](batches.md) — Group jobs with completion callbacks
 - [Middleware](middleware.md) — Before/after hooks for job execution
+- [Fanout Queues](fanout-queues.md) — Broadcast delivery to all nodes (cloud-native pub/sub)
 - [Resilience](resilience.md) — Rate limiting, circuit breaking, and load shedding via seki
