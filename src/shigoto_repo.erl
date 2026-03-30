@@ -24,7 +24,8 @@ for safe multi-node job claiming.
     update_progress/3,
     get_job/2,
     resolve_dependencies/2,
-    archive_jobs/2
+    archive_jobs/2,
+    fetch_fanout_jobs/3
 ]).
 
 -define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
@@ -869,6 +870,26 @@ decrypt_job_args(Job0) ->
             Job1#{meta => shigoto_crypto:decrypt(Meta)};
         _ ->
             Job1
+    end.
+
+-doc "Fetch recent jobs for fanout queues. No locking — all nodes read the same rows.".
+-spec fetch_fanout_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+fetch_fanout_jobs(Pool, Queue, WindowSeconds) ->
+    SQL =
+        <<
+            "SELECT * FROM shigoto_jobs\n"
+            "WHERE queue = $1\n"
+            "AND state = 'available'\n"
+            "AND scheduled_at <= now()\n"
+            "AND inserted_at >= now() - make_interval(secs => $2)\n"
+            "ORDER BY priority DESC, inserted_at ASC"
+        >>,
+    case query(Pool, SQL, [Queue, WindowSeconds]) of
+        #{rows := Rows} ->
+            DecryptedRows = [decrypt_job_args(R) || R <- Rows],
+            {ok, DecryptedRows};
+        {error, _} = Err ->
+            Err
     end.
 
 query(Pool, SQL, Params) ->
