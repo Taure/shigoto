@@ -8,6 +8,7 @@ OTP application callback for Shigoto.
 
 -doc false.
 start(_StartType, _StartArgs) ->
+    ok = shigoto_migration:up(shigoto_config:pool()),
     shigoto_sup:start_link().
 
 -doc false.
