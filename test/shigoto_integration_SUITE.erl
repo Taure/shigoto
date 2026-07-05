@@ -34,7 +34,11 @@
     test_worker_defaults_partial/1,
     test_job_timeout/1,
     test_cancel_executing_job/1,
-    test_snooze_job/1
+    test_snooze_job/1,
+    test_transaction_commit/1,
+    test_transaction_rollback/1,
+    test_transaction_telemetry_deferred/1,
+    test_insert_conflict_no_crash/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -65,11 +69,16 @@ all() ->
         test_worker_defaults_partial,
         test_job_timeout,
         test_cancel_executing_job,
-        test_snooze_job
+        test_snooze_job,
+        test_transaction_commit,
+        test_transaction_rollback,
+        test_transaction_telemetry_deferred,
+        test_insert_conflict_no_crash
     ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(pgo),
+    {ok, _} = application:ensure_all_started(telemetry),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(shigoto_test_pool),
     Config.
@@ -411,6 +420,74 @@ test_worker_defaults_partial(_Config) ->
     ?assertEqual(<<"default">>, maps:get(queue, Job)),
     ?assertEqual(0, maps:get(priority, Job)).
 
+test_transaction_commit(_Config) ->
+    Result = shigoto:transaction(fun() ->
+        {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"n" => 1}}),
+        {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"n" => 2}}),
+        done
+    end),
+    ?assertEqual(done, Result),
+    ?assertEqual(2, count_jobs()).
+
+test_transaction_rollback(_Config) ->
+    ?assertError(
+        boom,
+        shigoto:transaction(fun() ->
+            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"n" => 1}}),
+            erlang:error(boom)
+        end)
+    ),
+    ?assertEqual(0, count_jobs()).
+
+test_transaction_telemetry_deferred(_Config) ->
+    Handler = {?MODULE, telemetry_deferred},
+    ok = telemetry:attach(
+        Handler,
+        [shigoto, job, inserted],
+        fun(_Event, _Measure, Meta, Pid) -> Pid ! {job_inserted, Meta} end,
+        self()
+    ),
+    try
+        %% Rolled-back inserts must not emit telemetry.
+        try
+            shigoto:transaction(fun() ->
+                {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+                erlang:error(boom)
+            end)
+        catch
+            error:boom -> ok
+        end,
+        ?assertEqual(
+            timeout,
+            receive
+                {job_inserted, _} -> got
+            after 200 -> timeout
+            end
+        ),
+        %% Committed inserts emit once, after commit.
+        done = shigoto:transaction(fun() ->
+            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+            done
+        end),
+        ?assertMatch(
+            {job_inserted, _},
+            receive
+                M -> M
+            after 1000 -> timeout
+            end
+        )
+    after
+        telemetry:detach(Handler)
+    end.
+
+test_insert_conflict_no_crash(_Config) ->
+    Unique = #{keys => [worker, args], states => [available], period => infinity},
+    Params = #{worker => shigoto_test_worker, args => #{~"id" => 1}},
+    {ok, Job} = shigoto:insert(Params, #{unique => Unique}),
+    ?assert(is_map(Job)),
+    ?assertMatch({ok, {conflict, _}}, shigoto:insert(Params, #{unique => Unique})),
+    ?assertEqual(1, count_jobs()).
+
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
@@ -418,3 +495,11 @@ test_worker_defaults_partial(_Config) ->
 cleanup_jobs() ->
     pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
     ok.
+
+count_jobs() ->
+    #{rows := [#{count := N}]} = pgo:query(
+        ~"SELECT count(*) AS count FROM shigoto_jobs",
+        [],
+        #{pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]}
+    ),
+    N.
