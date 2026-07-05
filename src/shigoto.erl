@@ -148,9 +148,9 @@ transaction(Fun) ->
 -doc "Like `transaction/1`, on a specific pool via `#{pool => Pool}`. Nested calls inherit the outer pool.".
 -spec transaction(fun(() -> Result), map()) -> Result when Result :: term().
 transaction(Fun, Opts) when is_function(Fun, 0) ->
-    Pool = maps:get(pool, Opts, shigoto_config:pool()),
     case get(?TXN_KEY) of
         undefined ->
+            Pool = maps:get(pool, Opts, shigoto_config:pool()),
             put(?TXN_KEY, {Pool, []}),
             try
                 Result = pgo:transaction(Fun, #{pool => Pool}),
@@ -161,8 +161,9 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
                     _ = take_deferred(),
                     erlang:raise(Class, Reason, Stack)
             end;
-        _ ->
-            %% Nested: the outermost transaction owns the pool, commit and telemetry flush.
+        {Pool, _} ->
+            %% Nested: inherit the outer pool; the outermost transaction owns
+            %% commit and the telemetry flush.
             pgo:transaction(Fun, #{pool => Pool})
     end.
 
@@ -232,28 +233,24 @@ resume_queue(Queue) ->
 -doc "Create a new batch for grouping jobs.".
 -spec new_batch(map()) -> {ok, map()} | {error, term()}.
 new_batch(Opts) ->
-    Pool = shigoto_config:pool(),
-    shigoto_batch:create(Pool, Opts).
+    shigoto_batch:create(txn_pool(), Opts).
 
 -doc "Get a batch by ID.".
 -spec get_batch(integer()) -> {ok, map()} | {error, term()}.
 get_batch(BatchId) ->
-    Pool = shigoto_config:pool(),
-    shigoto_batch:get(Pool, BatchId).
+    shigoto_batch:get(txn_pool(), BatchId).
 
 -doc "Report job progress (0-100). Call from within a worker's perform/1.".
 -spec report_progress(integer(), 0..100) -> ok | {error, term()}.
 report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
-    Pool = shigoto_config:pool(),
-    Result = shigoto_repo:update_progress(Pool, JobId, Progress),
+    Result = shigoto_repo:update_progress(txn_pool(), JobId, Progress),
     shigoto_telemetry:job_progress(#{id => JobId, worker => unknown, queue => unknown}, Progress),
     Result.
 
 -doc "Get a job by ID.".
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.
 get_job(JobId) ->
-    Pool = shigoto_config:pool(),
-    shigoto_repo:get_job(Pool, JobId).
+    shigoto_repo:get_job(txn_pool(), JobId).
 
 -doc "Retry all jobs matching a filter. Filters: worker, queue, state, tags.".
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.

@@ -546,6 +546,42 @@ test_transaction_nested(_Config) ->
     end.
 
 test_transaction_pool_option(_Config) ->
+    Pool2 = start_pool2(),
+    ok = shigoto:transaction(
+        fun() ->
+            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"p" => 2}}),
+            ok
+        end,
+        #{pool => Pool2}
+    ),
+    ?assertEqual(1, count_jobs()),
+    cleanup_jobs(),
+    %% Rolling back the transaction on Pool2 must discard the insert. If insert had
+    %% resolved the default pool instead of the transaction's, it could not
+    %% participate in Pool2's transaction and the row would survive.
+    ?assertError(
+        rollback_marker,
+        shigoto:transaction(
+            fun() ->
+                {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+                error(rollback_marker)
+            end,
+            #{pool => Pool2}
+        )
+    ),
+    ?assertEqual(0, count_jobs()).
+
+%%----------------------------------------------------------------------
+%% Helpers
+%%----------------------------------------------------------------------
+
+drain_inserted(N) ->
+    receive
+        job_inserted -> drain_inserted(N + 1)
+    after 300 -> N
+    end.
+
+start_pool2() ->
     Pool2 = shigoto_test_pool2,
     case
         pgo:start_pool(Pool2, #{
@@ -560,24 +596,7 @@ test_transaction_pool_option(_Config) ->
         {ok, _} -> ok;
         {error, {already_started, _}} -> ok
     end,
-    ok = shigoto:transaction(
-        fun() ->
-            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"p" => 2}}),
-            ok
-        end,
-        #{pool => Pool2}
-    ),
-    ?assertEqual(1, count_jobs()).
-
-%%----------------------------------------------------------------------
-%% Helpers
-%%----------------------------------------------------------------------
-
-drain_inserted(N) ->
-    receive
-        job_inserted -> drain_inserted(N + 1)
-    after 300 -> N
-    end.
+    Pool2.
 
 cleanup_jobs() ->
     pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
