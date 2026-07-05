@@ -1,7 +1,8 @@
 -module(shigoto_sup).
 -moduledoc """
 Top-level supervisor for Shigoto. Starts the queue supervisor, cron
-scheduler, pruner, heartbeat, and optional LISTEN/NOTIFY notifier.
+scheduler, pruner, heartbeat, and optional LISTEN/NOTIFY notifier
+plus its due-job stager.
 """.
 -behaviour(supervisor).
 
@@ -52,6 +53,11 @@ init([]) ->
                         #{
                             id => shigoto_notifier,
                             start => {shigoto_notifier, start_link, []},
+                            type => worker
+                        },
+                        #{
+                            id => shigoto_stager,
+                            start => {shigoto_stager, start_link, []},
                             type => worker
                         }
                     ]

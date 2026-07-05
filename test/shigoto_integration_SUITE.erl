@@ -50,7 +50,9 @@
     test_cancel_by_in_transaction/1,
     test_global_concurrency_single_admitted/1,
     test_global_concurrency_admits_one_of_two/1,
-    test_global_concurrency_admits_two_of_three/1
+    test_global_concurrency_admits_two_of_three/1,
+    test_stager_surfaces_due_queue/1,
+    test_stager_ignores_not_yet_due/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -97,7 +99,9 @@ all() ->
         test_cancel_by_in_transaction,
         test_global_concurrency_single_admitted,
         test_global_concurrency_admits_one_of_two,
-        test_global_concurrency_admits_two_of_three
+        test_global_concurrency_admits_two_of_three,
+        test_stager_surfaces_due_queue,
+        test_stager_ignores_not_yet_due
     ].
 
 init_per_suite(Config) ->
@@ -701,8 +705,57 @@ test_global_concurrency_admits_two_of_three(_Config) ->
     ?assertEqual(1, length(Snoozed)).
 
 %%----------------------------------------------------------------------
+%% Stager tests
+%%----------------------------------------------------------------------
+
+test_stager_surfaces_due_queue(_Config) ->
+    %% A job scheduled slightly in the future is not due yet, then becomes
+    %% due once its scheduled_at elapses — the stager query must surface it.
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_test_worker,
+            args => #{},
+            queue => ~"soon",
+            scheduled_at => seconds_from_now(1)
+        },
+        #{}
+    ),
+    {ok, Before} = shigoto_stager:due_queues(?POOL),
+    ?assertNot(lists:member(~"soon", Before)),
+    timer:sleep(1200),
+    {ok, After} = shigoto_stager:due_queues(?POOL),
+    ?assert(lists:member(~"soon", After)).
+
+test_stager_ignores_not_yet_due(_Config) ->
+    %% Only queues with due jobs are surfaced: a due job's queue appears,
+    %% a far-future job's queue does not.
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_test_worker, args => #{}, queue => ~"ready"},
+        #{}
+    ),
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_test_worker,
+            args => #{},
+            queue => ~"later",
+            scheduled_at => seconds_from_now(3600)
+        },
+        #{}
+    ),
+    {ok, Queues} = shigoto_stager:due_queues(?POOL),
+    ?assert(lists:member(~"ready", Queues)),
+    ?assertNot(lists:member(~"later", Queues)).
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+seconds_from_now(Seconds) ->
+    Secs = calendar:datetime_to_gregorian_seconds(calendar:universal_time()),
+    calendar:gregorian_seconds_to_datetime(Secs + Seconds).
 
 drain_inserted(N) ->
     receive

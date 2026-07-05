@@ -7,6 +7,7 @@ Configuration access for Shigoto. Reads from application env.
     pool/0,
     queues/0,
     poll_interval/0,
+    stage_interval/0,
     cron_entries/0,
     prune_after_days/0,
     archive_after_days/0,
@@ -42,6 +43,11 @@ queues() ->
 -spec poll_interval() -> pos_integer().
 poll_interval() ->
     application:get_env(shigoto, poll_interval, 5000).
+
+-doc "Stager interval in milliseconds for surfacing newly-due scheduled/retryable jobs. Default: 1000.".
+-spec stage_interval() -> pos_integer().
+stage_interval() ->
+    application:get_env(shigoto, stage_interval, 1000).
 
 -doc "Cron job entries. Each: `{Name, Schedule, Worker, Args}` or `{Name, Schedule, Worker, Args, #{timezone => Offset}}`.".
 -spec cron_entries() -> list().
