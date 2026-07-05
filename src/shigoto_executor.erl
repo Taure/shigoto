@@ -30,7 +30,12 @@ execute_sync(Job, Pool, Timeout) ->
         case run_with_resilience(Job, Worker, Args, Timeout) of
             ok ->
                 Duration = erlang:monotonic_time(native) - T0,
-                _ = shigoto_repo:complete_job(Pool, JobId),
+                _ = shigoto_repo:complete_job(Pool, JobId, null),
+                _ = shigoto_telemetry:job_completed(Job, Duration),
+                ok;
+            {ok, Result} ->
+                Duration = erlang:monotonic_time(native) - T0,
+                _ = shigoto_repo:complete_job(Pool, JobId, Result),
                 _ = shigoto_telemetry:job_completed(Job, Duration),
                 ok;
             {snooze, Seconds} ->
@@ -80,15 +85,9 @@ handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = Stat
     try
         case run_with_resilience(Job, Worker, Args, Timeout) of
             ok ->
-                Duration = erlang:monotonic_time(native) - T0,
-                _ = shigoto_repo:complete_job(Pool, JobId),
-                _ = shigoto_telemetry:job_completed(Job, Duration),
-                _ = shigoto_resilience:complete_load(
-                    Job, erlang:convert_time_unit(Duration, native, millisecond)
-                ),
-                notify_breaker_success(Worker),
-                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
-                {stop, normal, State};
+                on_success(Pool, JobId, null, Job, Worker, QueuePid, T0, State);
+            {ok, Result} ->
+                on_success(Pool, JobId, Result, Job, Worker, QueuePid, T0, State);
             {snooze, Seconds} ->
                 _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
                 _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
@@ -169,12 +168,62 @@ run_with_resilience(Job, Worker, Args, Timeout) ->
     end.
 
 run_middleware_chain(Job, Worker, Args, Timeout) ->
-    %% Pass decoded args in the job map so middleware sees maps, not binaries
-    JobWithArgs = Job#{args => Args},
+    %% Pass decoded args in the job map so middleware sees maps, not binaries.
+    %% For dependent jobs, expose the predecessors' results under deps_results.
+    PerformArgs = inject_deps_results(Args, Job),
+    JobWithArgs = Job#{args => PerformArgs},
     PerformFn = fun(_JobArg) ->
-        apply_with_timeout(Worker, perform, [Args], Timeout)
+        apply_with_timeout(Worker, perform, [PerformArgs], Timeout)
     end,
     shigoto_middleware:run(JobWithArgs, Worker, PerformFn).
+
+inject_deps_results(Args, Job) when is_map(Args) ->
+    case resolve_deps_results(Job) of
+        DepsResults when map_size(DepsResults) > 0 ->
+            Args#{deps_results => DepsResults};
+        _ ->
+            Args
+    end;
+inject_deps_results(Args, _Job) ->
+    Args.
+
+resolve_deps_results(Job) ->
+    case maps:get(deps_results, Job, undefined) of
+        Bin when is_binary(Bin) -> decode_deps_results(Bin);
+        Map when is_map(Map) -> keys_to_ids(Map);
+        _ -> #{}
+    end.
+
+decode_deps_results(Bin) ->
+    try json:decode(Bin) of
+        Map when is_map(Map) -> keys_to_ids(Map);
+        _ -> #{}
+    catch
+        _:_ -> #{}
+    end.
+
+keys_to_ids(Map) ->
+    maps:from_list([{to_id(K), V} || K := V <- Map]).
+
+to_id(K) when is_binary(K) ->
+    try
+        binary_to_integer(K)
+    catch
+        _:_ -> K
+    end;
+to_id(K) ->
+    K.
+
+on_success(Pool, JobId, Result, Job, Worker, QueuePid, T0, State) ->
+    Duration = erlang:monotonic_time(native) - T0,
+    _ = shigoto_repo:complete_job(Pool, JobId, Result),
+    _ = shigoto_telemetry:job_completed(Job, Duration),
+    _ = shigoto_resilience:complete_load(
+        Job, erlang:convert_time_unit(Duration, native, millisecond)
+    ),
+    notify_breaker_success(Worker),
+    gen_server:cast(QueuePid, {job_finished, JobId, self()}),
+    {stop, normal, State}.
 
 notify_breaker_success(Worker) ->
     case whereis(seki_sup) of

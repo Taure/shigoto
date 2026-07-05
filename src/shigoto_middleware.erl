@@ -32,7 +32,7 @@ Built-in middleware runs in this order:
 -export_type([middleware/0, result/0]).
 
 -type middleware() :: fun((map(), fun(() -> result())) -> result()).
--type result() :: ok | {snooze, pos_integer()} | {error, term()}.
+-type result() :: ok | {ok, term()} | {snooze, pos_integer()} | {error, term()}.
 
 -doc "Run the full middleware chain for a job.".
 -spec run(map(), module(), fun((map()) -> result())) -> result().
