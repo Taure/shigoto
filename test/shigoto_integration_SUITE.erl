@@ -47,7 +47,10 @@
     test_cancel_by_no_pool/1,
     test_retry_no_pool/1,
     test_retry_by_no_pool/1,
-    test_cancel_by_in_transaction/1
+    test_cancel_by_in_transaction/1,
+    test_global_concurrency_single_admitted/1,
+    test_global_concurrency_admits_one_of_two/1,
+    test_global_concurrency_admits_two_of_three/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -91,7 +94,10 @@ all() ->
         test_cancel_by_no_pool,
         test_retry_no_pool,
         test_retry_by_no_pool,
-        test_cancel_by_in_transaction
+        test_cancel_by_in_transaction,
+        test_global_concurrency_single_admitted,
+        test_global_concurrency_admits_one_of_two,
+        test_global_concurrency_admits_two_of_three
     ].
 
 init_per_suite(Config) ->
@@ -637,6 +643,62 @@ test_cancel_by_in_transaction(_Config) ->
         ok
     end),
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
+
+%%----------------------------------------------------------------------
+%% Global concurrency tests
+%%----------------------------------------------------------------------
+
+test_global_concurrency_single_admitted(_Config) ->
+    %% Off-by-one regression: a single claimed job is at exactly the limit
+    %% (its own row is already 'executing'), so it must be admitted, not snoozed.
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_global_conc_worker, args => #{~"n" => 1}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertEqual(
+        ok, shigoto_resilience:check_global_concurrency(shigoto_global_conc_worker, Claimed)
+    ).
+
+test_global_concurrency_admits_one_of_two(_Config) ->
+    %% Livelock regression: two jobs claimed concurrently (both 'executing')
+    %% under a limit of 1 must resolve to exactly one admitted and one snoozed,
+    %% never both snoozed (which would oscillate available -> executing -> snooze).
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_global_conc_worker, args => #{~"n" => 1}}, #{}
+    ),
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_global_conc_worker, args => #{~"n" => 2}}, #{}
+    ),
+    {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 2),
+    ?assertEqual(2, length(Claimed)),
+    Results = [
+        shigoto_resilience:check_global_concurrency(shigoto_global_conc_worker, J)
+     || J <- Claimed
+    ],
+    Admitted = [R || R <- Results, R =:= ok],
+    Snoozed = [R || R <- Results, is_tuple(R) andalso element(1, R) =:= snooze],
+    ?assertEqual(1, length(Admitted)),
+    ?assertEqual(1, length(Snoozed)).
+
+test_global_concurrency_admits_two_of_three(_Config) ->
+    %% Boundary at limit > 1: three jobs claimed under a limit of 2 must resolve
+    %% to exactly two admitted and one snoozed.
+    [
+        shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_global_conc2_worker, args => #{~"n" => N}}, #{}
+        )
+     || N <- [1, 2, 3]
+    ],
+    {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 3),
+    ?assertEqual(3, length(Claimed)),
+    Results = [
+        shigoto_resilience:check_global_concurrency(shigoto_global_conc2_worker, J)
+     || J <- Claimed
+    ],
+    Admitted = [R || R <- Results, R =:= ok],
+    Snoozed = [R || R <- Results, is_tuple(R) andalso element(1, R) =:= snooze],
+    ?assertEqual(2, length(Admitted)),
+    ?assertEqual(1, length(Snoozed)).
 
 %%----------------------------------------------------------------------
 %% Helpers

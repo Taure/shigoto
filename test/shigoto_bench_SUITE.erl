@@ -21,7 +21,8 @@
     bench_full_lifecycle/1,
     bench_full_lifecycle_10_queues/1,
     bench_insert_with_encryption/1,
-    bench_insert_with_deps/1
+    bench_insert_with_deps/1,
+    bench_global_concurrency_check/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -41,7 +42,8 @@ groups() ->
             bench_full_lifecycle,
             bench_full_lifecycle_10_queues,
             bench_insert_with_encryption,
-            bench_insert_with_deps
+            bench_insert_with_deps,
+            bench_global_concurrency_check
         ]}
     ].
 
@@ -188,6 +190,33 @@ bench_full_lifecycle_10_queues(_Config) ->
         )
     end),
     report(~"lifecycle_10_queues", N, Time).
+
+%%----------------------------------------------------------------------
+%% Global concurrency benchmark
+%%----------------------------------------------------------------------
+
+bench_global_concurrency_check(_Config) ->
+    N = 1000,
+    lists:foreach(
+        fun(I) ->
+            shigoto_repo:insert_job(
+                ?POOL,
+                #{worker => shigoto_global_conc_worker, args => #{~"i" => I}},
+                #{}
+            )
+        end,
+        lists:seq(1, N)
+    ),
+    {ok, Jobs} = shigoto_repo:claim_jobs(?POOL, ~"default", N),
+    {Time, _} = timer:tc(fun() ->
+        lists:foreach(
+            fun(Job) ->
+                shigoto_resilience:check_global_concurrency(shigoto_global_conc_worker, Job)
+            end,
+            Jobs
+        )
+    end),
+    report(~"global_conc_check", length(Jobs), Time).
 
 %%----------------------------------------------------------------------
 %% Helpers
