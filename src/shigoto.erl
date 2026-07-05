@@ -47,13 +47,35 @@ BatchId = maps:get(id, Batch),
 shigoto:insert(#{worker => step1, args => #{}, batch => BatchId}),
 shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
 ```
+
+## Transactional Enqueue
+
+Enqueue jobs atomically with your own database writes. Jobs inserted inside
+`transaction/1` commit together with the surrounding work, and are dropped if it
+rolls back — so a job is never orphaned by a failed transaction, nor lost after a
+successful one.
+
+```erlang
+shigoto:transaction(fun() ->
+    {ok, User} = my_app:create_user(Params),
+    {ok, _Job} = shigoto:insert(#{
+        worker => welcome_email_worker,
+        args => #{<<\"user_id\">> => maps:get(id, User)}
+    }),
+    User
+end).
+```
 """.
+
+-define(TXN_KEY, '$shigoto_txn').
 
 -export([
     insert/1,
     insert/2,
     insert_all/1,
     insert_all/2,
+    transaction/1,
+    transaction/2,
     cancel/2,
     cancel_by/2,
     retry/2,
@@ -81,8 +103,10 @@ insert(JobParams) ->
 insert(JobParams, Opts) ->
     Pool = shigoto_config:pool(),
     case shigoto_repo:insert_job(Pool, JobParams, Opts) of
+        {ok, {conflict, _}} = Conflict ->
+            Conflict;
         {ok, Job} ->
-            shigoto_telemetry:job_inserted(Job),
+            emit_or_defer(Job),
             {ok, Job};
         Other ->
             Other
@@ -99,10 +123,46 @@ insert_all(JobParamsList, Opts) ->
     Pool = shigoto_config:pool(),
     case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
         {ok, Jobs} ->
-            lists:foreach(fun shigoto_telemetry:job_inserted/1, Jobs),
+            lists:foreach(fun emit_or_defer/1, Jobs),
             {ok, Jobs};
         Other ->
             Other
+    end.
+
+-doc """
+Run `Fun` inside a database transaction on the Shigoto pool.
+
+Jobs enqueued with `insert/1,2` or `insert_all/1,2` from within `Fun` commit
+atomically with any other work done on the same pool: if `Fun` raises, the
+transaction rolls back and no jobs are enqueued. `job_inserted` telemetry fires
+only after a successful commit.
+
+To roll back, raise an exception. A returned `{error, _}` still commits, mirroring
+`pgo:transaction/2`. Returns the value of `Fun`.
+""".
+-spec transaction(fun(() -> Result)) -> Result when Result :: term().
+transaction(Fun) ->
+    transaction(Fun, #{}).
+
+-doc "Like `transaction/1`, on a specific pool via `#{pool => Pool}`.".
+-spec transaction(fun(() -> Result), map()) -> Result when Result :: term().
+transaction(Fun, Opts) when is_function(Fun, 0) ->
+    Pool = maps:get(pool, Opts, shigoto_config:pool()),
+    case get(?TXN_KEY) of
+        undefined ->
+            put(?TXN_KEY, []),
+            try
+                Result = pgo:transaction(Fun, #{pool => Pool}),
+                lists:foreach(fun shigoto_telemetry:job_inserted/1, take_deferred()),
+                Result
+            catch
+                Class:Reason:Stack ->
+                    _ = take_deferred(),
+                    erlang:raise(Class, Reason, Stack)
+            end;
+        _ ->
+            %% Nested: the outermost transaction owns commit and telemetry flush.
+            pgo:transaction(Fun, #{pool => Pool})
     end.
 
 -doc "Cancel a job by ID. Also stops executing jobs on this node.".
@@ -255,6 +315,23 @@ health() ->
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+%% Emit job_inserted now, or defer it to commit when inside transaction/1,2.
+emit_or_defer(Job) ->
+    case get(?TXN_KEY) of
+        undefined ->
+            shigoto_telemetry:job_inserted(Job);
+        Deferred ->
+            put(?TXN_KEY, [Job | Deferred]),
+            ok
+    end.
+
+%% Clear and return the deferred jobs in insertion order.
+take_deferred() ->
+    case erase(?TXN_KEY) of
+        undefined -> [];
+        Deferred -> lists:reverse(Deferred)
+    end.
 
 with_queue_pid(Queue, Fun) ->
     Children = supervisor:which_children(shigoto_queue_sup),
