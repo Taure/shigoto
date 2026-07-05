@@ -282,7 +282,7 @@ snooze_job(Pool, JobId, Seconds) ->
         <<
             "UPDATE shigoto_jobs SET state = 'available',\n"
             "scheduled_at = now() + make_interval(secs => $2)\n"
-            "WHERE id = $1"
+            "WHERE id = $1 AND state = 'executing'"
         >>,
     case query(Pool, SQL, [JobId, Seconds]) of
         #{command := update} -> ok;

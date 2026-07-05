@@ -9,13 +9,13 @@ initialized on first use based on worker callbacks.
 ## Rate Limiting
 
 Workers that export `rate_limit/0` get per-worker rate limiting via seki.
-Jobs that hit the rate limit are snoozed (not retried), preserving attempt count.
+Jobs that hit the rate limit are snoozed (rescheduled for later) rather than failed.
 
 ## Circuit Breaking
 
 When a worker fails repeatedly, its circuit breaker opens and subsequent
-jobs are snoozed until the breaker transitions to half-open. This prevents
-burning through retries against a known-broken dependency.
+jobs are snoozed until the breaker transitions to half-open, keeping work
+off a known-broken dependency.
 
 ## Bulkhead
 
@@ -40,7 +40,10 @@ jobs are shed first when the system is overloaded.
     setup_load_shedder/0
 ]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(INIT_TABLE, shigoto_resilience_init).
+-define(GLOBAL_CONCURRENCY_SNOOZE, 5).
 
 -doc "Ensure seki primitives exist for a worker. Lazy and idempotent.".
 -spec ensure_worker_primitives(module()) -> ok.
@@ -121,9 +124,24 @@ release_bulkhead(Worker) ->
             end
     end.
 
--doc "Check global concurrency across all nodes via PostgreSQL. Returns ok or {snooze, 5}.".
+-doc """
+Check the per-worker global concurrency limit across all nodes via PostgreSQL.
+
+The check-and-admit is serialised per worker with a PostgreSQL transaction-scoped
+advisory lock, so two nodes can never both admit a job past the cap. It counts
+*other* jobs of the worker already `executing` (excluding the job being checked,
+which claiming has already marked `executing`), so a job at exactly the limit is
+not spuriously snoozed. When the limit is reached the job's slot is freed back to
+`available` inside the same locked transaction, so the next serialised checker
+observes the reduced count. That makes a burst of concurrently claimed jobs snooze
+one at a time until exactly `global_concurrency/0` remain running, instead of all
+snoozing together and livelocking.
+
+Returns `ok` or `{snooze, Seconds}`. Fails open (`ok`) on any database error, so a
+transient DB problem never turns the check into a job failure.
+""".
 -spec check_global_concurrency(module(), map()) -> ok | {snooze, pos_integer()}.
-check_global_concurrency(Worker, _Job = #{}) ->
+check_global_concurrency(Worker, Job = #{}) ->
     _ = code:ensure_loaded(Worker),
     case erlang:function_exported(Worker, global_concurrency, 0) of
         false ->
@@ -132,17 +150,9 @@ check_global_concurrency(Worker, _Job = #{}) ->
             MaxGlobal = Worker:global_concurrency(),
             Pool = shigoto_config:pool(),
             WorkerBin = atom_to_binary(Worker, utf8),
-            SQL = ~"SELECT count(*) FROM shigoto_jobs WHERE worker = $1 AND state = 'executing'",
-            case
-                pgo:query(SQL, [WorkerBin], #{
-                    pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
-                })
-            of
-                #{rows := [#{count := Current}]} when Current >= MaxGlobal ->
-                    {snooze, 5};
-                _ ->
-                    ok
-            end
+            JobId = maps:get(id, Job),
+            LockKey = erlang:phash2({global_concurrency, WorkerBin}),
+            admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey)
     end.
 
 -doc "Check circuit breaker for a worker. Returns ok or {snooze, 10}.".
@@ -209,6 +219,43 @@ setup_load_shedder() ->
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey) ->
+    try
+        pgo:transaction(
+            fun() ->
+                _ = pgo:query(~"SELECT pg_advisory_xact_lock($1)::text", [LockKey], #{pool => Pool}),
+                CountSQL =
+                    ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
+                case
+                    pgo:query(CountSQL, [WorkerBin, JobId], #{
+                        pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
+                    })
+                of
+                    #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
+                        _ = shigoto_repo:snooze_job(Pool, JobId, ?GLOBAL_CONCURRENCY_SNOOZE),
+                        {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
+                    _ ->
+                        ok
+                end
+            end,
+            #{pool => Pool}
+        )
+    of
+        {snooze, _} = Snooze -> Snooze;
+        _ -> ok
+    catch
+        Class:Reason:Stack ->
+            ?LOG_WARNING(#{
+                msg => ~"global concurrency check failed, admitting job",
+                worker => WorkerBin,
+                job_id => JobId,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stack
+            }),
+            ok
+    end.
 
 do_ensure(Worker) ->
     _ = code:ensure_loaded(Worker),
