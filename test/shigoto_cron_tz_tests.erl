@@ -58,3 +58,24 @@ named_zone_spring_forward_test() ->
 unknown_zone_falls_back_to_utc_test() ->
     Dt = {{2026, 3, 18}, {14, 30, 0}},
     ?assertEqual(Dt, shigoto_cron:to_timezone(Dt, ~"Nowhere/Nope")).
+
+normalize_entry_5tuple_test() ->
+    ?assertEqual(
+        {daily, ~"0 3 * * *", w, #{}},
+        shigoto_cron:normalize_entry(
+            {daily, ~"0 3 * * *", w, #{}, #{timezone => ~"Europe/Stockholm"}}
+        )
+    ),
+    ?assertEqual(
+        {daily, ~"0 3 * * *", w, #{}},
+        shigoto_cron:normalize_entry({daily, ~"0 3 * * *", w, #{}})
+    ).
+
+entry_timezone_test() ->
+    ?assertEqual(
+        ~"Europe/Stockholm",
+        shigoto_cron:entry_timezone(
+            {daily, ~"0 3 * * *", w, #{}, #{timezone => ~"Europe/Stockholm"}}
+        )
+    ),
+    ?assertEqual(utc, shigoto_cron:entry_timezone({daily, ~"0 3 * * *", w, #{}})).

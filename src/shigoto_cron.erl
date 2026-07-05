@@ -14,11 +14,13 @@ See `shigoto_config:cron_entries/0`.
 """.
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -ifdef(TEST).
--export([to_timezone/2]).
+-export([to_timezone/2, normalize_entry/1, entry_timezone/1]).
 -endif.
 
 -define(CHECK_INTERVAL, 60000).
@@ -135,8 +137,10 @@ catch_up_missed() ->
             ConfigEntries = shigoto_config:cron_entries(),
             Now = calendar:universal_time(),
             lists:foreach(
-                fun({_Name, Schedule, Worker, Args}) ->
-                    catch_up_entry(Schedule, Worker, Args, DbEntries, Now)
+                fun(Entry) ->
+                    {_Name, Schedule, Worker, Args} = normalize_entry(Entry),
+                    Tz = entry_timezone(Entry),
+                    catch_up_entry(Schedule, Worker, Args, Tz, DbEntries, Now)
                 end,
                 ConfigEntries
             );
@@ -144,14 +148,14 @@ catch_up_missed() ->
             ok
     end.
 
-catch_up_entry(Schedule, Worker, Args, DbEntries, Now) ->
+catch_up_entry(Schedule, Worker, Args, Tz, DbEntries, Now) ->
     case shigoto_cron_parser:parse(Schedule) of
         {ok, Expr} ->
             LastRun = find_last_run(Worker, DbEntries),
             MinutesToCheck = missed_minutes(LastRun, Now),
             lists:foreach(
                 fun(Minute) ->
-                    case shigoto_cron_parser:matches(Expr, Minute) of
+                    case shigoto_cron_parser:matches(Expr, to_timezone(Minute, Tz)) of
                         true ->
                             _ = shigoto:insert(
                                 #{worker => Worker, args => Args, queue => ~"default"},
@@ -219,9 +223,6 @@ entry_timezone({_Name, _Schedule, _Worker, _Args, #{timezone := Tz}}) ->
 entry_timezone(_) ->
     utc.
 
-%% Convert UTC datetime to a target timezone for cron matching. Supports the
-%% atom 'utc', integer hour offsets, "+/-N" and "UTC" binaries, and named IANA
-%% zones such as <<"Europe/Stockholm">> (DST resolved for the given instant).
 to_timezone(UtcDatetime, utc) ->
     UtcDatetime;
 to_timezone(UtcDatetime, Offset) when is_integer(Offset) ->
@@ -235,7 +236,7 @@ to_timezone(UtcDatetime, Bin) when is_binary(Bin) ->
                 {ok, Seconds} ->
                     shift(UtcDatetime, Seconds);
                 {error, Reason} ->
-                    logger:warning(#{
+                    ?LOG_WARNING(#{
                         msg => ~"shigoto_cron_unknown_timezone",
                         timezone => Bin,
                         reason => Reason

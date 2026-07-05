@@ -107,3 +107,16 @@ constraints to prevent double-execution.
 2. Matching entries trigger a job insert into the `default` queue
 3. Jobs use a 60-second unique constraint to prevent duplicates
 4. Cron jobs follow the same retry, backoff, and pruning rules as regular jobs
+
+## Timezone notes
+
+Named zones resolve against the operating system's IANA database
+(`/usr/share/zoneinfo`), so every node in a cluster should run a consistent
+`tzdata` version. A zone that cannot be resolved (missing or corrupt tzdata)
+falls back to UTC with a logged warning rather than failing.
+
+Cron matches at minute granularity under at-least-once semantics: on a DST
+fall-back the repeated wall-clock minute may match twice (unique-job de-dup
+within the 60s window prevents a duplicate enqueue), and on a spring-forward the
+skipped minute does not match. Schedule around 03:00 local to avoid the DST
+window if exact-once firing at those minutes matters.

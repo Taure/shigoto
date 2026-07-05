@@ -23,6 +23,14 @@ UTC offset in seconds for `Zone` at the given UTC datetime, e.g.
 """.
 -spec offset(binary(), calendar:datetime()) -> {ok, integer()} | {error, term()}.
 offset(Zone, UtcDatetime) ->
+    try
+        do_offset(Zone, UtcDatetime)
+    catch
+        Class:Reason ->
+            {error, {tz_parse, Class, Reason}}
+    end.
+
+do_offset(Zone, UtcDatetime) ->
     case zone_path(Zone) of
         {ok, Path} ->
             case read_zone(Path) of
@@ -267,11 +275,11 @@ nth_weekday(Year, Month, Week, Dow) ->
     First + (Week - 1) * 7.
 
 parse_int(Bin) ->
-    parse_int(Bin, 0, false).
+    parse_int(Bin, 0).
 
-parse_int(<<C, R/binary>>, Acc, _Seen) when C >= $0, C =< $9 ->
-    parse_int(R, Acc * 10 + (C - $0), true);
-parse_int(Bin, Acc, _Seen) ->
+parse_int(<<C, R/binary>>, Acc) when C >= $0, C =< $9 ->
+    parse_int(R, Acc * 10 + (C - $0));
+parse_int(Bin, Acc) ->
     {Acc, Bin}.
 
 parse_colon_int(<<":", R/binary>>) ->
