@@ -159,6 +159,7 @@ All optional except `perform/1`:
 | `queue_weights` | `#{}` | Weighted polling distribution |
 | `fair_queues` | `[]` | Queues using partition-key fair claiming |
 | `notifier` | — | LISTEN/NOTIFY connection config |
+| `stage_interval` | `1000` | Milliseconds between due-job stager sweeps (needs `notifier`) |
 
 ## Supervision Tree
 
@@ -171,7 +172,8 @@ shigoto_sup (one_for_one)
   ├─ shigoto_cron            — cron scheduling with leader election
   ├─ shigoto_pruner          — hourly archival and cleanup
   ├─ shigoto_heartbeat       — periodic heartbeat updates
-  └─ shigoto_notifier        — LISTEN/NOTIFY (optional)
+  ├─ shigoto_notifier        — LISTEN/NOTIFY (optional)
+  └─ shigoto_stager          — surfaces newly-due jobs, leader election (optional)
 ```
 
 ## Guides
