@@ -66,7 +66,7 @@ Call `reset/0` in your test setup to clear the `manual` buffer.
 ]).
 
 %% Used by shigoto:insert/2 and insert_all/2 when a testing mode is armed.
--export([handle_insert/3, handle_insert_all/3]).
+-export([handle_insert/2, handle_insert_all/2]).
 
 -define(BUFFER_KEY, '$shigoto_test_enqueued').
 -define(SEQ_KEY, '$shigoto_test_seq').
@@ -123,17 +123,17 @@ build_test_job(Worker, Args, Opts) ->
 %%----------------------------------------------------------------------
 
 -doc false.
--spec handle_insert(map(), map(), inline | manual) -> {ok, map()}.
-handle_insert(JobParams, _Opts, inline) ->
+-spec handle_insert(map(), inline | manual) -> {ok, map()}.
+handle_insert(JobParams, inline) ->
     run_inline(JobParams);
-handle_insert(JobParams, _Opts, manual) ->
+handle_insert(JobParams, manual) ->
     {ok, capture(JobParams)}.
 
 -doc false.
--spec handle_insert_all([map()], map(), inline | manual) -> {ok, [map()]}.
-handle_insert_all(JobParamsList, _Opts, inline) ->
+-spec handle_insert_all([map()], inline | manual) -> {ok, [map()]}.
+handle_insert_all(JobParamsList, inline) ->
     {ok, [element(2, run_inline(P)) || P <- JobParamsList]};
-handle_insert_all(JobParamsList, _Opts, manual) ->
+handle_insert_all(JobParamsList, manual) ->
     {ok, [capture(P) || P <- JobParamsList]}.
 
 run_inline(JobParams) ->

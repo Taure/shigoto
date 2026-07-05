@@ -120,7 +120,7 @@ insert(JobParams, Opts) ->
                     Other
             end;
         Mode ->
-            shigoto_testing:handle_insert(JobParams, Opts, Mode)
+            shigoto_testing:handle_insert(JobParams, Mode)
     end.
 
 -doc "Bulk insert multiple jobs with default options.".
@@ -142,7 +142,7 @@ insert_all(JobParamsList, Opts) ->
                     Other
             end;
         Mode ->
-            shigoto_testing:handle_insert_all(JobParamsList, Opts, Mode)
+            shigoto_testing:handle_insert_all(JobParamsList, Mode)
     end.
 
 -doc """
