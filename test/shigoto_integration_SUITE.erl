@@ -46,7 +46,8 @@
     test_cancel_no_pool/1,
     test_cancel_by_no_pool/1,
     test_retry_no_pool/1,
-    test_retry_by_no_pool/1
+    test_retry_by_no_pool/1,
+    test_cancel_by_in_transaction/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -89,7 +90,8 @@ all() ->
         test_cancel_no_pool,
         test_cancel_by_no_pool,
         test_retry_no_pool,
-        test_retry_by_no_pool
+        test_retry_by_no_pool,
+        test_cancel_by_in_transaction
     ].
 
 init_per_suite(Config) ->
@@ -625,6 +627,16 @@ test_retry_by_no_pool(_Config) ->
     {ok, Count} = shigoto:retry_by(#{worker => shigoto_test_worker}),
     ?assertEqual(1, Count),
     {ok, [_]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
+
+test_cancel_by_in_transaction(_Config) ->
+    ok = shigoto:transaction(fun() ->
+        {ok, _} = shigoto:insert(#{
+            worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}
+        }),
+        {ok, 1} = shigoto:cancel_by(#{worker => shigoto_test_worker}),
+        ok
+    end),
+    {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
 
 %%----------------------------------------------------------------------
 %% Helpers

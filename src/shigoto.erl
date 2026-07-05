@@ -171,10 +171,16 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
             pgo:transaction(Fun, #{pool => Pool})
     end.
 
--doc "Cancel a job by ID on the configured pool. Also stops executing jobs on this node.".
+-doc """
+Cancel a job by ID. Stops the job if it is executing on this node.
+
+Not transaction-aware: the process stop and `job_cancelled` telemetry fire
+immediately, so this always uses the configured pool rather than an enclosing
+`transaction/1,2` pool.
+""".
 -spec cancel(integer()) -> ok | {error, term()}.
 cancel(JobId) ->
-    cancel(txn_pool(), JobId).
+    cancel(shigoto_config:pool(), JobId).
 
 -doc "Cancel a job by ID. Also stops executing jobs on this node.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.
@@ -197,7 +203,7 @@ cancel(Pool, JobId) ->
     end,
     Result.
 
--doc "Cancel jobs matching a pattern on the configured pool. Filters: worker, queue, tags, args.".
+-doc "Cancel jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args.".
 -spec cancel_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Filters) ->
     cancel_by(txn_pool(), Filters).
@@ -207,7 +213,7 @@ cancel_by(Filters) ->
 cancel_by(Pool, Filters) ->
     shigoto_repo:cancel_by(Pool, Filters).
 
--doc "Retry a discarded or cancelled job on the configured pool.".
+-doc "Retry a discarded or cancelled job. Uses the active transaction's pool, or the configured pool.".
 -spec retry(integer()) -> ok | {error, term()}.
 retry(JobId) ->
     retry(txn_pool(), JobId).
@@ -271,7 +277,7 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).
 
--doc "Retry all jobs matching a filter on the configured pool. Filters: worker, queue, state, tags.".
+-doc "Retry all jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags.".
 -spec retry_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Filters) ->
     retry_by(txn_pool(), Filters).
