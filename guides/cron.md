@@ -31,7 +31,8 @@ config :shigoto,
   ]
 ```
 
-Each cron entry is a 4-tuple: `{Name, Schedule, Worker, Args}`.
+Each cron entry is a 4-tuple `{Name, Schedule, Worker, Args}` or a 5-tuple
+`{Name, Schedule, Worker, Args, Opts}` where `Opts` is a map.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -39,6 +40,36 @@ Each cron entry is a 4-tuple: `{Name, Schedule, Worker, Args}`.
 | Schedule | binary | 5-field cron expression |
 | Worker | module | Worker implementing `shigoto_worker` |
 | Args | map | Args map passed to `perform/1` |
+| Opts | map | Optional. Supports `timezone` (see below) |
+
+## Timezones
+
+By default schedules are matched against UTC. Set a `timezone` in the entry's
+`Opts` map to match against a local wall-clock time instead:
+
+```erlang
+{cron, [
+    %% 09:00 Stockholm time, DST-aware, every weekday
+    {<<"morning_report">>, <<"0 9 * * 1-5">>, report_worker, #{},
+        #{timezone => <<"Europe/Stockholm">>}},
+    %% fixed offset, no DST
+    {<<"utc_plus_2">>, <<"0 3 * * *">>, sync_worker, #{}, #{timezone => 2}}
+]}
+```
+
+`timezone` accepts:
+
+| Value | Example | DST |
+|-------|---------|-----|
+| `utc` (default) | `utc` | n/a |
+| integer hour offset | `2`, `-5` | no |
+| `"+/-N"` or `"UTC"` binary | `<<"+2">>` | no |
+| named IANA zone | `<<"Europe/Stockholm">>` | yes |
+
+Named IANA zones are resolved against the operating system's time zone database
+(`$TZDIR` or `/usr/share/zoneinfo`) for each instant, so daylight-saving
+transitions are handled automatically. If a named zone cannot be resolved the
+entry falls back to UTC and a warning is logged.
 
 ## Cron Expression Syntax
 
@@ -76,3 +107,16 @@ constraints to prevent double-execution.
 2. Matching entries trigger a job insert into the `default` queue
 3. Jobs use a 60-second unique constraint to prevent duplicates
 4. Cron jobs follow the same retry, backoff, and pruning rules as regular jobs
+
+## Timezone notes
+
+Named zones resolve against the operating system's IANA database
+(`/usr/share/zoneinfo`), so every node in a cluster should run a consistent
+`tzdata` version. A zone that cannot be resolved (missing or corrupt tzdata)
+falls back to UTC with a logged warning rather than failing.
+
+Cron matches at minute granularity under at-least-once semantics: on a DST
+fall-back the repeated wall-clock minute may match twice (unique-job de-dup
+within the 60s window prevents a duplicate enqueue), and on a spring-forward the
+skipped minute does not match. Schedule around 03:00 local to avoid the DST
+window if exact-once firing at those minutes matters.
