@@ -179,5 +179,6 @@ v5_statements() ->
         >>,
         ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_worker_idx ON shigoto_jobs_archive (worker)",
         ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_queue_idx ON shigoto_jobs_archive (queue)",
-        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_inserted_at_idx ON shigoto_jobs_archive (inserted_at)"
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_inserted_at_idx ON shigoto_jobs_archive (inserted_at)",
+        ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_archived_at_idx ON shigoto_jobs_archive (archived_at)"
     ].

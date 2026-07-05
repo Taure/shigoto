@@ -19,6 +19,7 @@ for safe multi-node job claiming.
     retry_by/2,
     rescue_stale_jobs/2,
     prune_jobs/2,
+    prune_archive/2,
     upsert_cron_entry/2,
     get_due_cron_entries/1,
     update_progress/3,
@@ -350,6 +351,19 @@ prune_jobs(Pool, Days) ->
             "DELETE FROM shigoto_jobs\n"
             "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
             "AND inserted_at < now() - make_interval(days => $1)"
+        >>,
+    case query(Pool, SQL, [Days]) of
+        #{num_rows := Count} -> {ok, Count};
+        {error, _} = Err -> Err
+    end.
+
+-doc "Delete archived jobs older than given days. Bounds the archive table.".
+-spec prune_archive(atom(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
+prune_archive(Pool, Days) ->
+    SQL =
+        <<
+            "DELETE FROM shigoto_jobs_archive\n"
+            "WHERE archived_at < now() - make_interval(days => $1)"
         >>,
     case query(Pool, SQL, [Days]) of
         #{num_rows := Count} -> {ok, Count};
