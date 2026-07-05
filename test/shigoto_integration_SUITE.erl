@@ -42,7 +42,11 @@
     test_transaction_nested/1,
     test_transaction_pool_option/1,
     test_insert_conflict_no_crash/1,
-    test_prune_archive/1
+    test_prune_archive/1,
+    test_cancel_no_pool/1,
+    test_cancel_by_no_pool/1,
+    test_retry_no_pool/1,
+    test_retry_by_no_pool/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -81,7 +85,11 @@ all() ->
         test_transaction_nested,
         test_transaction_pool_option,
         test_insert_conflict_no_crash,
-        test_prune_archive
+        test_prune_archive,
+        test_cancel_no_pool,
+        test_cancel_by_no_pool,
+        test_retry_no_pool,
+        test_retry_by_no_pool
     ].
 
 init_per_suite(Config) ->
@@ -586,6 +594,37 @@ test_prune_archive(_Config) ->
     %% With a zero-day window it is past retention and deleted.
     {ok, 1} = shigoto_repo:prune_archive(?POOL, 0),
     ?assertEqual(0, count_archive()).
+
+%%----------------------------------------------------------------------
+%% Pool-less API tests
+%%----------------------------------------------------------------------
+
+test_cancel_no_pool(_Config) ->
+    {ok, Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    ok = shigoto:cancel(maps:get(id, Job)),
+    {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 1).
+
+test_cancel_by_no_pool(_Config) ->
+    {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    {ok, Count} = shigoto:cancel_by(#{worker => shigoto_test_worker}),
+    ?assertEqual(2, Count),
+    {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
+
+test_retry_no_pool(_Config) ->
+    {ok, Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    JobId = maps:get(id, Job),
+    ok = shigoto:cancel(JobId),
+    ok = shigoto:retry(JobId),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertEqual(JobId, maps:get(id, Claimed)).
+
+test_retry_by_no_pool(_Config) ->
+    {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    {ok, _} = shigoto:cancel_by(#{worker => shigoto_test_worker}),
+    {ok, Count} = shigoto:retry_by(#{worker => shigoto_test_worker}),
+    ?assertEqual(1, Count),
+    {ok, [_]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
 
 %%----------------------------------------------------------------------
 %% Helpers
