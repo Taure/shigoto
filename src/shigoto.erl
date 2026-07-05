@@ -74,6 +74,8 @@ end).
     insert/2,
     insert_all/1,
     insert_all/2,
+    perform_job/2,
+    perform_job/3,
     transaction/1,
     transaction/2,
     cancel/1,
@@ -105,15 +107,20 @@ insert(JobParams) ->
 -doc "Insert a job with options. Params: worker, args, queue, priority, scheduled_at, max_attempts, unique, tags, batch.".
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
-    Pool = txn_pool(),
-    case shigoto_repo:insert_job(Pool, JobParams, Opts) of
-        {ok, {conflict, _}} = Conflict ->
-            Conflict;
-        {ok, Job} ->
-            emit_or_defer(Job),
-            {ok, Job};
-        Other ->
-            Other
+    case shigoto_config:testing_mode() of
+        disabled ->
+            Pool = txn_pool(),
+            case shigoto_repo:insert_job(Pool, JobParams, Opts) of
+                {ok, {conflict, _}} = Conflict ->
+                    Conflict;
+                {ok, Job} ->
+                    emit_or_defer(Job),
+                    {ok, Job};
+                Other ->
+                    Other
+            end;
+        Mode ->
+            shigoto_testing:handle_insert(JobParams, Mode)
     end.
 
 -doc "Bulk insert multiple jobs with default options.".
@@ -124,14 +131,34 @@ insert_all(JobParamsList) ->
 -doc "Bulk insert multiple jobs with options.".
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->
-    Pool = txn_pool(),
-    case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
-        {ok, Jobs} ->
-            lists:foreach(fun emit_or_defer/1, Jobs),
-            {ok, Jobs};
-        Other ->
-            Other
+    case shigoto_config:testing_mode() of
+        disabled ->
+            Pool = txn_pool(),
+            case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
+                {ok, Jobs} ->
+                    lists:foreach(fun emit_or_defer/1, Jobs),
+                    {ok, Jobs};
+                Other ->
+                    Other
+            end;
+        Mode ->
+            shigoto_testing:handle_insert_all(JobParamsList, Mode)
     end.
+
+-doc """
+Run a worker through Shigoto's real perform path with no database, for unit
+tests. Returns the raw worker result. See `m:shigoto_testing`.
+""".
+-spec perform_job(module(), map()) ->
+    ok | {ok, term()} | {error, term()} | {snooze, pos_integer()}.
+perform_job(Worker, Args) ->
+    shigoto_testing:perform_job(Worker, Args).
+
+-doc "Like `perform_job/2` with extra job context (`deps_results`, `attempt`, ...).".
+-spec perform_job(module(), map(), map()) ->
+    ok | {ok, term()} | {error, term()} | {snooze, pos_integer()}.
+perform_job(Worker, Args, Opts) ->
+    shigoto_testing:perform_job(Worker, Args, Opts).
 
 -doc """
 Run `Fun` inside a database transaction on the Shigoto pool.

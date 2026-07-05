@@ -63,6 +63,16 @@ logger for filtering); it is omitted from the tables below for brevity.
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
 
+### Testing Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, testing, mode_armed]` | `count` | mode |
+
+Emitted once at boot when a non-production `testing` mode (`inline`/`manual`) is
+armed. Treat its presence in a production metrics stream as a red flag: inserts
+are not persisting. See `shigoto_config:testing_mode/0`.
+
 ## Attaching a Raw Handler
 
 The lowest-level integration is a plain `telemetry` handler:

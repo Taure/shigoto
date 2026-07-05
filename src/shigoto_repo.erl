@@ -25,6 +25,7 @@ for safe multi-node job claiming.
     get_due_cron_entries/1,
     update_progress/3,
     get_job/2,
+    find_jobs/2,
     resolve_dependencies/2,
     archive_jobs/2,
     fetch_fanout_jobs/3
@@ -435,6 +436,46 @@ get_job(Pool, JobId) ->
         #{rows := []} -> {error, not_found};
         {error, _} = Err -> Err
     end.
+
+-doc """
+Find jobs matching a filter map. Read-only; used by the testing helpers'
+DB-backed enqueue assertions.
+
+Filters: `worker`, `queue`, `args` (jsonb containment), `tags` (array
+containment), and `state` (a state binary or a list of them). An empty filter
+returns all jobs. Args are decrypted so callers can match on plaintext.
+""".
+-spec find_jobs(atom(), map()) -> {ok, [map()]} | {error, term()}.
+find_jobs(Pool, Filters0) ->
+    {StateClauses, StateParams, NextIdx} = state_filter_clause(
+        maps:get(state, Filters0, undefined), 1
+    ),
+    OtherFilters = maps:without([state], Filters0),
+    {WhereClauses, OtherParams, _} = build_filter_clauses(OtherFilters, NextIdx),
+    AllClauses = StateClauses ++ WhereClauses,
+    WhereSQL =
+        case AllClauses of
+            [] -> ~"TRUE";
+            _ -> iolist_to_binary(lists:join(~" AND ", AllClauses))
+        end,
+    SQL = iolist_to_binary([
+        ~"SELECT * FROM shigoto_jobs WHERE ", WhereSQL, ~" ORDER BY id ASC"
+    ]),
+    case query(Pool, SQL, StateParams ++ OtherParams) of
+        #{rows := Rows} -> {ok, [decrypt_job_args(R) || R <- Rows]};
+        {error, _} = Err -> Err
+    end.
+
+-spec state_filter_clause(binary() | [binary()] | undefined, pos_integer()) ->
+    {[binary()], [term()], pos_integer()}.
+state_filter_clause(undefined, Idx) ->
+    {[], [], Idx};
+state_filter_clause(State, Idx) when is_binary(State) ->
+    IBin = integer_to_binary(Idx),
+    {[<<"state = $", IBin/binary>>], [State], Idx + 1};
+state_filter_clause(States, Idx) when is_list(States) ->
+    IBin = integer_to_binary(Idx),
+    {[<<"state = ANY($", IBin/binary, ")">>], [encode_pg_array(States)], Idx + 1}.
 
 -doc "Archive completed/discarded/cancelled jobs older than given days. Moves to archive table then deletes.".
 -spec archive_jobs(atom(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
