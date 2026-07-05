@@ -2,18 +2,34 @@
 -moduledoc """
 Telemetry events for Shigoto job lifecycle, queue operations, and resilience.
 
+Every event is emitted through `telemetry:execute/3`. The tables below are the
+stable event contract: attach a handler to any of these event names to feed a
+metrics reporter (`telemetry_metrics`, Prometheus, StatsD, ...). See the
+[Telemetry](telemetry.md) guide for a worked `telemetry_metrics` example.
+
+Measurement units:
+
+- `count` is always `1` (increment a counter/sum).
+- `duration` is in **native** time units (`erlang:monotonic_time/0` deltas).
+- `duration_ms`, `queue_wait_ms`, `retry_after_ms` are **milliseconds**.
+- `progress` is a **percentage** (`0..100`).
+- `claimed` is a **job count** (jobs claimed by that poll).
+
+Every event carries `domain => [shigoto]` in its metadata (used by the OTP
+logger for filtering); it is omitted from the tables below for brevity.
+
 ## Job Events
 
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
-| `[shigoto, job, inserted]` | `count` | job_id, worker, queue, priority |
-| `[shigoto, job, claimed]` | `count, queue_wait_ms` | job_id, worker, queue |
-| `[shigoto, job, completed]` | `count, duration, queue_wait_ms` | job_id, worker, queue, attempt |
-| `[shigoto, job, failed]` | `count, duration, queue_wait_ms` | job_id, worker, queue, attempt, reason |
-| `[shigoto, job, snoozed]` | `count` | job_id, worker, queue, snooze_reason |
-| `[shigoto, job, discarded]` | `count` | job_id, worker, queue, attempt |
-| `[shigoto, job, cancelled]` | `count` | job_id, worker, queue |
-| `[shigoto, job, progress]` | `progress` | job_id, worker, queue |
+| `[shigoto, job, inserted]` | `count` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, claimed]` | `count, queue_wait_ms` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, completed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, failed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority, reason |
+| `[shigoto, job, snoozed]` | `count` | job_id, worker, queue, attempt, priority, snooze_reason |
+| `[shigoto, job, discarded]` | `count` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, cancelled]` | `count` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, progress]` | `progress` | job_id, worker, queue, attempt, priority, progress |
 
 ## Queue Events
 
