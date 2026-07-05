@@ -157,12 +157,24 @@ run_inline(JobParams) ->
 capture(JobParams) ->
     warn_ignored_features(manual, JobParams),
     Job = job_from_params(JobParams, 0),
-    Stored = Job#{state => ~"available"},
+    State =
+        case maps:is_key(scheduled_at, JobParams) of
+            true -> ~"scheduled";
+            false -> ~"available"
+        end,
+    Stored = Job#{state => State},
     put(?BUFFER_KEY, [Stored | buffer()]),
     Stored.
 
+%% inline additionally ignores scheduled_at (it runs the job now regardless);
+%% manual reflects scheduled_at in the captured job's state instead.
 warn_ignored_features(Mode, JobParams) ->
-    Ignored = [K || K <- [batch, depends_on, unique], maps:is_key(K, JobParams)],
+    Keys =
+        case Mode of
+            inline -> [batch, depends_on, unique, scheduled_at];
+            manual -> [batch, depends_on, unique]
+        end,
+    Ignored = [K || K <- Keys, maps:is_key(K, JobParams)],
     case Ignored of
         [] ->
             ok;
@@ -171,7 +183,7 @@ warn_ignored_features(Mode, JobParams) ->
                 msg => ~"shigoto_testing_mode_ignores_features",
                 mode => Mode,
                 ignored => Ignored,
-                note => ~"batch/depends_on/unique are no-ops under inline/manual testing modes"
+                note => ~"these params are no-ops under inline/manual testing modes"
             })
     end.
 
@@ -219,7 +231,7 @@ assert_enqueued(Filters, Opts) when is_map(Filters), is_map(Opts) ->
     PoolSpec = maps:get(pool, Opts, default),
     case collect(Filters, PoolSpec) of
         [_ | _] -> ok;
-        [] -> error({assert_enqueued, Filters, collect(#{}, PoolSpec)})
+        [] -> error({assert_enqueued, Filters, redact(collect(#{}, PoolSpec))})
     end.
 
 -doc "Assert NO enqueued job matches the filter; raises with the matches otherwise.".
@@ -227,8 +239,14 @@ assert_enqueued(Filters, Opts) when is_map(Filters), is_map(Opts) ->
 refute_enqueued(Filters) when is_map(Filters) ->
     case collect(Filters, default) of
         [] -> ok;
-        Matches -> error({refute_enqueued, Filters, Matches})
+        Matches -> error({refute_enqueued, Filters, redact(Matches)})
     end.
+
+%% Job args may be sensitive (Shigoto supports encryption-at-rest), and
+%% find_jobs returns them decrypted — never let plaintext args land in a raised
+%% term that could be logged. Project to non-sensitive identifying fields.
+redact(Jobs) ->
+    [maps:with([id, worker, queue, state, tags], J) || J <- Jobs].
 
 -doc "Clear the manual-mode capture buffer for the calling process.".
 -spec reset() -> ok.
@@ -238,15 +256,29 @@ reset() ->
     ok.
 
 collect(Filters, PoolSpec) ->
+    validate_filters(Filters),
     case shigoto_config:testing_mode() of
         manual ->
             [J || J <- lists:reverse(buffer()), matches(Filters, J)];
+        inline ->
+            %% inline runs jobs and retains nothing, so there is never anything
+            %% to assert on — return empty rather than querying a (possibly
+            %% unconfigured) pool.
+            [];
         _ ->
             Pool = resolve_pool(PoolSpec),
             case shigoto_repo:find_jobs(Pool, Filters) of
                 {ok, Jobs} -> Jobs;
                 {error, Reason} -> error({shigoto_testing_query_failed, Reason})
             end
+    end.
+
+%% Reject unknown filter keys in BOTH backends so a typo fails loudly rather
+%% than silently matching everything (manual) or crashing on function_clause (db).
+validate_filters(Filters) ->
+    case maps:keys(Filters) -- [worker, queue, args, tags, state] of
+        [] -> ok;
+        Unknown -> error({unknown_filter_key, Unknown})
     end.
 
 resolve_pool(default) -> shigoto_config:pool();

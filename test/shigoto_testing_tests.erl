@@ -63,7 +63,10 @@ manual_capture_test_() ->
         fun manual_captures_without_persisting/0,
         fun manual_assert_and_refute/0,
         fun manual_args_match/0,
-        fun manual_reset_clears/0
+        fun manual_reset_clears/0,
+        fun manual_insert_all_captures/0,
+        fun manual_scheduled_state/0,
+        fun manual_unknown_filter_key_raises/0
     ]}.
 
 manual_captures_without_persisting() ->
@@ -97,6 +100,28 @@ manual_reset_clears() ->
     shigoto_testing:reset(),
     ?assertEqual(0, length(shigoto_testing:all_enqueued())).
 
+manual_insert_all_captures() ->
+    shigoto_testing:reset(),
+    {ok, Jobs} = shigoto:insert_all([
+        #{worker => shigoto_test_worker, args => #{~"i" => 1}},
+        #{worker => shigoto_test_worker, args => #{~"i" => 2}}
+    ]),
+    ?assertEqual(2, length(Jobs)),
+    ?assertEqual(2, length(shigoto_testing:all_enqueued())).
+
+manual_scheduled_state() ->
+    shigoto_testing:reset(),
+    {ok, _} = shigoto:insert(#{
+        worker => shigoto_test_worker, args => #{}, scheduled_at => {{2099, 1, 1}, {0, 0, 0}}
+    }),
+    ok = shigoto_testing:assert_enqueued(#{state => ~"scheduled"}),
+    ok = shigoto_testing:refute_enqueued(#{state => ~"available"}).
+
+manual_unknown_filter_key_raises() ->
+    ?assertError(
+        {unknown_filter_key, [workr]}, shigoto_testing:assert_enqueued(#{workr => nope})
+    ).
+
 %%----------------------------------------------------------------------
 %% inline mode
 %%----------------------------------------------------------------------
@@ -104,6 +129,8 @@ manual_reset_clears() ->
 inline_mode_test_() ->
     {setup, fun() -> arm(inline) end, fun(_) -> disarm() end, [
         fun inline_runs_and_completes/0,
+        fun inline_result_payload/0,
+        fun inline_insert_all_runs_each/0,
         fun inline_failure_raises/0,
         fun inline_snooze_scheduled/0
     ]}.
@@ -112,6 +139,23 @@ inline_runs_and_completes() ->
     ?assertMatch(
         {ok, #{state := ~"completed"}},
         shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}})
+    ).
+
+inline_result_payload() ->
+    ?assertMatch(
+        {ok, #{state := ~"completed", result := #{~"produced" := 42}}},
+        shigoto:insert(#{
+            worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 42}
+        })
+    ).
+
+inline_insert_all_runs_each() ->
+    ?assertMatch(
+        {ok, [#{state := ~"completed"}, #{state := ~"completed"}]},
+        shigoto:insert_all([
+            #{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}},
+            #{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}
+        ])
     ).
 
 inline_failure_raises() ->
