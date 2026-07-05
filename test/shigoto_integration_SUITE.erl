@@ -38,6 +38,9 @@
     test_transaction_commit/1,
     test_transaction_rollback/1,
     test_transaction_telemetry_deferred/1,
+    test_transaction_commit_rollback_no_telemetry/1,
+    test_transaction_nested/1,
+    test_transaction_pool_option/1,
     test_insert_conflict_no_crash/1
 ]).
 
@@ -73,6 +76,9 @@ all() ->
         test_transaction_commit,
         test_transaction_rollback,
         test_transaction_telemetry_deferred,
+        test_transaction_commit_rollback_no_telemetry,
+        test_transaction_nested,
+        test_transaction_pool_option,
         test_insert_conflict_no_crash
     ].
 
@@ -488,9 +494,90 @@ test_insert_conflict_no_crash(_Config) ->
     ?assertMatch({ok, {conflict, _}}, shigoto:insert(Params, #{unique => Unique})),
     ?assertEqual(1, count_jobs()).
 
+test_transaction_commit_rollback_no_telemetry(_Config) ->
+    Handler = {?MODULE, commit_rollback},
+    ok = telemetry:attach(
+        Handler,
+        [shigoto, job, inserted],
+        fun(_Event, _Measure, Meta, Pid) -> Pid ! {job_inserted, Meta} end,
+        self()
+    ),
+    try
+        ?assertError(
+            transaction_rolled_back,
+            shigoto:transaction(fun() ->
+                {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+                {error, _} = pgo:query(~"select 1/0", [], #{pool => ?POOL}),
+                done
+            end)
+        ),
+        ?assertEqual(0, count_jobs()),
+        ?assertEqual(
+            timeout,
+            receive
+                {job_inserted, _} -> got
+            after 200 -> timeout
+            end
+        )
+    after
+        telemetry:detach(Handler)
+    end.
+
+test_transaction_nested(_Config) ->
+    Handler = {?MODULE, nested},
+    ok = telemetry:attach(
+        Handler,
+        [shigoto, job, inserted],
+        fun(_Event, _Measure, _Meta, Pid) -> Pid ! job_inserted end,
+        self()
+    ),
+    try
+        ok = shigoto:transaction(fun() ->
+            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"n" => 1}}),
+            ok = shigoto:transaction(fun() ->
+                {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"n" => 2}}),
+                ok
+            end)
+        end),
+        ?assertEqual(2, count_jobs()),
+        ?assertEqual(2, drain_inserted(0))
+    after
+        telemetry:detach(Handler)
+    end.
+
+test_transaction_pool_option(_Config) ->
+    Pool2 = shigoto_test_pool2,
+    case
+        pgo:start_pool(Pool2, #{
+            host => "localhost",
+            port => 5556,
+            database => "shigoto_test",
+            user => "postgres",
+            password => "root",
+            pool_size => 2
+        })
+    of
+        {ok, _} -> ok;
+        {error, {already_started, _}} -> ok
+    end,
+    ok = shigoto:transaction(
+        fun() ->
+            {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"p" => 2}}),
+            ok
+        end,
+        #{pool => Pool2}
+    ),
+    ?assertEqual(1, count_jobs()).
+
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+drain_inserted(N) ->
+    receive
+        job_inserted -> drain_inserted(N + 1)
+    after 300 -> N
+    end.
 
 cleanup_jobs() ->
     pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
