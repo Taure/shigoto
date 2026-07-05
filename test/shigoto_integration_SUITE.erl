@@ -41,7 +41,8 @@
     test_transaction_commit_rollback_no_telemetry/1,
     test_transaction_nested/1,
     test_transaction_pool_option/1,
-    test_insert_conflict_no_crash/1
+    test_insert_conflict_no_crash/1,
+    test_prune_archive/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -79,7 +80,8 @@ all() ->
         test_transaction_commit_rollback_no_telemetry,
         test_transaction_nested,
         test_transaction_pool_option,
-        test_insert_conflict_no_crash
+        test_insert_conflict_no_crash,
+        test_prune_archive
     ].
 
 init_per_suite(Config) ->
@@ -571,6 +573,20 @@ test_transaction_pool_option(_Config) ->
     ),
     ?assertEqual(0, count_jobs()).
 
+test_prune_archive(_Config) ->
+    {ok, Job} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    shigoto_repo:complete_job(?POOL, maps:get(id, Job)),
+    {ok, _} = shigoto_repo:archive_jobs(?POOL, 0),
+    ?assertEqual(1, count_archive()),
+    %% A just-archived row is within the retention window and must survive.
+    {ok, 0} = shigoto_repo:prune_archive(?POOL, 90),
+    ?assertEqual(1, count_archive()),
+    %% With a zero-day window it is past retention and deleted.
+    {ok, 1} = shigoto_repo:prune_archive(?POOL, 0),
+    ?assertEqual(0, count_archive()).
+
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
@@ -600,11 +616,18 @@ start_pool2() ->
 
 cleanup_jobs() ->
     pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
+    pgo:query(~"DELETE FROM shigoto_jobs_archive", [], #{pool => ?POOL}),
     ok.
 
 count_jobs() ->
+    count(~"SELECT count(*) AS count FROM shigoto_jobs").
+
+count_archive() ->
+    count(~"SELECT count(*) AS count FROM shigoto_jobs_archive").
+
+count(SQL) ->
     #{rows := [#{count := N}]} = pgo:query(
-        ~"SELECT count(*) AS count FROM shigoto_jobs",
+        SQL,
         [],
         #{pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]}
     ),

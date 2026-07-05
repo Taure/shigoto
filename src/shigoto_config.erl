@@ -9,6 +9,7 @@ Configuration access for Shigoto. Reads from application env.
     poll_interval/0,
     cron_entries/0,
     prune_after_days/0,
+    archive_after_days/0,
     shutdown_timeout/0,
     notifier_config/0,
     middleware/0,
@@ -47,10 +48,15 @@ poll_interval() ->
 cron_entries() ->
     application:get_env(shigoto, cron, []).
 
--doc "Days to keep completed/discarded jobs. Default: 14.".
+-doc "Days to keep completed/discarded jobs before archiving. Default: 14.".
 -spec prune_after_days() -> pos_integer().
 prune_after_days() ->
     application:get_env(shigoto, prune_after_days, 14).
+
+-doc "Days to keep archived jobs before permanent deletion. Default: 90.".
+-spec archive_after_days() -> pos_integer().
+archive_after_days() ->
+    application:get_env(shigoto, archive_after_days, 90).
 
 -doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
 -spec notifier_config() -> map() | undefined.

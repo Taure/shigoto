@@ -1,7 +1,9 @@
 -module(shigoto_pruner).
 -moduledoc """
 Periodically archives old completed and discarded jobs. Moves them
-to `shigoto_jobs_archive` before deleting from the main table.
+to `shigoto_jobs_archive` before deleting from the main table, then
+deletes archived rows older than the configured retention window so the
+archive stays bounded.
 """.
 -behaviour(gen_server).
 
@@ -30,8 +32,8 @@ handle_cast(_Msg, State) ->
 -doc false.
 handle_info(prune, State) ->
     Pool = shigoto_config:pool(),
-    Days = shigoto_config:prune_after_days(),
-    _ = shigoto_repo:archive_jobs(Pool, Days),
+    _ = shigoto_repo:archive_jobs(Pool, shigoto_config:prune_after_days()),
+    _ = shigoto_repo:prune_archive(Pool, shigoto_config:archive_after_days()),
     erlang:send_after(?PRUNE_INTERVAL, self(), prune),
     {noreply, State};
 handle_info(_Info, State) ->
