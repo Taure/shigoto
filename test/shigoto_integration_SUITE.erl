@@ -53,7 +53,13 @@
     test_global_concurrency_admits_two_of_three/1,
     test_stager_surfaces_due_queue/1,
     test_stager_ignores_not_yet_due/1,
-    test_stager_stage_once_fails_soft/1
+    test_stager_stage_once_fails_soft/1,
+    test_result_stored_on_ok_tuple/1,
+    test_plain_ok_stores_null/1,
+    test_deps_results_passed_to_dependent/1,
+    test_deps_results_null_for_plain_ok_predecessor/1,
+    test_deps_results_integer_key/1,
+    test_deps_results_fan_in/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -103,7 +109,13 @@ all() ->
         test_global_concurrency_admits_two_of_three,
         test_stager_surfaces_due_queue,
         test_stager_ignores_not_yet_due,
-        test_stager_stage_once_fails_soft
+        test_stager_stage_once_fails_soft,
+        test_result_stored_on_ok_tuple,
+        test_plain_ok_stores_null,
+        test_deps_results_passed_to_dependent,
+        test_deps_results_null_for_plain_ok_predecessor,
+        test_deps_results_integer_key,
+        test_deps_results_fan_in
     ].
 
 init_per_suite(Config) ->
@@ -756,12 +768,154 @@ test_stager_stage_once_fails_soft(_Config) ->
     ?assertEqual(ok, shigoto_stager:stage_once()).
 
 %%----------------------------------------------------------------------
+%% Workflow context (result passing) tests
+%%----------------------------------------------------------------------
+
+test_result_stored_on_ok_tuple(_Config) ->
+    {ok, Job} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 42}},
+        #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+    ?assertEqual(#{~"produced" => 42}, get_result(maps:get(id, Job))).
+
+test_plain_ok_stores_null(_Config) ->
+    %% A worker returning plain `ok` must still complete and store a null result.
+    {ok, Job} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"plain_ok"}},
+        #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+    ?assertEqual(null, get_result(maps:get(id, Job))),
+    {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 1).
+
+test_deps_results_passed_to_dependent(_Config) ->
+    {ok, Parent} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 7}},
+        #{}
+    ),
+    ParentId = maps:get(id, Parent),
+    {ok, Child} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_result_worker,
+            args => #{~"action" => ~"consume"},
+            depends_on => [ParentId]
+        },
+        #{}
+    ),
+    ChildId = maps:get(id, Child),
+    %% Child is gated until the parent completes.
+    {ok, [Claimed1]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual(ParentId, maps:get(id, Claimed1)),
+    ok = shigoto_executor:execute_sync(Claimed1, ?POOL, 5000),
+    %% Now the child is claimable and sees the parent's result.
+    {ok, [Claimed2]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual(ChildId, maps:get(id, Claimed2)),
+    ok = shigoto_executor:execute_sync(Claimed2, ?POOL, 5000),
+    ?assertEqual(#{~"got" => #{~"produced" => 7}}, get_result(ChildId)).
+
+test_deps_results_null_for_plain_ok_predecessor(_Config) ->
+    {ok, Parent} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"plain_ok"}},
+        #{}
+    ),
+    ParentId = maps:get(id, Parent),
+    {ok, Child} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_result_worker,
+            args => #{~"action" => ~"consume"},
+            depends_on => [ParentId]
+        },
+        #{}
+    ),
+    ChildId = maps:get(id, Child),
+    {ok, [Claimed1]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_executor:execute_sync(Claimed1, ?POOL, 5000),
+    {ok, [Claimed2]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual(ChildId, maps:get(id, Claimed2)),
+    ok = shigoto_executor:execute_sync(Claimed2, ?POOL, 5000),
+    ?assertEqual(#{~"got" => null}, get_result(ChildId)).
+
+test_deps_results_integer_key(_Config) ->
+    {ok, Parent} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 9}},
+        #{}
+    ),
+    ParentId = maps:get(id, Parent),
+    {ok, Child} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_result_worker,
+            args => #{~"action" => ~"consume_keyed", ~"parent" => ParentId},
+            depends_on => [ParentId]
+        },
+        #{}
+    ),
+    ChildId = maps:get(id, Child),
+    {ok, [Claimed1]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_executor:execute_sync(Claimed1, ?POOL, 5000),
+    {ok, [Claimed2]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual(ChildId, maps:get(id, Claimed2)),
+    ok = shigoto_executor:execute_sync(Claimed2, ?POOL, 5000),
+    ?assertEqual(#{~"got" => #{~"produced" => 9}}, get_result(ChildId)).
+
+test_deps_results_fan_in(_Config) ->
+    {ok, P1} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 1}},
+        #{}
+    ),
+    {ok, P2} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 2}},
+        #{}
+    ),
+    P1Id = maps:get(id, P1),
+    P2Id = maps:get(id, P2),
+    {ok, Child} = shigoto_repo:insert_job(
+        ?POOL,
+        #{
+            worker => shigoto_result_worker,
+            args => #{~"action" => ~"consume_count"},
+            depends_on => [P1Id, P2Id]
+        },
+        #{}
+    ),
+    ChildId = maps:get(id, Child),
+    {ok, Parents} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    [ok = shigoto_executor:execute_sync(J, ?POOL, 5000) || J <- Parents],
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual(ChildId, maps:get(id, Claimed)),
+    ok = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+    ?assertEqual(#{~"count" => 2}, get_result(ChildId)).
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 
 seconds_from_now(Seconds) ->
     Secs = calendar:datetime_to_gregorian_seconds(calendar:universal_time()),
     calendar:gregorian_seconds_to_datetime(Secs + Seconds).
+
+get_result(JobId) ->
+    #{rows := [#{result := Result}]} = pgo:query(
+        ~"SELECT result FROM shigoto_jobs WHERE id = $1",
+        [JobId],
+        #{pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]}
+    ),
+    case Result of
+        null -> null;
+        Bin when is_binary(Bin) -> json:decode(Bin)
+    end.
 
 drain_inserted(N) ->
     receive

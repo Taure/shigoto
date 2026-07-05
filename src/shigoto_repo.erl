@@ -10,6 +10,7 @@ for safe multi-node job claiming.
     claim_jobs/3,
     claim_jobs_fair/3,
     complete_job/2,
+    complete_job/3,
     fail_job/4,
     discard_job/2,
     cancel_job/2,
@@ -185,16 +186,37 @@ claim_jobs_fair(Pool, Queue, Limit) ->
             Err
     end.
 
--doc "Mark a job as completed.".
+-doc "Mark a job as completed with no result. Equivalent to `complete_job/3` with `null`.".
 -spec complete_job(atom(), integer()) -> ok | {error, term()}.
 complete_job(Pool, JobId) ->
+    complete_job(Pool, JobId, null).
+
+-doc """
+Mark a job as completed and store its JSON-encodable result on the row.
+
+The result is propagated to any jobs that depend on this one (see
+`resolve_dependencies/2`) so they can read it via `deps_results`.
+""".
+-spec complete_job(atom(), integer(), term()) -> ok | {error, term()}.
+complete_job(Pool, JobId, Result) ->
+    ResultJson = encode_result(Result),
     SQL =
-        ~"UPDATE shigoto_jobs SET state = 'completed', completed_at = now() WHERE id = $1 RETURNING batch_id",
-    _ = resolve_dependencies(Pool, JobId),
-    case query(Pool, SQL, [JobId]) of
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET state = 'completed', completed_at = now(), result = $2::jsonb
+          WHERE id = $1 RETURNING id, result, batch_id
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.id = ANY(d.depends_on)
+        )
+        SELECT batch_id FROM done
+        """,
+    case query(Pool, SQL, [JobId, ResultJson]) of
         #{rows := [#{batch_id := BatchId}]} when BatchId =/= null ->
             shigoto_batch:job_completed(Pool, BatchId);
-        #{command := update} ->
+        #{rows := _} ->
             ok;
         {error, _} = Err ->
             Err
@@ -370,12 +392,27 @@ prune_archive(Pool, Days) ->
         {error, _} = Err -> Err
     end.
 
--doc "Resolve dependencies: remove completed job ID from all depends_on arrays.".
+-doc """
+Resolve dependencies of a finished job.
+
+Removes the finished job ID from every dependent's `depends_on` array (which
+ungates the dependent once its last predecessor clears) and records the
+finished job's `result` under its ID in each dependent's `deps_results`. A job
+that produced no result (plain completion, discard, or cancel) contributes a
+JSON `null`.
+""".
 -spec resolve_dependencies(atom(), integer()) -> {ok, non_neg_integer()} | {error, term()}.
-resolve_dependencies(Pool, CompletedJobId) ->
+resolve_dependencies(Pool, FinishedJobId) ->
     SQL =
-        ~"UPDATE shigoto_jobs SET depends_on = array_remove(depends_on, $1) WHERE $1 = ANY(depends_on)",
-    case query(Pool, SQL, [CompletedJobId]) of
+        <<
+            "UPDATE shigoto_jobs SET\n"
+            "depends_on = array_remove(depends_on, $1),\n"
+            "deps_results = deps_results || jsonb_build_object(\n"
+            "  $1::text, (SELECT result FROM shigoto_jobs WHERE id = $1)\n"
+            ")\n"
+            "WHERE $1 = ANY(depends_on)"
+        >>,
+    case query(Pool, SQL, [FinishedJobId]) of
         #{num_rows := Count} -> {ok, Count};
         {error, _} = Err -> Err
     end.
@@ -408,11 +445,11 @@ archive_jobs(Pool, Days) ->
             "(id, queue, worker, args, state, priority, attempt, max_attempts,\n"
             " scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,\n"
             " inserted_at, errors, meta, unique_key, tags, progress, batch_id,\n"
-            " heartbeat_at, partition_key, depends_on)\n"
+            " heartbeat_at, partition_key, depends_on, result, deps_results)\n"
             "SELECT id, queue, worker, args, state, priority, attempt, max_attempts,\n"
             " scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,\n"
             " inserted_at, errors, meta, unique_key, tags, progress, batch_id,\n"
-            " heartbeat_at, partition_key, depends_on\n"
+            " heartbeat_at, partition_key, depends_on, result, deps_results\n"
             "FROM shigoto_jobs\n"
             "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
             "AND inserted_at < now() - make_interval(days => $1)\n"
@@ -925,6 +962,13 @@ encode_json(Map) when is_map(Map) ->
     iolist_to_binary(json:encode(Map));
 encode_json(Bin) when is_binary(Bin) ->
     Bin.
+
+encode_result(null) ->
+    null;
+encode_result(undefined) ->
+    null;
+encode_result(Result) ->
+    iolist_to_binary(json:encode(Result)).
 
 encode_pg_array(Tags) when is_list(Tags) ->
     Tags;

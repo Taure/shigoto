@@ -6,6 +6,26 @@ The `perform/1` callback receives the job's args map and should return
 `ok` on success or `{error, Reason}` on failure. Failed jobs are retried
 with configurable backoff up to `max_attempts`.
 
+## Workflow Context
+
+Return `{ok, Result}` to store a JSON-encodable `Result` on the job. Any job
+that lists this one in its `depends_on` can then read that value. Plain `ok`
+stores a JSON `null`. Keep `Result` small (ids, status, a summary) — it is
+copied into every dependent's `deps_results`, so large payloads fan out.
+
+When a job has dependencies, its args map carries a `deps_results` key holding
+the predecessors' results, keyed by predecessor job ID:
+
+```erlang
+perform(#{~"x" := X, deps_results := #{ParentId := ParentResult}}) ->
+    ...
+```
+
+The map shape is `#{PredId :: integer() => Result :: term()}`. A predecessor
+that returned plain `ok` (or was discarded/cancelled) contributes `null`. The
+`deps_results` key is absent for jobs with no dependencies, so existing workers
+are unaffected.
+
 ## Optional Callbacks
 
 Workers can declare defaults via optional callbacks:
@@ -80,7 +100,8 @@ unique() -> #{keys => [worker, args], period => 300}.
 ```
 """.
 
--callback perform(Args :: map()) -> ok | {error, term()} | {snooze, pos_integer()}.
+-callback perform(Args :: map()) ->
+    ok | {ok, Result :: term()} | {error, term()} | {snooze, pos_integer()}.
 -callback max_attempts() -> pos_integer().
 -callback queue() -> binary().
 -callback priority() -> integer().

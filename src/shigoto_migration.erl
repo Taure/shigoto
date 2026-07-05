@@ -17,7 +17,8 @@ up(Pool) ->
         fun(SQL) ->
             pgo:query(SQL, [], #{pool => Pool, decode_opts => ?DECODE_OPTS})
         end,
-        v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++ v5_statements()
+        v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
+            v5_statements() ++ v6_statements()
     ),
     ok.
 
@@ -181,4 +182,14 @@ v5_statements() ->
         ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_queue_idx ON shigoto_jobs_archive (queue)",
         ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_inserted_at_idx ON shigoto_jobs_archive (inserted_at)",
         ~"CREATE INDEX IF NOT EXISTS shigoto_jobs_archive_archived_at_idx ON shigoto_jobs_archive (archived_at)"
+    ].
+
+v6_statements() ->
+    [
+        %% Workflow context: a job's own result and the accumulated results of its
+        %% predecessors, both JSON-encodable and stored as JSONB.
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS result JSONB",
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'",
+        ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS result JSONB",
+        ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'"
     ].
