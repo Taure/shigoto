@@ -6,11 +6,20 @@ missed intervals since the last run.
 
 Uses `pg_try_advisory_lock` so only one node runs cron checks
 in a multi-node deployment.
+
+Entries may carry a `timezone` in their `Opts` map (`utc`, an integer hour
+offset, a `"+/-N"`/`"UTC"` binary, or a named IANA zone such as
+`<<"Europe/Stockholm">>`). Named zones are resolved with DST via `m:shigoto_tz`.
+See `shigoto_config:cron_entries/0`.
 """.
 -behaviour(gen_server).
 
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+
+-ifdef(TEST).
+-export([to_timezone/2]).
+-endif.
 
 -define(CHECK_INTERVAL, 60000).
 -define(RETRY_INTERVAL, 1000).
@@ -210,20 +219,36 @@ entry_timezone({_Name, _Schedule, _Worker, _Args, #{timezone := Tz}}) ->
 entry_timezone(_) ->
     utc.
 
-%% Convert UTC datetime to a target timezone for cron matching.
-%% Supports integer hour offsets and the atom 'utc'.
+%% Convert UTC datetime to a target timezone for cron matching. Supports the
+%% atom 'utc', integer hour offsets, "+/-N" and "UTC" binaries, and named IANA
+%% zones such as <<"Europe/Stockholm">> (DST resolved for the given instant).
 to_timezone(UtcDatetime, utc) ->
     UtcDatetime;
 to_timezone(UtcDatetime, Offset) when is_integer(Offset) ->
-    Secs = calendar:datetime_to_gregorian_seconds(UtcDatetime),
-    calendar:gregorian_seconds_to_datetime(Secs + Offset * 3600);
-to_timezone(UtcDatetime, OffsetBin) when is_binary(OffsetBin) ->
-    case parse_offset(OffsetBin) of
-        {ok, Hours} -> to_timezone(UtcDatetime, Hours);
-        error -> UtcDatetime
+    shift(UtcDatetime, Offset * 3600);
+to_timezone(UtcDatetime, Bin) when is_binary(Bin) ->
+    case parse_offset(Bin) of
+        {ok, Hours} ->
+            shift(UtcDatetime, Hours * 3600);
+        error ->
+            case shigoto_tz:offset(Bin, UtcDatetime) of
+                {ok, Seconds} ->
+                    shift(UtcDatetime, Seconds);
+                {error, Reason} ->
+                    logger:warning(#{
+                        msg => ~"shigoto_cron_unknown_timezone",
+                        timezone => Bin,
+                        reason => Reason
+                    }),
+                    UtcDatetime
+            end
     end;
 to_timezone(UtcDatetime, _) ->
     UtcDatetime.
+
+shift(UtcDatetime, Seconds) ->
+    Secs = calendar:datetime_to_gregorian_seconds(UtcDatetime),
+    calendar:gregorian_seconds_to_datetime(Secs + Seconds).
 
 parse_offset(<<"+", Rest/binary>>) ->
     try

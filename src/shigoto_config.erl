@@ -43,7 +43,17 @@ queues() ->
 poll_interval() ->
     application:get_env(shigoto, poll_interval, 5000).
 
--doc "Cron job entries. Each: `{Name, Schedule, Worker, Args}` or `{Name, Schedule, Worker, Args, #{timezone => Offset}}`.".
+-doc """
+Cron job entries. Each is `{Name, Schedule, Worker, Args}` or
+`{Name, Schedule, Worker, Args, #{timezone => Timezone}}`.
+
+`Timezone` may be:
+- `utc` (the default when omitted)
+- an integer hour offset, e.g. `2` or `-5`
+- a `"+/-N"` or `"UTC"` binary, e.g. `<<"+2">>`
+- a named IANA zone, e.g. `<<"Europe/Stockholm">>`, resolved (with DST) for
+  each instant against the operating system's time zone database
+""".
 -spec cron_entries() -> list().
 cron_entries() ->
     application:get_env(shigoto, cron, []).
