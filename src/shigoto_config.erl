@@ -3,11 +3,14 @@
 Configuration access for Shigoto. Reads from application env.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     pool/0,
     queues/0,
     poll_interval/0,
     stage_interval/0,
+    testing_mode/0,
     cron_entries/0,
     prune_after_days/0,
     archive_after_days/0,
@@ -48,6 +51,48 @@ poll_interval() ->
 -spec stage_interval() -> pos_integer().
 stage_interval() ->
     application:get_env(shigoto, stage_interval, 1000).
+
+-doc """
+Testing mode for `insert/1,2` and `insert_all/1,2`. Default: `disabled` (normal
+production behaviour — jobs are persisted and run by queue workers).
+
+`inline` executes each inserted job synchronously in the calling process and
+keeps no database row; `manual` captures inserted jobs in a process-local buffer
+for `m:shigoto_testing` assertions without persisting or executing them. Both are
+strictly for tests: they change persistence, so arming them requires TWO keys —
+
+```erlang
+application:set_env(shigoto, testing, inline),          %% or manual
+application:set_env(shigoto, testing_confirm_no_persistence, true).
+```
+
+A non-`disabled` `testing` value WITHOUT the confirmation key does NOT arm the
+mode: it falls back to the real persisted path and logs an error, so a testing
+config that leaks into production fails safe and loud rather than silently
+dropping jobs.
+""".
+-spec testing_mode() -> disabled | inline | manual.
+testing_mode() ->
+    case application:get_env(shigoto, testing, disabled) of
+        disabled ->
+            disabled;
+        Mode when Mode =:= inline; Mode =:= manual ->
+            case application:get_env(shigoto, testing_confirm_no_persistence, false) of
+                true ->
+                    Mode;
+                _ ->
+                    ?LOG_ERROR(#{
+                        msg => ~"shigoto_testing_mode_not_confirmed",
+                        mode => Mode,
+                        action =>
+                            ~"falling back to persisted insert; set testing_confirm_no_persistence to arm"
+                    }),
+                    disabled
+            end;
+        Other ->
+            ?LOG_ERROR(#{msg => ~"shigoto_invalid_testing_mode", value => Other}),
+            disabled
+    end.
 
 -doc """
 Cron job entries. Each is `{Name, Schedule, Worker, Args}` or

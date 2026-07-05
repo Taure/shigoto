@@ -59,6 +59,16 @@ logger for filtering); it is omitted from the tables below for brevity.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
+
+## Testing Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, testing, mode_armed]` | `count` | mode |
+
+Emitted once at boot when a non-production `testing` mode (`inline`/`manual`) is
+armed. Its presence in a production metrics stream is a red flag — test-only
+insert behaviour is active. See `shigoto_config:testing_mode/0`.
 """.
 
 -export([
@@ -83,7 +93,9 @@ logger for filtering); it is omitted from the tables below for brevity.
     %% Batch events
     batch_completed/1,
     %% Cron events
-    cron_scheduled/3
+    cron_scheduled/3,
+    %% Testing events
+    testing_mode_armed/1
 ]).
 
 %%----------------------------------------------------------------------
@@ -236,6 +248,16 @@ cron_scheduled(Name, Worker, Schedule) ->
     Meta = #{name => Name, worker => Worker, schedule => Schedule, domain => [shigoto]},
     telemetry:execute([shigoto, cron, scheduled], #{count => 1}, Meta),
     logger:info(~"cron job scheduled", Meta).
+
+%%----------------------------------------------------------------------
+%% Testing events
+%%----------------------------------------------------------------------
+
+-spec testing_mode_armed(inline | manual) -> ok.
+testing_mode_armed(Mode) ->
+    telemetry:execute(
+        [shigoto, testing, mode_armed], #{count => 1}, #{mode => Mode, domain => [shigoto]}
+    ).
 
 %%----------------------------------------------------------------------
 %% Internal

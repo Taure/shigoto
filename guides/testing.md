@@ -1,7 +1,77 @@
 # Testing
 
 Shigoto provides helpers for testing workers and job workflows without
-running background queue processes.
+running background queue processes. The `perform_job/2,3` runner and the
+`inline`/`manual` testing modes need **no database at all**; `drain_queue/1`
+runs against a real pool for integration tests.
+
+## perform_job — run a worker with no database
+
+`shigoto:perform_job/2,3` runs a worker through the same perform path production
+uses (the middleware chain and `deps_results` injection) and returns the raw
+worker result. No database, no queue, no retry, and no resilience gating (rate
+limits, circuit breakers, concurrency caps are skipped). It is a pure in-process
+unit-test runner.
+
+```erlang
+ok = shigoto:perform_job(email_worker, #{~"to" => ~"user@test.com"}),
+
+{ok, #{~"produced" := 42}} =
+    shigoto:perform_job(sum_worker, #{~"action" => ~"produce", ~"value" => 42}),
+
+{error, _} = shigoto:perform_job(flaky_worker, #{~"action" => ~"fail"}).
+```
+
+Pass predecessors' results (exactly as a real dependent would receive them) via
+`deps_results` in the third-argument options:
+
+```erlang
+{ok, _} = shigoto:perform_job(
+    rollup_worker, #{~"action" => ~"consume"},
+    #{deps_results => #{41 => #{~"n" => 7}}}
+).
+```
+
+Other options: `attempt`, `max_attempts`, `queue`, `id`, `meta`, `tags`,
+`priority`, `timeout`.
+
+## Testing modes and enqueue assertions
+
+Arm a testing mode so `insert/1,2` and `insert_all/1,2` stop persisting. Because
+these modes change persistence, arming them requires **two** keys — a mode value
+that leaks into production without the confirmation key falls back to the real
+persisted path and logs an error, so it can never silently drop jobs:
+
+```erlang
+application:set_env(shigoto, testing, manual),
+application:set_env(shigoto, testing_confirm_no_persistence, true).
+```
+
+- `manual` captures inserted jobs in a **process-local** buffer without running
+  or persisting them.
+- `inline` runs each inserted job synchronously and keeps no row; a job that
+  returns `{error, _}` raises `{shigoto_inline_job_failed, Worker, Reason}`.
+
+Assert on what your code enqueued with `m:shigoto_testing`:
+
+```erlang
+enqueue_signup_jobs(User),
+shigoto_testing:assert_enqueued(#{worker => welcome_email_worker}),
+shigoto_testing:assert_enqueued(#{args => #{~"user_id" => 5}}),
+shigoto_testing:refute_enqueued(#{queue => ~"sms"}),
+[_ | _] = shigoto_testing:all_enqueued().
+```
+
+Filters: `worker`, `queue`, `args` (containment), `tags` (containment), `state`.
+Call `shigoto_testing:reset/0` in `init_per_testcase` to clear the buffer.
+
+`manual` capture is per-process — it sees enqueues made by the calling process,
+not by other processes it spawns. For cross-process expectations, use a real test
+pool: outside `manual` mode the assertions query the pool via `find_jobs`, so the
+same assertions work against a live database.
+
+Note: `batch`, `depends_on`, and `unique` are no-ops under `inline`/`manual`
+(shigoto logs a warning). Exercise those against a real pool with `drain_queue/1`.
 
 ## drain_queue
 

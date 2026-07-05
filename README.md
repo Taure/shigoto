@@ -41,8 +41,10 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 - **Dashboard** — [shigoto_board](https://github.com/Taure/shigoto_board) provides a real-time web dashboard.
 
 ### Testing
-- **Synchronous drain** — `drain_queue/1` processes all jobs synchronously for deterministic tests.
-- **74 tests** — Comprehensive test coverage across 3 Common Test suites.
+- **DB-free worker runner** — `perform_job/2,3` runs a worker through the real perform path (middleware + `deps_results`) with no database.
+- **Enqueue assertions** — `assert_enqueued/1,2`, `refute_enqueued/1`, `all_enqueued/0,1` in `shigoto_testing`.
+- **Testing modes** — `inline` (run on insert) / `manual` (capture without running), armed via a two-key confirmation so they can never silently activate in production.
+- **Synchronous drain** — `drain_queue/1` processes all jobs synchronously for integration tests.
 
 ## Quick Start
 

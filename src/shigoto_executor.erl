@@ -5,7 +5,7 @@ Started by the executor supervisor, reports back to the queue process when done.
 """.
 -behaviour(gen_server).
 
--export([start_link/3, execute_sync/3]).
+-export([start_link/3, execute_sync/3, run_perform/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
@@ -166,6 +166,20 @@ run_with_resilience(Job, Worker, Args, Timeout) ->
                     end
             end
     end.
+
+-doc """
+Run a worker through the exact perform path production uses: `deps_results`
+injection + the middleware chain + `perform/1` under `Timeout`. Returns the raw
+worker result (`ok | {ok, Result} | {error, _} | {snooze, _}`).
+
+Shared by the queue executor, `execute_sync/3`, and `shigoto:perform_job/2,3`.
+It performs NO persistence, telemetry, retry, or resilience gating — those are the
+caller's responsibility. Used by the testing helpers to run a worker with no DB.
+""".
+-spec run_perform(map(), module(), map(), timeout()) ->
+    ok | {ok, term()} | {error, term()} | {snooze, pos_integer()}.
+run_perform(Job, Worker, Args, Timeout) ->
+    run_middleware_chain(Job, Worker, Args, Timeout).
 
 run_middleware_chain(Job, Worker, Args, Timeout) ->
     %% Pass decoded args in the job map so middleware sees maps, not binaries.
