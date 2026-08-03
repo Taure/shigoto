@@ -4,7 +4,7 @@
  {<<"pg_types">>,{pkg,<<"pg_types">>,<<"0.6.0">>},1},
  {<<"pgo">>,
   {git,"https://github.com/Taure/pgo.git",
-       {ref,"1a28c2b8be07ac6ca82b3217c26a383ba70e3e2a"}},
+       {ref,"89080ad14530173f27e6d63ab058cecb8d57ed29"}},
   0},
  {<<"seki">>,{pkg,<<"seki">>,<<"0.4.3">>},0},
  {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.1">>},0}]}.
