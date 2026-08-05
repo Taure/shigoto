@@ -30,7 +30,6 @@ the same job running twice on the next poll.
     query/3,
     query/4,
     transaction/2,
-    transaction/3,
     in_transaction/1,
     start_pool/2,
     start_listener/2
@@ -67,11 +66,6 @@ query(Pool, SQL, Params, Opts) ->
         Holder -> ran(Holder, SQL, Params, decoding(Opts))
     end.
 
--doc "`transaction/3` with no options.".
--spec transaction(atom(), fun(() -> Result)) -> Result.
-transaction(Pool, Fun) ->
-    transaction(Pool, Fun, #{}).
-
 -doc """
 Run `Fun` inside a transaction on `Pool`.
 
@@ -79,8 +73,8 @@ Nested calls join the transaction that is already open rather than starting a
 second one, because SQL has no nested `BEGIN` and the caller usually does not
 know whether it is nested.
 """.
--spec transaction(atom(), fun(() -> Result), map()) -> Result.
-transaction(Pool, Fun, _Opts) ->
+-spec transaction(atom(), fun(() -> Result)) -> Result.
+transaction(Pool, Fun) ->
     case in_transaction(Pool) of
         undefined -> opened(Pool, Fun);
         _Holder -> Fun()

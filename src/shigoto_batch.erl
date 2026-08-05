@@ -32,8 +32,6 @@ shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
     get/2
 ]).
 
--define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
-
 -doc "Create a new batch.".
 -spec create(atom(), map()) -> {ok, map()} | {error, term()}.
 create(Pool, Opts) ->

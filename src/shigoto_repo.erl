@@ -31,8 +31,6 @@ for safe multi-node job claiming.
     fetch_fanout_jobs/3
 ]).
 
--define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
-
 -define(DEFAULT_UNIQUE, #{
     keys => [worker, args],
     states => [available, executing, retryable],

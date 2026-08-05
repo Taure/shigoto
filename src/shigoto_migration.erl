@@ -8,8 +8,6 @@ Migrations are idempotent and safe to run multiple times.
 
 -export([up/1, down/1]).
 
--define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
-
 -doc "Create or update the shigoto_jobs and shigoto_cron tables.".
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
