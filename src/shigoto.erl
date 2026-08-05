@@ -184,7 +184,7 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
             Pool = maps:get(pool, Opts, shigoto_config:pool()),
             put(?TXN_KEY, {Pool, []}),
             try
-                Result = pgo:transaction(Fun, #{pool => Pool}),
+                Result = shigoto_db:transaction(Pool, Fun),
                 lists:foreach(fun shigoto_telemetry:job_inserted/1, take_deferred()),
                 Result
             catch
@@ -195,7 +195,7 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
         {Pool, _} ->
             %% Nested: inherit the outer pool; the outermost transaction owns
             %% commit and the telemetry flush.
-            pgo:transaction(Fun, #{pool => Pool})
+            shigoto_db:transaction(Pool, Fun)
     end.
 
 -doc """

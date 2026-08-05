@@ -222,25 +222,18 @@ setup_load_shedder() ->
 
 admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey) ->
     try
-        pgo:transaction(
-            fun() ->
-                _ = pgo:query(~"SELECT pg_advisory_xact_lock($1)::text", [LockKey], #{pool => Pool}),
-                CountSQL =
-                    ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
-                case
-                    pgo:query(CountSQL, [WorkerBin, JobId], #{
-                        pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
-                    })
-                of
-                    #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
-                        _ = shigoto_repo:snooze_job(Pool, JobId, ?GLOBAL_CONCURRENCY_SNOOZE),
-                        {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
-                    _ ->
-                        ok
-                end
-            end,
-            #{pool => Pool}
-        )
+        shigoto_db:transaction(Pool, fun() ->
+            _ = shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
+            CountSQL =
+                ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
+            case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
+                #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
+                    _ = shigoto_repo:snooze_job(Pool, JobId, ?GLOBAL_CONCURRENCY_SNOOZE),
+                    {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
+                _ ->
+                    ok
+            end
+        end)
     of
         {snooze, _} = Snooze -> Snooze;
         _ -> ok

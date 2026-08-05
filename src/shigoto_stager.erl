@@ -76,23 +76,16 @@ safe_with_leader_lock(Fun) ->
 
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
-    pgo:transaction(
-        fun() ->
-            case
-                pgo:query(
-                    ~"SELECT pg_try_advisory_xact_lock($1)::text",
-                    [?STAGE_LOCK_ID],
-                    #{pool => Pool}
-                )
-            of
-                #{rows := [{~"true"}]} ->
-                    Fun();
-                _ ->
-                    ok
-            end
-        end,
-        #{pool => Pool}
-    ).
+    shigoto_db:transaction(Pool, fun() ->
+        case
+            shigoto_db:query(Pool, ~"SELECT pg_try_advisory_xact_lock($1)::text", [?STAGE_LOCK_ID])
+        of
+            #{rows := [{~"true"}]} ->
+                Fun();
+            _ ->
+                ok
+        end
+    end).
 
 stage() ->
     Pool = shigoto_config:pool(),
@@ -113,11 +106,7 @@ due_queues(Pool) ->
         AND scheduled_at <= now()
         AND depends_on = '{}'
         """,
-    case
-        pgo:query(SQL, [], #{
-            pool => Pool, decode_opts => [return_rows_as_maps, column_name_as_atom]
-        })
-    of
+    case shigoto_db:query(Pool, SQL, []) of
         #{rows := Rows} ->
             {ok, [maps:get(queue, Row) || Row <- Rows]};
         {error, _} = Err ->
@@ -125,5 +114,5 @@ due_queues(Pool) ->
     end.
 
 notify(Pool, Queue) ->
-    _ = pgo:query(~"SELECT pg_notify($1, $2)", [?CHANNEL, Queue], #{pool => Pool}),
+    _ = shigoto_db:query(Pool, ~"SELECT pg_notify($1, $2)", [?CHANNEL, Queue]),
     ok.

@@ -29,7 +29,6 @@ shigoto_dashboard:search_jobs(#{worker => my_worker, state => failed, limit => 2
 ]).
 
 -define(POOL, (shigoto_config:pool())).
--define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
 
 -doc "Get per-queue job counts grouped by state.".
 -spec queue_stats() -> {ok, [map()]} | {error, term()}.
@@ -168,7 +167,7 @@ batch_stats() ->
 %%----------------------------------------------------------------------
 
 query(SQL, Params) ->
-    pgo:query(SQL, Params, #{pool => ?POOL, decode_opts => ?DECODE_OPTS}).
+    shigoto_db:query(?POOL, SQL, Params).
 
 pivot_queue_stats(Rows) ->
     GroupedByQueue = lists:foldl(

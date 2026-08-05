@@ -32,8 +32,6 @@ shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
     get/2
 ]).
 
--define(DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
-
 -doc "Create a new batch.".
 -spec create(atom(), map()) -> {ok, map()} | {error, term()}.
 create(Pool, Opts) ->
@@ -169,7 +167,7 @@ decode_callback_args(_) ->
     #{}.
 
 query(Pool, SQL, Params) ->
-    pgo:query(SQL, Params, #{pool => Pool, decode_opts => ?DECODE_OPTS}).
+    shigoto_db:query(Pool, SQL, Params).
 
 encode_json(Map) when is_map(Map) ->
     iolist_to_binary(json:encode(Map));

@@ -64,7 +64,7 @@ all() ->
     ].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
+    {ok, _} = application:ensure_all_started(minato),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(shigoto_test_pool),
     Config.
@@ -387,10 +387,10 @@ test_heartbeat_stale_threshold(_Config) ->
     JobId = maps:get(id, Job),
     {ok, [_Claimed]} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 1),
     %% Set heartbeat_at to the past so rescue picks it up
-    _ = pgo:query(
+    _ = shigoto_db:query(
+        ?POOL,
         <<"UPDATE shigoto_jobs SET heartbeat_at = now() - interval '120 seconds' WHERE id = $1">>,
-        [JobId],
-        #{pool => ?POOL}
+        [JobId]
     ),
     %% Rescue with 60 second threshold
     {ok, Count} = shigoto_repo:rescue_stale_jobs(?POOL, 60),
@@ -564,6 +564,6 @@ test_on_discard_callback(_Config) ->
 %%----------------------------------------------------------------------
 
 cleanup() ->
-    pgo:query(<<"DELETE FROM shigoto_jobs">>, [], #{pool => ?POOL}),
-    pgo:query(<<"DELETE FROM shigoto_batches">>, [], #{pool => ?POOL}),
+    shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),
+    shigoto_db:query(?POOL, <<"DELETE FROM shigoto_batches">>, []),
     ok.

@@ -48,7 +48,7 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
+    {ok, _} = application:ensure_all_started(minato),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(?POOL),
     Config.
@@ -325,7 +325,7 @@ report(Name, N, TimeMicros) ->
     file:write_file("/tmp/shigoto_bench.txt", [Line, "\n"], [append]).
 
 cleanup() ->
-    pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
-    pgo:query(~"DELETE FROM shigoto_jobs_archive", [], #{pool => ?POOL}),
-    pgo:query(~"DELETE FROM shigoto_batches", [], #{pool => ?POOL}),
+    shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
+    shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs_archive", []),
+    shigoto_db:query(?POOL, ~"DELETE FROM shigoto_batches", []),
     ok.
