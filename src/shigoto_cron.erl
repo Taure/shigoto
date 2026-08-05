@@ -65,14 +65,26 @@ handle_info(_Info, State) ->
 %%----------------------------------------------------------------------
 
 safe_with_leader_lock(Fun) ->
+    %% A pool that is not up yet, or is up and cannot reach the database, is a
+    %% reason to come back in a second rather than to crash the cron process and
+    %% lose the catch up. The shapes differ by what went wrong: a pool process
+    %% that does not exist exits, and a pool that exists and cannot connect
+    %% raises, so both are caught here.
     try
         with_leader_lock(Fun),
         ok
     catch
         exit:{noproc, _} ->
-            logger:debug(#{msg => ~"shigoto_cron_pool_not_ready"}),
-            retry
+            not_ready();
+        error:{shigoto_db, {no_connection, _Reason}} ->
+            not_ready();
+        error:{shigoto_db, checkout_timeout} ->
+            not_ready()
     end.
+
+not_ready() ->
+    logger:debug(#{msg => ~"shigoto_cron_pool_not_ready"}, #{domain => [shigoto]}),
+    retry.
 
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
