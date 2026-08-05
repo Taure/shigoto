@@ -61,7 +61,7 @@ update_heartbeats() ->
                         Placeholders,
                         ~")"
                     ]),
-                    _ = pgo:query(SQL, JobIds, #{pool => Pool, decode_opts => ?DECODE_OPTS}),
+                    _ = shigoto_db:query(Pool, SQL, JobIds),
                     ok
             end
     end.

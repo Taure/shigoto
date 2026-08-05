@@ -502,16 +502,13 @@ archive_jobs(Pool, Days) ->
             "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
             "AND inserted_at < now() - make_interval(days => $1)"
         >>,
-    pgo:transaction(
-        fun() ->
-            _ = query(Pool, InsertSQL, [Days]),
-            case query(Pool, DeleteSQL, [Days]) of
-                #{num_rows := Count} -> {ok, Count};
-                {error, _} = Err -> Err
-            end
-        end,
-        #{pool => Pool}
-    ).
+    shigoto_db:transaction(Pool, fun() ->
+        _ = query(Pool, InsertSQL, [Days]),
+        case query(Pool, DeleteSQL, [Days]) of
+            #{num_rows := Count} -> {ok, Count};
+            {error, _} = Err -> Err
+        end
+    end).
 
 -doc "Upsert a cron entry.".
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.
@@ -641,18 +638,15 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
     UniqueKey = build_unique_key(UniqueOpts, Worker, Args, Queue),
     LockKey = erlang:phash2(UniqueKey),
-    pgo:transaction(
-        fun() ->
-            _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-            case find_existing_job(Pool, UniqueOpts, UniqueKey) of
-                {ok, Existing} ->
-                    maybe_replace(Pool, Existing, JobParams, UniqueOpts);
-                not_found ->
-                    do_insert(Pool, JobParams, Opts, UniqueKey)
-            end
-        end,
-        #{pool => Pool}
-    ).
+    shigoto_db:transaction(Pool, fun() ->
+        _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
+        case find_existing_job(Pool, UniqueOpts, UniqueKey) of
+            {ok, Existing} ->
+                maybe_replace(Pool, Existing, JobParams, UniqueOpts);
+            not_found ->
+                do_insert(Pool, JobParams, Opts, UniqueKey)
+        end
+    end).
 
 build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
     Parts = lists:map(
@@ -985,7 +979,7 @@ fetch_fanout_jobs(Pool, Queue, WindowSeconds) ->
     end.
 
 query(Pool, SQL, Params) ->
-    pgo:query(SQL, Params, #{pool => Pool, decode_opts => ?DECODE_OPTS}).
+    shigoto_db:query(Pool, SQL, Params).
 
 now_timestamptz() ->
     calendar:universal_time().

@@ -140,7 +140,7 @@ handle_info(cleanup, #state{seen = Seen, pool = Pool, queue = Queue, window = Wi
             "AND state = 'available'\n"
             "AND inserted_at < now() - make_interval(secs => $2)"
         >>,
-    _ = pgo:query(PruneSQL, [Queue, Window * 2], #{pool => Pool}),
+    _ = shigoto_db:query(Pool, PruneSQL, [Queue, Window * 2]),
     %% 2. Clear ETS dedup set if it gets too large
     case ets:info(Seen, size) > 10000 of
         true -> ets:delete_all_objects(Seen);

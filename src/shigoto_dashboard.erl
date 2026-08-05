@@ -168,7 +168,7 @@ batch_stats() ->
 %%----------------------------------------------------------------------
 
 query(SQL, Params) ->
-    pgo:query(SQL, Params, #{pool => ?POOL, decode_opts => ?DECODE_OPTS}).
+    shigoto_db:query(?POOL, SQL, Params).
 
 pivot_queue_stats(Rows) ->
     GroupedByQueue = lists:foldl(

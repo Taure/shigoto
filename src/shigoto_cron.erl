@@ -76,23 +76,16 @@ safe_with_leader_lock(Fun) ->
 
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
-    pgo:transaction(
-        fun() ->
-            case
-                pgo:query(
-                    ~"SELECT pg_try_advisory_xact_lock($1)::text",
-                    [?CRON_LOCK_ID],
-                    #{pool => Pool}
-                )
-            of
-                #{rows := [{~"true"}]} ->
-                    Fun();
-                _ ->
-                    ok
-            end
-        end,
-        #{pool => Pool}
-    ).
+    shigoto_db:transaction(Pool, fun() ->
+        case
+            shigoto_db:query(Pool, ~"SELECT pg_try_advisory_xact_lock($1)::text", [?CRON_LOCK_ID])
+        of
+            #{rows := [{~"true"}]} ->
+                Fun();
+            _ ->
+                ok
+        end
+    end).
 
 check_cron_entries() ->
     Entries = shigoto_config:cron_entries(),

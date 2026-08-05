@@ -119,7 +119,7 @@ all() ->
     ].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
+    {ok, _} = application:ensure_all_started(minato),
     {ok, _} = application:ensure_all_started(telemetry),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(shigoto_test_pool),
@@ -141,7 +141,7 @@ end_per_testcase(_TestCase, _Config) ->
 %%----------------------------------------------------------------------
 
 test_migration(_Config) ->
-    %% Fresh start to ensure pgo type cache matches schema
+    %% Fresh start to ensure the schema matches
     shigoto_migration:down(?POOL),
     ok = shigoto_migration:up(?POOL),
     %% Idempotent
@@ -543,7 +543,7 @@ test_transaction_commit_rollback_no_telemetry(_Config) ->
             transaction_rolled_back,
             shigoto:transaction(fun() ->
                 {ok, _} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
-                {error, _} = pgo:query(~"select 1/0", [], #{pool => ?POOL}),
+                {error, _} = shigoto_db:query(?POOL, ~"select 1/0", []),
                 done
             end)
         ),
@@ -907,10 +907,8 @@ seconds_from_now(Seconds) ->
     calendar:gregorian_seconds_to_datetime(Secs + Seconds).
 
 get_result(JobId) ->
-    #{rows := [#{result := Result}]} = pgo:query(
-        ~"SELECT result FROM shigoto_jobs WHERE id = $1",
-        [JobId],
-        #{pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]}
+    #{rows := [#{result := Result}]} = shigoto_db:query(
+        ?POOL, ~"SELECT result FROM shigoto_jobs WHERE id = $1", [JobId]
     ),
     case Result of
         null -> null;
@@ -926,7 +924,7 @@ drain_inserted(N) ->
 start_pool2() ->
     Pool2 = shigoto_test_pool2,
     case
-        pgo:start_pool(Pool2, #{
+        shigoto_db:start_pool(Pool2, #{
             host => "localhost",
             port => 5556,
             database => "shigoto_test",
@@ -941,8 +939,8 @@ start_pool2() ->
     Pool2.
 
 cleanup_jobs() ->
-    pgo:query(~"DELETE FROM shigoto_jobs", [], #{pool => ?POOL}),
-    pgo:query(~"DELETE FROM shigoto_jobs_archive", [], #{pool => ?POOL}),
+    shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
+    shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs_archive", []),
     ok.
 
 count_jobs() ->
@@ -952,9 +950,5 @@ count_archive() ->
     count(~"SELECT count(*) AS count FROM shigoto_jobs_archive").
 
 count(SQL) ->
-    #{rows := [#{count := N}]} = pgo:query(
-        SQL,
-        [],
-        #{pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]}
-    ),
+    #{rows := [#{count := N}]} = shigoto_db:query(?POOL, SQL, []),
     N.

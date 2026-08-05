@@ -4,7 +4,7 @@
 
 start() ->
     case
-        pgo:start_pool(shigoto_test_pool, #{
+        shigoto_db:start_pool(shigoto_test_pool, #{
             host => "localhost",
             port => 5556,
             database => "shigoto_test",

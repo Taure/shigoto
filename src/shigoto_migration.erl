@@ -15,7 +15,7 @@ Migrations are idempotent and safe to run multiple times.
 up(Pool) ->
     lists:foreach(
         fun(SQL) ->
-            pgo:query(SQL, [], #{pool => Pool, decode_opts => ?DECODE_OPTS})
+            shigoto_db:query(Pool, SQL, [])
         end,
         v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
             v5_statements() ++ v6_statements()
@@ -25,14 +25,14 @@ up(Pool) ->
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.
 down(Pool) ->
-    _ = pgo:query(~"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs", [], #{
-        pool => Pool
-    }),
-    _ = pgo:query(~"DROP FUNCTION IF EXISTS shigoto_notify_insert", [], #{pool => Pool}),
-    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs_archive", [], #{pool => Pool}),
-    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_batches CASCADE", [], #{pool => Pool}),
-    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_cron", [], #{pool => Pool}),
-    _ = pgo:query(~"DROP TABLE IF EXISTS shigoto_jobs", [], #{pool => Pool}),
+    _ = shigoto_db:query(
+        Pool, ~"DROP TRIGGER IF EXISTS shigoto_jobs_insert_trigger ON shigoto_jobs", []
+    ),
+    _ = shigoto_db:query(Pool, ~"DROP FUNCTION IF EXISTS shigoto_notify_insert", []),
+    _ = shigoto_db:query(Pool, ~"DROP TABLE IF EXISTS shigoto_jobs_archive", []),
+    _ = shigoto_db:query(Pool, ~"DROP TABLE IF EXISTS shigoto_batches CASCADE", []),
+    _ = shigoto_db:query(Pool, ~"DROP TABLE IF EXISTS shigoto_cron", []),
+    _ = shigoto_db:query(Pool, ~"DROP TABLE IF EXISTS shigoto_jobs", []),
     ok.
 
 %%----------------------------------------------------------------------

@@ -169,7 +169,7 @@ decode_callback_args(_) ->
     #{}.
 
 query(Pool, SQL, Params) ->
-    pgo:query(SQL, Params, #{pool => Pool, decode_opts => ?DECODE_OPTS}).
+    shigoto_db:query(Pool, SQL, Params).
 
 encode_json(Map) when is_map(Map) ->
     iolist_to_binary(json:encode(Map));

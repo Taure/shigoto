@@ -81,7 +81,7 @@ all() ->
     ].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
+    {ok, _} = application:ensure_all_started(minato),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(?POOL),
     Config.
@@ -364,11 +364,7 @@ test_archive_jobs(_Config) ->
     ?assertEqual({error, not_found}, shigoto_repo:get_job(?POOL, JobId)),
     %% But should be in archive
     ArchiveSQL = <<"SELECT id FROM shigoto_jobs_archive WHERE id = $1">>,
-    #{rows := ArchiveRows} = pgo:query(
-        ArchiveSQL, [JobId], #{
-            pool => ?POOL, decode_opts => [return_rows_as_maps, column_name_as_atom]
-        }
-    ),
+    #{rows := ArchiveRows} = shigoto_db:query(?POOL, ArchiveSQL, [JobId]),
     ?assertEqual(1, length(ArchiveRows)).
 
 %%----------------------------------------------------------------------
@@ -561,7 +557,7 @@ test_debounce_resets_scheduled_at(_Config) ->
 %%----------------------------------------------------------------------
 
 cleanup() ->
-    pgo:query(<<"DELETE FROM shigoto_jobs">>, [], #{pool => ?POOL}),
-    pgo:query(<<"DELETE FROM shigoto_jobs_archive">>, [], #{pool => ?POOL}),
-    pgo:query(<<"DELETE FROM shigoto_batches">>, [], #{pool => ?POOL}),
+    shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),
+    shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs_archive">>, []),
+    shigoto_db:query(?POOL, <<"DELETE FROM shigoto_batches">>, []),
     ok.
