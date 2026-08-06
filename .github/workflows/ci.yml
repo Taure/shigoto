@@ -17,12 +17,12 @@ jobs:
       enable-ct: true
       enable-ex-doc: true
       enable-hank: true
-      enable-audit: false
+      enable-audit: true
       enable-coverage: true
       enable-elp-lint: true
       enable-elp-eqwalize: false
-      enable-sbom: true
-      enable-sbom-scan: true
+      enable-sbom: false
+      enable-sbom-scan: false
       enable-dependency-submission: true
       enable-summary: true
       extra-services-compose: 'docker-compose.ci.yml'
