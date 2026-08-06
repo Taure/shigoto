@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="ExDoc v0.40.3">
+    <meta name="project" content="shigoto v1.9.3">
+
+
+    <title>shigoto_dashboard — shigoto v1.9.3</title>
+
+    <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
+
+    <script defer src="dist/sidebar_items-DDF30573.js"></script>
+    <script defer src="docs_config.js"></script>
+    <script defer src="dist/html-Y2MUTVIN.js"></script>
+
+  </head>
+  <body>
+    <script>(()=>{var t="ex_doc:settings",e="dark";var o="dark",s="light";var E="sidebar_state",n="closed";var r="sidebar_width";var a="sidebar-open";var i=new URLSearchParams(window.location.search),S=i.get("theme")||JSON.parse(localStorage.getItem(t)||"{}").theme;(S===o||S!==s&&window.matchMedia("(prefers-color-scheme: dark)").matches)&&document.body.classList.add(e);var d=sessionStorage.getItem(E),A=d!==n&&!window.matchMedia(`screen and (max-width: ${768}px)`).matches;document.body.classList.toggle(a,A);var c=sessionStorage.getItem(r);c&&document.body.style.setProperty("--sidebarWidth",`${c}px`);var p=/(Macintosh|iPhone|iPad|iPod)/.test(window.navigator.userAgent);document.documentElement.classList.toggle("apple-os",p);})();
+</script>
+
+<div class="body-wrapper">
+
+<button id="sidebar-menu" class="sidebar-button sidebar-toggle" aria-label="toggle sidebar" aria-controls="sidebar">
+  <i class="ri-menu-line ri-lg" title="Collapse/expand sidebar"></i>
+</button>
+
+<nav id="sidebar" class="sidebar">
+
+  <div class="sidebar-header">
+    <div class="sidebar-projectInfo">
+
+      <div>
+        <a href="readme.html" class="sidebar-projectName" translate="no">
+shigoto
+        </a>
+        <div class="sidebar-projectVersion" translate="no">
+          v1.9.3
+        </div>
+      </div>
+    </div>
+    <ul id="sidebar-list-nav" class="sidebar-list-nav" role="tablist" data-extras="Pages"></ul>
+  </div>
+</nav>
+
+<output role="status" id="toast"></output>
+
+<main class="content page-module" id="main" data-type="modules">
+  <div id="content" class="content-inner">
+    <div class="top-search">
+      <div class="search-settings">
+        <form class="search-bar" action="search.html">
+          <label class="search-label">
+            <span class="sr-only">Search documentation of shigoto</span>
+            <div class="search-input-wrapper">
+              <input name="q" type="text" class="search-input" placeholder="Press / to search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <button type="button" tabindex="-1" class="search-close-button" aria-hidden="true">
+                <i class="ri-close-line ri-lg" title="Cancel search"></i>
+              </button>
+            </div>
+          </label>
+        </form>
+        <div class="autocomplete">
+        </div>
+        <div class="engine-selector" data-multiple="false">
+          <button type="button" class="engine-button" aria-label="Select search engine" aria-haspopup="true" aria-expanded="false">
+            <i class="ri-search-2-line" aria-hidden="true"></i>
+            <span class="engine-name">Default</span>
+            <i class="ri-arrow-down-s-line" aria-hidden="true"></i>
+          </button>
+          <div class="engine-dropdown" hidden role="menu">
+
+              <button type="button"
+                      class="engine-option"
+                      data-engine-url="search.html?q="
+                      role="menuitemradio"
+                      aria-checked="true">
+                <span class="name">Default</span>
+                <span class="help">In-browser search</span>
+              </button>
+
+          </div>
+        </div>
+        <button class="icon-settings display-settings">
+          <i class="ri-settings-3-line"></i>
+          <span class="sr-only">Settings</span>
+        </button>
+      </div>
+    </div>
+
+<div id="top-content">
+  <div class="heading-with-actions top-heading">
+    <h1>
+      <span translate="no">shigoto_dashboard</span> 
+      <small class="app-vsn" translate="no">(shigoto v1.9.3)</small>
+
+    </h1>
+
+
+
+
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
+        <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        <span class="sr-only">View Source</span>
+      </a>
+
+  </div>
+
+
+    <section id="moduledoc">
+<p>Dashboard queries for Shigoto. Provides statistics and search functions
+for building admin UIs, monitoring dashboards, and Nova Liveboard pages.</p><h2 id="module-queue-statistics" class="section-heading"><a href="#module-queue-statistics" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Queue Statistics</span></h2><pre><code class="makeup erlang" translate="no"><span class="nc">shigoto_dashboard</span><span class="p">:</span><span class="nf">queue_stats</span><span class="p" data-group-id="8018024848-1">(</span><span class="p" data-group-id="8018024848-1">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w">
+    </span><span class="p" data-group-id="8018024848-2">[</span><span class="p" data-group-id="8018024848-3">#{</span><span class="ss">queue</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8018024848-4">&lt;&lt;</span><span class="err">\</span><span class="p">&quot;</span><span class="ss">default</span><span class="err">\</span><span class="p">&quot;</span><span class="p" data-group-id="8018024848-4">&gt;&gt;</span><span class="p">,</span><span class="w"> </span><span class="ss">available</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="ss">executing</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w">
+       </span><span class="ss">retryable</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="ss">completed</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span><span class="w"> </span><span class="ss">discarded</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">3</span><span class="p" data-group-id="8018024848-3">}</span><span class="p" data-group-id="8018024848-2">]</span></code></pre><h2 id="module-job-search" class="section-heading"><a href="#module-job-search" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Job Search</span></h2><pre><code class="makeup erlang" translate="no"><span class="nc">shigoto_dashboard</span><span class="p">:</span><span class="nf">search_jobs</span><span class="p" data-group-id="6201427380-1">(</span><span class="p" data-group-id="6201427380-2">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">my_worker</span><span class="p">,</span><span class="w"> </span><span class="ss">state</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">failed</span><span class="p">,</span><span class="w"> </span><span class="ss">limit</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">20</span><span class="p" data-group-id="6201427380-2">}</span><span class="p" data-group-id="6201427380-1">)</span></code></pre>
+    </section>
+
+</div>
+
+  <section id="summary" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#summary">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Summary</span>
+    </h2>
+<div class="summary-functions summary">
+  <h3>
+    <a href="#functions">Functions</a>
+  </h3>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#batch_stats/0" data-no-tooltip="" translate="no">batch_stats()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get batch statistics.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_counts/0" data-no-tooltip="" translate="no">job_counts()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get global job counts by state.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#queue_stats/0" data-no-tooltip="" translate="no">queue_stats()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get per-queue job counts grouped by state.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#recent_failures/1" data-no-tooltip="" translate="no">recent_failures(Limit)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get the most recent failed jobs.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#search_jobs/1" data-no-tooltip="" translate="no">search_jobs(Filters)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#stale_jobs/0" data-no-tooltip="" translate="no">stale_jobs()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get jobs stuck in executing state (potential zombies).</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#worker_stats/0" data-no-tooltip="" translate="no">worker_stats()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Get per-worker job counts and average execution stats.</p></div>
+
+    </div>
+
+</div>
+
+  </section>
+
+
+  <section id="functions" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#functions">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Functions</span>
+    </h2>
+
+    <div class="functions-list">
+<section class="detail" id="batch_stats/0">
+
+  <div class="detail-header">
+    <a href="#batch_stats/0" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">batch_stats()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L152" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> batch_stats() -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get batch statistics.</p>
+  </section>
+</section>
+<section class="detail" id="job_counts/0">
+
+  <div class="detail-header">
+    <a href="#job_counts/0" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_counts()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L71" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_counts() -> {ok, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get global job counts by state.</p>
+  </section>
+</section>
+<section class="detail" id="queue_stats/0">
+
+  <div class="detail-header">
+    <a href="#queue_stats/0" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">queue_stats()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L35" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> queue_stats() -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get per-queue job counts grouped by state.</p>
+  </section>
+</section>
+<section class="detail" id="recent_failures/1">
+
+  <div class="detail-header">
+    <a href="#recent_failures/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">recent_failures(Limit)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L118" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> recent_failures(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:pos_integer/0">pos_integer</a>()) -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get the most recent failed jobs.</p>
+  </section>
+</section>
+<section class="detail" id="search_jobs/1">
+
+  <div class="detail-header">
+    <a href="#search_jobs/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">search_jobs(Filters)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L91" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> search_jobs(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.</p>
+  </section>
+</section>
+<section class="detail" id="stale_jobs/0">
+
+  <div class="detail-header">
+    <a href="#stale_jobs/0" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">stale_jobs()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L133" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> stale_jobs() -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get jobs stuck in executing state (potential zombies).</p>
+  </section>
+</section>
+<section class="detail" id="worker_stats/0">
+
+  <div class="detail-header">
+    <a href="#worker_stats/0" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">worker_stats()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_dashboard.erl#L50" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> worker_stats() -> {ok, [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()]} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Get per-worker job counts and average execution stats.</p>
+  </section>
+</section>
+
+    </div>
+  </section>
+
+    <footer class="footer">
+
+        <p>
+
+            <span class="line">
+              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+
+            </span>
+
+          <span class="line">
+            <button class="a-main footer-button display-quick-switch" title="Go to package docs">
+              Go to package docs
+            </button>
+
+
+              <a href="shigoto.epub">
+                Download ePub version
+              </a>
+
+          </span>
+        </p>
+
+        <p class="built-using">
+          Built using
+          <a href="https://github.com/elixir-lang/ex_doc" title="ExDoc" target="_blank" rel="help noopener" translate="no">ExDoc</a> (v0.40.3) for the
+
+            <a href="https://erlang.org" title="Erlang" target="_blank" translate="no">Erlang programming language</a>
+
+        </p>
+
+
+    </footer>
+  </div>
+</main>
+</div>
+
+  </body>
+</html>

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="ExDoc v0.40.3">
+    <meta name="project" content="shigoto v1.9.3">
+
+
+    <title>Job Dependencies — shigoto v1.9.3</title>
+
+    <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
+
+    <script defer src="dist/sidebar_items-DDF30573.js"></script>
+    <script defer src="docs_config.js"></script>
+    <script defer src="dist/html-Y2MUTVIN.js"></script>
+
+  </head>
+  <body>
+    <script>(()=>{var t="ex_doc:settings",e="dark";var o="dark",s="light";var E="sidebar_state",n="closed";var r="sidebar_width";var a="sidebar-open";var i=new URLSearchParams(window.location.search),S=i.get("theme")||JSON.parse(localStorage.getItem(t)||"{}").theme;(S===o||S!==s&&window.matchMedia("(prefers-color-scheme: dark)").matches)&&document.body.classList.add(e);var d=sessionStorage.getItem(E),A=d!==n&&!window.matchMedia(`screen and (max-width: ${768}px)`).matches;document.body.classList.toggle(a,A);var c=sessionStorage.getItem(r);c&&document.body.style.setProperty("--sidebarWidth",`${c}px`);var p=/(Macintosh|iPhone|iPad|iPod)/.test(window.navigator.userAgent);document.documentElement.classList.toggle("apple-os",p);})();
+</script>
+
+<div class="body-wrapper">
+
+<button id="sidebar-menu" class="sidebar-button sidebar-toggle" aria-label="toggle sidebar" aria-controls="sidebar">
+  <i class="ri-menu-line ri-lg" title="Collapse/expand sidebar"></i>
+</button>
+
+<nav id="sidebar" class="sidebar">
+
+  <div class="sidebar-header">
+    <div class="sidebar-projectInfo">
+
+      <div>
+        <a href="readme.html" class="sidebar-projectName" translate="no">
+shigoto
+        </a>
+        <div class="sidebar-projectVersion" translate="no">
+          v1.9.3
+        </div>
+      </div>
+    </div>
+    <ul id="sidebar-list-nav" class="sidebar-list-nav" role="tablist" data-extras="Pages"></ul>
+  </div>
+</nav>
+
+<output role="status" id="toast"></output>
+
+<main class="content page-extra" id="main" data-type="extras">
+  <div id="content" class="content-inner">
+    <div class="top-search">
+      <div class="search-settings">
+        <form class="search-bar" action="search.html">
+          <label class="search-label">
+            <span class="sr-only">Search documentation of shigoto</span>
+            <div class="search-input-wrapper">
+              <input name="q" type="text" class="search-input" placeholder="Press / to search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <button type="button" tabindex="-1" class="search-close-button" aria-hidden="true">
+                <i class="ri-close-line ri-lg" title="Cancel search"></i>
+              </button>
+            </div>
+          </label>
+        </form>
+        <div class="autocomplete">
+        </div>
+        <div class="engine-selector" data-multiple="false">
+          <button type="button" class="engine-button" aria-label="Select search engine" aria-haspopup="true" aria-expanded="false">
+            <i class="ri-search-2-line" aria-hidden="true"></i>
+            <span class="engine-name">Default</span>
+            <i class="ri-arrow-down-s-line" aria-hidden="true"></i>
+          </button>
+          <div class="engine-dropdown" hidden role="menu">
+
+              <button type="button"
+                      class="engine-option"
+                      data-engine-url="search.html?q="
+                      role="menuitemradio"
+                      aria-checked="true">
+                <span class="name">Default</span>
+                <span class="help">In-browser search</span>
+              </button>
+
+          </div>
+        </div>
+        <button class="icon-settings display-settings">
+          <i class="ri-settings-3-line"></i>
+          <span class="sr-only">Settings</span>
+        </button>
+      </div>
+    </div>
+
+<div id="top-content">
+  <div class="heading-with-actions top-heading">
+    <h1>Job Dependencies</h1>
+
+
+
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/guides/dependencies.md#L1" title="View Source" class="icon-action" rel="help nofollow">
+        <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        <span class="sr-only">View Source</span>
+      </a>
+
+  </div>
+
+
+<p>Jobs can declare dependencies on other jobs using <code class="inline">depends_on</code>. A dependent
+job stays in <code class="inline">available</code> state but won't be claimed until all its dependencies
+have completed, been discarded, or been cancelled.</p><h2 id="basic-usage" class="section-heading"><a href="#basic-usage" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Basic Usage</span></h2><pre><code class="makeup erlang" translate="no"><span class="p" data-group-id="5650396146-1">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Step1</span><span class="p" data-group-id="5650396146-1">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="5650396146-2">(</span><span class="p" data-group-id="5650396146-3">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">extract_worker</span><span class="p">,</span><span class="w">
+    </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-4">#{</span><span class="p" data-group-id="5650396146-5">&lt;&lt;</span><span class="s">&quot;source&quot;</span><span class="p" data-group-id="5650396146-5">&gt;&gt;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-6">&lt;&lt;</span><span class="s">&quot;s3://bucket/data.csv&quot;</span><span class="p" data-group-id="5650396146-6">&gt;&gt;</span><span class="p" data-group-id="5650396146-4">}</span><span class="w">
+</span><span class="p" data-group-id="5650396146-3">}</span><span class="p" data-group-id="5650396146-2">)</span><span class="p">,</span><span class="w">
+
+</span><span class="p" data-group-id="5650396146-7">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Step2</span><span class="p" data-group-id="5650396146-7">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="5650396146-8">(</span><span class="p" data-group-id="5650396146-9">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">transform_worker</span><span class="p">,</span><span class="w">
+    </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-10">#{</span><span class="p" data-group-id="5650396146-11">&lt;&lt;</span><span class="s">&quot;format&quot;</span><span class="p" data-group-id="5650396146-11">&gt;&gt;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-12">&lt;&lt;</span><span class="s">&quot;parquet&quot;</span><span class="p" data-group-id="5650396146-12">&gt;&gt;</span><span class="p" data-group-id="5650396146-10">}</span><span class="p">,</span><span class="w">
+    </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-13">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="5650396146-14">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Step1</span><span class="p" data-group-id="5650396146-14">)</span><span class="p" data-group-id="5650396146-13">]</span><span class="w">
+</span><span class="p" data-group-id="5650396146-9">}</span><span class="p" data-group-id="5650396146-8">)</span><span class="p">,</span><span class="w">
+
+</span><span class="p" data-group-id="5650396146-15">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">_Step3</span><span class="p" data-group-id="5650396146-15">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="5650396146-16">(</span><span class="p" data-group-id="5650396146-17">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">load_worker</span><span class="p">,</span><span class="w">
+    </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-18">#{</span><span class="p" data-group-id="5650396146-19">&lt;&lt;</span><span class="s">&quot;table&quot;</span><span class="p" data-group-id="5650396146-19">&gt;&gt;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-20">&lt;&lt;</span><span class="s">&quot;results&quot;</span><span class="p" data-group-id="5650396146-20">&gt;&gt;</span><span class="p" data-group-id="5650396146-18">}</span><span class="p">,</span><span class="w">
+    </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5650396146-21">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="5650396146-22">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Step2</span><span class="p" data-group-id="5650396146-22">)</span><span class="p" data-group-id="5650396146-21">]</span><span class="w">
+</span><span class="p" data-group-id="5650396146-17">}</span><span class="p" data-group-id="5650396146-16">)</span><span class="p">.</span></code></pre><p>Step2 won't execute until Step1 completes. Step3 won't execute until Step2
+completes. This creates an ETL pipeline that executes in order.</p><h2 id="fan-in-multiple-parents" class="section-heading"><a href="#fan-in-multiple-parents" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Fan-in (Multiple Parents)</span></h2><p>A job can depend on multiple parent jobs:</p><pre><code class="makeup erlang" translate="no"><span class="p" data-group-id="8288960417-1">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">A</span><span class="p" data-group-id="8288960417-1">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="8288960417-2">(</span><span class="p" data-group-id="8288960417-3">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">fetch_api_a</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8288960417-4">#{</span><span class="p" data-group-id="8288960417-4">}</span><span class="p" data-group-id="8288960417-3">}</span><span class="p" data-group-id="8288960417-2">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="8288960417-5">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">B</span><span class="p" data-group-id="8288960417-5">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="8288960417-6">(</span><span class="p" data-group-id="8288960417-7">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">fetch_api_b</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8288960417-8">#{</span><span class="p" data-group-id="8288960417-8">}</span><span class="p" data-group-id="8288960417-7">}</span><span class="p" data-group-id="8288960417-6">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="8288960417-9">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">C</span><span class="p" data-group-id="8288960417-9">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="8288960417-10">(</span><span class="p" data-group-id="8288960417-11">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">fetch_api_c</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8288960417-12">#{</span><span class="p" data-group-id="8288960417-12">}</span><span class="p" data-group-id="8288960417-11">}</span><span class="p" data-group-id="8288960417-10">)</span><span class="p">,</span><span class="w">
+
+</span><span class="p" data-group-id="8288960417-13">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">_Merge</span><span class="p" data-group-id="8288960417-13">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="8288960417-14">(</span><span class="p" data-group-id="8288960417-15">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">merge_results</span><span class="p">,</span><span class="w">
+    </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8288960417-16">#{</span><span class="p" data-group-id="8288960417-16">}</span><span class="p">,</span><span class="w">
+    </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="8288960417-17">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="8288960417-18">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">A</span><span class="p" data-group-id="8288960417-18">)</span><span class="p">,</span><span class="w"> </span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="8288960417-19">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">B</span><span class="p" data-group-id="8288960417-19">)</span><span class="p">,</span><span class="w"> </span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="8288960417-20">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">C</span><span class="p" data-group-id="8288960417-20">)</span><span class="p" data-group-id="8288960417-17">]</span><span class="w">
+</span><span class="p" data-group-id="8288960417-15">}</span><span class="p" data-group-id="8288960417-14">)</span><span class="p">.</span></code></pre><p>The merge job only runs after all three fetch jobs finish.</p><h2 id="dependency-resolution" class="section-heading"><a href="#dependency-resolution" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Dependency Resolution</span></h2><p>When a job completes, gets discarded, or gets cancelled, shigoto automatically
+removes its ID from all <code class="inline">depends_on</code> arrays. Once a job's <code class="inline">depends_on</code> array
+is empty, it becomes claimable.</p><p>This means dependent jobs aren't permanently stuck if a parent fails — they
+still execute after the parent reaches a terminal state.</p><h2 id="cycle-detection" class="section-heading"><a href="#cycle-detection" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Cycle Detection</span></h2><p>Shigoto validates dependencies on insert:</p><ul><li><strong>Missing IDs</strong>: Returns <code class="inline">{error, {missing_dependencies, [Id, ...]}}</code> if
+any dependency ID doesn't exist.</li><li><strong>Cycles</strong>: Returns <code class="inline">{error, dependency_cycle}</code> if the new job's dependencies
+would create a circular dependency (e.g., A depends on B, B depends on A).</li></ul><pre><code class="makeup erlang" translate="no"><span class="c1">%% This would fail with {error, dependency_cycle}</span><span class="w">
+</span><span class="p" data-group-id="2380586244-1">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">X</span><span class="p" data-group-id="2380586244-1">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="2380586244-2">(</span><span class="p" data-group-id="2380586244-3">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">w</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="2380586244-4">#{</span><span class="p" data-group-id="2380586244-4">}</span><span class="p" data-group-id="2380586244-3">}</span><span class="p" data-group-id="2380586244-2">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="2380586244-5">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Y</span><span class="p" data-group-id="2380586244-5">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="2380586244-6">(</span><span class="p" data-group-id="2380586244-7">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">w</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="2380586244-8">#{</span><span class="p" data-group-id="2380586244-8">}</span><span class="p">,</span><span class="w"> </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="2380586244-9">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="2380586244-10">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">X</span><span class="p" data-group-id="2380586244-10">)</span><span class="p" data-group-id="2380586244-9">]</span><span class="p" data-group-id="2380586244-7">}</span><span class="p" data-group-id="2380586244-6">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="2380586244-11">{</span><span class="nb">error</span><span class="p">,</span><span class="w"> </span><span class="ss">dependency_cycle</span><span class="p" data-group-id="2380586244-11">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="2380586244-12">(</span><span class="p" data-group-id="2380586244-13">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">w</span><span class="p">,</span><span class="w">
+    </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="2380586244-14">#{</span><span class="p" data-group-id="2380586244-14">}</span><span class="p">,</span><span class="w">
+    </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="2380586244-15">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="2380586244-16">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">X</span><span class="p" data-group-id="2380586244-16">)</span><span class="p">,</span><span class="w"> </span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="2380586244-17">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Y</span><span class="p" data-group-id="2380586244-17">)</span><span class="p" data-group-id="2380586244-15">]</span><span class="w">
+</span><span class="p" data-group-id="2380586244-13">}</span><span class="p" data-group-id="2380586244-12">)</span><span class="p">.</span></code></pre><h2 id="combining-with-batches" class="section-heading"><a href="#combining-with-batches" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Combining with Batches</span></h2><p>Dependencies work well with batches for complex workflows:</p><pre><code class="makeup erlang" translate="no"><span class="p" data-group-id="5316925074-1">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Batch</span><span class="p" data-group-id="5316925074-1">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">new_batch</span><span class="p" data-group-id="5316925074-2">(</span><span class="p" data-group-id="5316925074-3">#{</span><span class="w">
+    </span><span class="ss">callback_worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">pipeline_complete</span><span class="p">,</span><span class="w">
+    </span><span class="ss">callback_args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5316925074-4">#{</span><span class="p" data-group-id="5316925074-5">&lt;&lt;</span><span class="s">&quot;pipeline&quot;</span><span class="p" data-group-id="5316925074-5">&gt;&gt;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5316925074-6">&lt;&lt;</span><span class="s">&quot;etl_daily&quot;</span><span class="p" data-group-id="5316925074-6">&gt;&gt;</span><span class="p" data-group-id="5316925074-4">}</span><span class="w">
+</span><span class="p" data-group-id="5316925074-3">}</span><span class="p" data-group-id="5316925074-2">)</span><span class="p">,</span><span class="w">
+</span><span class="n">BatchId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="5316925074-7">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Batch</span><span class="p" data-group-id="5316925074-7">)</span><span class="p">,</span><span class="w">
+
+</span><span class="p" data-group-id="5316925074-8">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Extract</span><span class="p" data-group-id="5316925074-8">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="5316925074-9">(</span><span class="p" data-group-id="5316925074-10">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">extract_worker</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5316925074-11">#{</span><span class="p" data-group-id="5316925074-11">}</span><span class="p">,</span><span class="w"> </span><span class="ss">batch</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="n">BatchId</span><span class="w">
+</span><span class="p" data-group-id="5316925074-10">}</span><span class="p" data-group-id="5316925074-9">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="5316925074-12">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">_Transform</span><span class="p" data-group-id="5316925074-12">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">insert</span><span class="p" data-group-id="5316925074-13">(</span><span class="p" data-group-id="5316925074-14">#{</span><span class="w">
+    </span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">transform_worker</span><span class="p">,</span><span class="w"> </span><span class="ss">args</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5316925074-15">#{</span><span class="p" data-group-id="5316925074-15">}</span><span class="p">,</span><span class="w">
+    </span><span class="ss">batch</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="n">BatchId</span><span class="p">,</span><span class="w">
+    </span><span class="ss">depends_on</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="5316925074-16">[</span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="5316925074-17">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Extract</span><span class="p" data-group-id="5316925074-17">)</span><span class="p" data-group-id="5316925074-16">]</span><span class="w">
+</span><span class="p" data-group-id="5316925074-14">}</span><span class="p" data-group-id="5316925074-13">)</span><span class="p">.</span></code></pre>
+
+</div>
+
+<div class="bottom-actions" id="bottom-actions">
+  <div class="bottom-actions-item">
+
+      <a href="batches.html" class="bottom-actions-button" rel="prev">
+        <span class="subheader">
+          ← Previous Page
+        </span>
+        <span class="title">
+Batches
+        </span>
+      </a>
+
+  </div>
+  <div class="bottom-actions-item">
+
+      <a href="middleware.html" class="bottom-actions-button" rel="next">
+        <span class="subheader">
+          Next Page →
+        </span>
+        <span class="title">
+Middleware
+        </span>
+      </a>
+
+  </div>
+</div>
+    <footer class="footer">
+
+        <p>
+
+            <span class="line">
+              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+
+                (<a href="https://preview.hex.pm/preview/shigoto/1.9.3/show/guides/dependencies.md">current file</a>)
+
+            </span>
+
+          <span class="line">
+            <button class="a-main footer-button display-quick-switch" title="Go to package docs">
+              Go to package docs
+            </button>
+
+
+              <a href="shigoto.epub">
+                Download ePub version
+              </a>
+
+          </span>
+        </p>
+
+        <p class="built-using">
+          Built using
+          <a href="https://github.com/elixir-lang/ex_doc" title="ExDoc" target="_blank" rel="help noopener" translate="no">ExDoc</a> (v0.40.3) for the
+
+            <a href="https://erlang.org" title="Erlang" target="_blank" translate="no">Erlang programming language</a>
+
+        </p>
+
+
+    </footer>
+  </div>
+</main>
+</div>
+
+  </body>
+</html>

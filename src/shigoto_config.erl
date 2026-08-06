@@ -26,7 +26,7 @@ Configuration access for Shigoto. Reads from application env.
     fanout_queues/0
 ]).
 
--doc "The pgo pool name for job storage. Set `repo` for Kura-based apps or `pool` for raw pgo.".
+-doc "The minato pool name for job storage. Set `repo` for Kura-based apps or `pool` for a pool of its own.".
 -spec pool() -> atom().
 pool() ->
     case application:get_env(shigoto, repo) of
