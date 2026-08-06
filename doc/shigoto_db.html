@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="ExDoc v0.40.3">
+    <meta name="project" content="shigoto v1.9.3">
+
+
+    <title>shigoto_db — shigoto v1.9.3</title>
+
+    <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
+
+    <script defer src="dist/sidebar_items-DDF30573.js"></script>
+    <script defer src="docs_config.js"></script>
+    <script defer src="dist/html-Y2MUTVIN.js"></script>
+
+  </head>
+  <body>
+    <script>(()=>{var t="ex_doc:settings",e="dark";var o="dark",s="light";var E="sidebar_state",n="closed";var r="sidebar_width";var a="sidebar-open";var i=new URLSearchParams(window.location.search),S=i.get("theme")||JSON.parse(localStorage.getItem(t)||"{}").theme;(S===o||S!==s&&window.matchMedia("(prefers-color-scheme: dark)").matches)&&document.body.classList.add(e);var d=sessionStorage.getItem(E),A=d!==n&&!window.matchMedia(`screen and (max-width: ${768}px)`).matches;document.body.classList.toggle(a,A);var c=sessionStorage.getItem(r);c&&document.body.style.setProperty("--sidebarWidth",`${c}px`);var p=/(Macintosh|iPhone|iPad|iPod)/.test(window.navigator.userAgent);document.documentElement.classList.toggle("apple-os",p);})();
+</script>
+
+<div class="body-wrapper">
+
+<button id="sidebar-menu" class="sidebar-button sidebar-toggle" aria-label="toggle sidebar" aria-controls="sidebar">
+  <i class="ri-menu-line ri-lg" title="Collapse/expand sidebar"></i>
+</button>
+
+<nav id="sidebar" class="sidebar">
+
+  <div class="sidebar-header">
+    <div class="sidebar-projectInfo">
+
+      <div>
+        <a href="readme.html" class="sidebar-projectName" translate="no">
+shigoto
+        </a>
+        <div class="sidebar-projectVersion" translate="no">
+          v1.9.3
+        </div>
+      </div>
+    </div>
+    <ul id="sidebar-list-nav" class="sidebar-list-nav" role="tablist" data-extras="Pages"></ul>
+  </div>
+</nav>
+
+<output role="status" id="toast"></output>
+
+<main class="content page-module" id="main" data-type="modules">
+  <div id="content" class="content-inner">
+    <div class="top-search">
+      <div class="search-settings">
+        <form class="search-bar" action="search.html">
+          <label class="search-label">
+            <span class="sr-only">Search documentation of shigoto</span>
+            <div class="search-input-wrapper">
+              <input name="q" type="text" class="search-input" placeholder="Press / to search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <button type="button" tabindex="-1" class="search-close-button" aria-hidden="true">
+                <i class="ri-close-line ri-lg" title="Cancel search"></i>
+              </button>
+            </div>
+          </label>
+        </form>
+        <div class="autocomplete">
+        </div>
+        <div class="engine-selector" data-multiple="false">
+          <button type="button" class="engine-button" aria-label="Select search engine" aria-haspopup="true" aria-expanded="false">
+            <i class="ri-search-2-line" aria-hidden="true"></i>
+            <span class="engine-name">Default</span>
+            <i class="ri-arrow-down-s-line" aria-hidden="true"></i>
+          </button>
+          <div class="engine-dropdown" hidden role="menu">
+
+              <button type="button"
+                      class="engine-option"
+                      data-engine-url="search.html?q="
+                      role="menuitemradio"
+                      aria-checked="true">
+                <span class="name">Default</span>
+                <span class="help">In-browser search</span>
+              </button>
+
+          </div>
+        </div>
+        <button class="icon-settings display-settings">
+          <i class="ri-settings-3-line"></i>
+          <span class="sr-only">Settings</span>
+        </button>
+      </div>
+    </div>
+
+<div id="top-content">
+  <div class="heading-with-actions top-heading">
+    <h1>
+      <span translate="no">shigoto_db</span> 
+      <small class="app-vsn" translate="no">(shigoto v1.9.3)</small>
+
+    </h1>
+
+
+
+
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
+        <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        <span class="sr-only">View Source</span>
+      </a>
+
+  </div>
+
+
+    <section id="moduledoc">
+<p>Every statement shigoto runs goes through here.</p><p>The client was called from ten modules directly, which meant changing it was
+twenty five edits and a hope. It is one module now, and the rest of shigoto asks
+for a query rather than for a driver.</p><h2 id="module-what-a-caller-gets" class="section-heading"><a href="#module-what-a-caller-gets" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">What a caller gets</span></h2><p><code class="inline">#{command := atom(), num_rows := integer(), rows := [row()]}</code> for a statement
+that ran, and <code class="inline">{error, Reason}</code> for one that did not, with <code class="inline">{pgsql_error, Fields}</code> as the reason a server refused it. That is the shape shigoto already
+reads everywhere.</p><h2 id="module-transactions" class="section-heading"><a href="#module-transactions" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Transactions</span></h2><p><a href="#transaction/2"><code class="inline">transaction/2</code></a> borrows one connection, runs <code class="inline">BEGIN</code>, calls the function, and
+commits or rolls back. Statements the function runs find that connection here
+rather than being handed it, because a job queue's transaction functions are
+ordinary code that calls <code class="inline">shigoto_repo</code> and cannot thread a connection through.</p><p>A <code class="inline">COMMIT</code> the server answers with <code class="inline">ROLLBACK</code> raises <code class="inline">transaction_rolled_back</code>.
+PostgreSQL does that when the transaction had already failed, and a job queue
+that reads it as success has marked jobs done that were never written - which is
+the same job running twice on the next poll.</p>
+    </section>
+
+</div>
+
+  <section id="summary" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#summary">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Summary</span>
+    </h2>
+<div class="summary-types summary">
+  <h3>
+    <a href="#types">Types</a>
+  </h3>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#t:error/0" data-no-tooltip="" translate="no">error()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>What went wrong. <code class="inline">pgsql_error</code> is the server refusing the statement.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#t:result/0" data-no-tooltip="" translate="no">result()</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>The shape a statement answers with.</p></div>
+
+    </div>
+
+</div>
+<div class="summary-functions summary">
+  <h3>
+    <a href="#functions">Functions</a>
+  </h3>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#in_transaction/1" data-no-tooltip="" translate="no">in_transaction(Pool)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>The connection holding this process's transaction on <code class="inline">Pool</code>, or <code class="inline">undefined</code>.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#query/3" data-no-tooltip="" translate="no">query(Pool, SQL, Params)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p><a href="#query/4"><code class="inline">query/4</code></a> with the default decoding: rows as maps, column names as atoms.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#query/4" data-no-tooltip="" translate="no">query(Pool, SQL, Params, Opts)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Run one statement, on this process's transaction if it is inside one.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#start_listener/2" data-no-tooltip="" translate="no">start_listener(Name, Config)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Start a listener for <code class="inline">LISTEN</code>, on a connection of its own.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#start_pool/2" data-no-tooltip="" translate="no">start_pool(Name, Config)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Start a pool from shigoto's configuration.</p></div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#transaction/2" data-no-tooltip="" translate="no">transaction(Pool, Fun)</a>
+
+      </div>
+
+        <div class="summary-synopsis"><p>Run <code class="inline">Fun</code> inside a transaction on <code class="inline">Pool</code>.</p></div>
+
+    </div>
+
+</div>
+
+  </section>
+
+
+  <section id="types" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#types">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Types</span>
+    </h2>
+
+    <div class="types-list">
+<section class="detail" id="t:error/0">
+
+  <div class="detail-header">
+    <a href="#t:error/0" class="detail-link" data-no-tooltip="" aria-label="Link to this type">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">error()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L46" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-type</span> error() :: {pgsql_error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()} | {socket, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()} | <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>().</pre>
+
+      </div>
+
+<p>What went wrong. <code class="inline">pgsql_error</code> is the server refusing the statement.</p>
+  </section>
+</section>
+<section class="detail" id="t:result/0">
+
+  <div class="detail-header">
+    <a href="#t:result/0" class="detail-link" data-no-tooltip="" aria-label="Link to this type">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">result()</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L43" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-type</span> result() :: #{command := <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), num_rows := <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>(), rows := [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()]}.</pre>
+
+      </div>
+
+<p>The shape a statement answers with.</p>
+  </section>
+</section>
+
+    </div>
+  </section>
+
+  <section id="functions" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#functions">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Functions</span>
+    </h2>
+
+    <div class="functions-list">
+<section class="detail" id="in_transaction/1">
+
+  <div class="detail-header">
+    <a href="#in_transaction/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">in_transaction(Pool)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L85" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> in_transaction(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>()) -> <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:pid/0">pid</a>() | undefined.</pre>
+
+      </div>
+
+<p>The connection holding this process's transaction on <code class="inline">Pool</code>, or <code class="inline">undefined</code>.</p>
+  </section>
+</section>
+<section class="detail" id="query/3">
+
+  <div class="detail-header">
+    <a href="#query/3" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">query(Pool, SQL, Params)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L52" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> query(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:iodata/0">iodata</a>(), [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()]) -> <a href="#t:result/0">result</a>() | {error, <a href="#t:error/0">error</a>()}.</pre>
+
+      </div>
+
+<p><a href="#query/4"><code class="inline">query/4</code></a> with the default decoding: rows as maps, column names as atoms.</p>
+  </section>
+</section>
+<section class="detail" id="query/4">
+
+  <div class="detail-header">
+    <a href="#query/4" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">query(Pool, SQL, Params, Opts)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L63" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> query(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:iodata/0">iodata</a>(), [<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()], <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> <a href="#t:result/0">result</a>() | {error, <a href="#t:error/0">error</a>()}.</pre>
+
+      </div>
+
+<p>Run one statement, on this process's transaction if it is inside one.</p><p><code class="inline">Opts</code> are minato's query options: <code class="inline">timeout</code> is a deadline after which the
+statement is cancelled on the server rather than abandoned, and the decoding
+options are the ones <a href="https://hexdocs.pm/minato/minato_protocol.html"><code class="inline">minato_protocol</code></a> documents.</p>
+  </section>
+</section>
+<section class="detail" id="start_listener/2">
+
+  <div class="detail-header">
+    <a href="#start_listener/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">start_listener(Name, Config)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L113" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> start_listener(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> {ok, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:pid/0">pid</a>()} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Start a listener for <code class="inline">LISTEN</code>, on a connection of its own.</p><p><code class="inline">LISTEN</code> is session state, so it cannot share the pool: a notification is
+delivered to the session that registered for it, and a pooled connection would
+deliver it to whichever caller happened to hold it next.</p>
+  </section>
+</section>
+<section class="detail" id="start_pool/2">
+
+  <div class="detail-header">
+    <a href="#start_pool/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">start_pool(Name, Config)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L95" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> start_pool(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> {ok, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:pid/0">pid</a>()} | {error, <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>()}.</pre>
+
+      </div>
+
+<p>Start a pool from shigoto's configuration.</p><p>Takes what shigoto and its users already write - <code class="inline">host</code>, <code class="inline">port</code>, <code class="inline">database</code>,
+<code class="inline">user</code>, <code class="inline">password</code>, <code class="inline">pool_size</code> - and gives minato what it takes.</p>
+  </section>
+</section>
+<section class="detail" id="transaction/2">
+
+  <div class="detail-header">
+    <a href="#transaction/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">transaction(Pool, Fun)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_db.erl#L77" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> transaction(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>(), fun(() -> Result)) -> Result.</pre>
+
+      </div>
+
+<p>Run <code class="inline">Fun</code> inside a transaction on <code class="inline">Pool</code>.</p><p>Nested calls join the transaction that is already open rather than starting a
+second one, because SQL has no nested <code class="inline">BEGIN</code> and the caller usually does not
+know whether it is nested.</p>
+  </section>
+</section>
+
+    </div>
+  </section>
+
+    <footer class="footer">
+
+        <p>
+
+            <span class="line">
+              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+
+            </span>
+
+          <span class="line">
+            <button class="a-main footer-button display-quick-switch" title="Go to package docs">
+              Go to package docs
+            </button>
+
+
+              <a href="shigoto.epub">
+                Download ePub version
+              </a>
+
+          </span>
+        </p>
+
+        <p class="built-using">
+          Built using
+          <a href="https://github.com/elixir-lang/ex_doc" title="ExDoc" target="_blank" rel="help noopener" translate="no">ExDoc</a> (v0.40.3) for the
+
+            <a href="https://erlang.org" title="Erlang" target="_blank" translate="no">Erlang programming language</a>
+
+        </p>
+
+
+    </footer>
+  </div>
+</main>
+</div>
+
+  </body>
+</html>

@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="ExDoc v0.40.3">
+    <meta name="project" content="shigoto v1.9.3">
+
+
+    <title>shigoto_telemetry — shigoto v1.9.3</title>
+
+    <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
+
+    <script defer src="dist/sidebar_items-DDF30573.js"></script>
+    <script defer src="docs_config.js"></script>
+    <script defer src="dist/html-Y2MUTVIN.js"></script>
+
+  </head>
+  <body>
+    <script>(()=>{var t="ex_doc:settings",e="dark";var o="dark",s="light";var E="sidebar_state",n="closed";var r="sidebar_width";var a="sidebar-open";var i=new URLSearchParams(window.location.search),S=i.get("theme")||JSON.parse(localStorage.getItem(t)||"{}").theme;(S===o||S!==s&&window.matchMedia("(prefers-color-scheme: dark)").matches)&&document.body.classList.add(e);var d=sessionStorage.getItem(E),A=d!==n&&!window.matchMedia(`screen and (max-width: ${768}px)`).matches;document.body.classList.toggle(a,A);var c=sessionStorage.getItem(r);c&&document.body.style.setProperty("--sidebarWidth",`${c}px`);var p=/(Macintosh|iPhone|iPad|iPod)/.test(window.navigator.userAgent);document.documentElement.classList.toggle("apple-os",p);})();
+</script>
+
+<div class="body-wrapper">
+
+<button id="sidebar-menu" class="sidebar-button sidebar-toggle" aria-label="toggle sidebar" aria-controls="sidebar">
+  <i class="ri-menu-line ri-lg" title="Collapse/expand sidebar"></i>
+</button>
+
+<nav id="sidebar" class="sidebar">
+
+  <div class="sidebar-header">
+    <div class="sidebar-projectInfo">
+
+      <div>
+        <a href="readme.html" class="sidebar-projectName" translate="no">
+shigoto
+        </a>
+        <div class="sidebar-projectVersion" translate="no">
+          v1.9.3
+        </div>
+      </div>
+    </div>
+    <ul id="sidebar-list-nav" class="sidebar-list-nav" role="tablist" data-extras="Pages"></ul>
+  </div>
+</nav>
+
+<output role="status" id="toast"></output>
+
+<main class="content page-module" id="main" data-type="modules">
+  <div id="content" class="content-inner">
+    <div class="top-search">
+      <div class="search-settings">
+        <form class="search-bar" action="search.html">
+          <label class="search-label">
+            <span class="sr-only">Search documentation of shigoto</span>
+            <div class="search-input-wrapper">
+              <input name="q" type="text" class="search-input" placeholder="Press / to search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <button type="button" tabindex="-1" class="search-close-button" aria-hidden="true">
+                <i class="ri-close-line ri-lg" title="Cancel search"></i>
+              </button>
+            </div>
+          </label>
+        </form>
+        <div class="autocomplete">
+        </div>
+        <div class="engine-selector" data-multiple="false">
+          <button type="button" class="engine-button" aria-label="Select search engine" aria-haspopup="true" aria-expanded="false">
+            <i class="ri-search-2-line" aria-hidden="true"></i>
+            <span class="engine-name">Default</span>
+            <i class="ri-arrow-down-s-line" aria-hidden="true"></i>
+          </button>
+          <div class="engine-dropdown" hidden role="menu">
+
+              <button type="button"
+                      class="engine-option"
+                      data-engine-url="search.html?q="
+                      role="menuitemradio"
+                      aria-checked="true">
+                <span class="name">Default</span>
+                <span class="help">In-browser search</span>
+              </button>
+
+          </div>
+        </div>
+        <button class="icon-settings display-settings">
+          <i class="ri-settings-3-line"></i>
+          <span class="sr-only">Settings</span>
+        </button>
+      </div>
+    </div>
+
+<div id="top-content">
+  <div class="heading-with-actions top-heading">
+    <h1>
+      <span translate="no">shigoto_telemetry</span> 
+      <small class="app-vsn" translate="no">(shigoto v1.9.3)</small>
+
+    </h1>
+
+
+
+
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
+        <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        <span class="sr-only">View Source</span>
+      </a>
+
+  </div>
+
+
+    <section id="moduledoc">
+<p>Telemetry events for Shigoto job lifecycle, queue operations, and resilience.</p><p>Every event is emitted through <a href="https://hexdocs.pm/telemetry/telemetry.html#execute/3"><code class="inline">telemetry:execute/3</code></a>. The tables below are the
+stable event contract: attach a handler to any of these event names to feed a
+metrics reporter (<code class="inline">telemetry_metrics</code>, Prometheus, StatsD, ...). See the
+<a href="telemetry.html">Telemetry</a> guide for a worked <code class="inline">telemetry_metrics</code> example.</p><p>Measurement units:</p><ul><li><code class="inline">count</code> is always <code class="inline">1</code> (increment a counter/sum).</li><li><code class="inline">duration</code> is in <strong>native</strong> time units (<a href="https://www.erlang.org/doc/apps/erts/erlang.html#monotonic_time/0"><code class="inline">erlang:monotonic_time/0</code></a> deltas).</li><li><code class="inline">duration_ms</code>, <code class="inline">queue_wait_ms</code>, <code class="inline">retry_after_ms</code> are <strong>milliseconds</strong>.</li><li><code class="inline">progress</code> is a <strong>percentage</strong> (<code class="inline">0..100</code>).</li><li><code class="inline">claimed</code> is a <strong>job count</strong> (jobs claimed by that poll).</li></ul><p>Every event carries <code class="inline">domain =&gt; [shigoto]</code> in its metadata (used by the OTP
+logger for filtering); it is omitted from the tables below for brevity.</p><h2 id="module-job-events" class="section-heading"><a href="#module-job-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Job Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, job, inserted]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, claimed]</code></td><td style="text-align: left;"><code class="inline">count, queue_wait_ms</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, completed]</code></td><td style="text-align: left;"><code class="inline">count, duration, duration_ms, queue_wait_ms</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, failed]</code></td><td style="text-align: left;"><code class="inline">count, duration, duration_ms, queue_wait_ms</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority, reason</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, snoozed]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority, snooze_reason</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, discarded]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, cancelled]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, job, progress]</code></td><td style="text-align: left;"><code class="inline">progress</code></td><td style="text-align: left;">job_id, worker, queue, attempt, priority, progress</td></tr></tbody></table><h2 id="module-queue-events" class="section-heading"><a href="#module-queue-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Queue Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, queue, poll]</code></td><td style="text-align: left;"><code class="inline">count, claimed</code></td><td style="text-align: left;">queue</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, queue, paused]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">queue</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, queue, resumed]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">queue</td></tr></tbody></table><h2 id="module-resilience-events" class="section-heading"><a href="#module-resilience-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Resilience Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, resilience, rate_limited]</code></td><td style="text-align: left;"><code class="inline">count, retry_after_ms</code></td><td style="text-align: left;">worker</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, resilience, circuit_open]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">worker</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, resilience, bulkhead_full]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">worker</td></tr><tr><td style="text-align: left;"><code class="inline">[shigoto, resilience, load_shed]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">priority</td></tr></tbody></table><h2 id="module-batch-events" class="section-heading"><a href="#module-batch-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Batch Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, batch, completed]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">batch_id, total_jobs, completed_jobs, discarded_jobs</td></tr></tbody></table><h2 id="module-cron-events" class="section-heading"><a href="#module-cron-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Cron Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, cron, scheduled]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">name, worker, schedule</td></tr></tbody></table><h2 id="module-testing-events" class="section-heading"><a href="#module-testing-events" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Testing Events</span></h2><table><thead><tr><th style="text-align: left;">Event</th><th style="text-align: left;">Measurements</th><th style="text-align: left;">Metadata</th></tr></thead><tbody><tr><td style="text-align: left;"><code class="inline">[shigoto, testing, mode_armed]</code></td><td style="text-align: left;"><code class="inline">count</code></td><td style="text-align: left;">mode</td></tr></tbody></table><p>Emitted once at boot when a non-production <code class="inline">testing</code> mode (<code class="inline">inline</code>/<code class="inline">manual</code>) is
+armed. Its presence in a production metrics stream is a red flag — test-only
+insert behaviour is active. See <a href="shigoto_config.html#testing_mode/0"><code class="inline">shigoto_config:testing_mode/0</code></a>.</p>
+    </section>
+
+</div>
+
+  <section id="summary" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#summary">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Summary</span>
+    </h2>
+<div class="summary-functions summary">
+  <h3>
+    <a href="#functions">Functions</a>
+  </h3>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#batch_completed/1" data-no-tooltip="" translate="no">batch_completed(Batch)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#cron_scheduled/3" data-no-tooltip="" translate="no">cron_scheduled(Name, Worker, Schedule)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_cancelled/1" data-no-tooltip="" translate="no">job_cancelled(Job)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_claimed/1" data-no-tooltip="" translate="no">job_claimed(Job)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_completed/2" data-no-tooltip="" translate="no">job_completed(Job, Duration)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_discarded/1" data-no-tooltip="" translate="no">job_discarded(Job)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_failed/3" data-no-tooltip="" translate="no">job_failed(Job, Reason, Duration)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_inserted/1" data-no-tooltip="" translate="no">job_inserted(Job)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_progress/2" data-no-tooltip="" translate="no">job_progress(Job, Progress)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#job_snoozed/2" data-no-tooltip="" translate="no">job_snoozed(Job, Reason)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#queue_paused/1" data-no-tooltip="" translate="no">queue_paused(Queue)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#queue_poll/2" data-no-tooltip="" translate="no">queue_poll(Queue, Claimed)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#queue_resumed/1" data-no-tooltip="" translate="no">queue_resumed(Queue)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#resilience_bulkhead_full/1" data-no-tooltip="" translate="no">resilience_bulkhead_full(Worker)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#resilience_circuit_open/1" data-no-tooltip="" translate="no">resilience_circuit_open(Worker)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#resilience_load_shed/1" data-no-tooltip="" translate="no">resilience_load_shed(Priority)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#resilience_rate_limited/2" data-no-tooltip="" translate="no">resilience_rate_limited(Worker, RetryAfterMs)</a>
+
+      </div>
+
+    </div>
+
+    <div class="summary-row">
+      <div class="summary-signature">
+        <a href="#testing_mode_armed/1" data-no-tooltip="" translate="no">testing_mode_armed(Mode)</a>
+
+      </div>
+
+    </div>
+
+</div>
+
+  </section>
+
+
+  <section id="functions" class="details-list">
+    <h2 class="section-heading">
+      <a class="hover-link" href="#functions">
+        <i class="ri-link-m" aria-hidden="true"></i>
+      </a>
+      <span class="text">Functions</span>
+    </h2>
+
+    <div class="functions-list">
+<section class="detail" id="batch_completed/1">
+
+  <div class="detail-header">
+    <a href="#batch_completed/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">batch_completed(Batch)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L231" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> batch_completed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="cron_scheduled/3">
+
+  <div class="detail-header">
+    <a href="#cron_scheduled/3" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">cron_scheduled(Name, Worker, Schedule)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L247" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> cron_scheduled(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:atom/0">atom</a>() | <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:module/0">module</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_cancelled/1">
+
+  <div class="detail-header">
+    <a href="#job_cancelled/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_cancelled(Job)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L154" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_cancelled(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_claimed/1">
+
+  <div class="detail-header">
+    <a href="#job_claimed/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_claimed(Job)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L112" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_claimed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_completed/2">
+
+  <div class="detail-header">
+    <a href="#job_completed/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_completed(Job, Duration)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L118" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_completed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:integer/0">integer</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_discarded/1">
+
+  <div class="detail-header">
+    <a href="#job_discarded/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_discarded(Job)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L148" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_discarded(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_failed/3">
+
+  <div class="detail-header">
+    <a href="#job_failed/3" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_failed(Job, Reason, Duration)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L130" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_failed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:term/0">term</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:integer/0">integer</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_inserted/1">
+
+  <div class="detail-header">
+    <a href="#job_inserted/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_inserted(Job)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L106" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_inserted(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_progress/2">
+
+  <div class="detail-header">
+    <a href="#job_progress/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_progress(Job, Progress)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L160" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_progress(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>(), 0..100) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="job_snoozed/2">
+
+  <div class="detail-header">
+    <a href="#job_snoozed/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">job_snoozed(Job, Reason)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L142" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> job_snoozed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:map/0">map</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="queue_paused/1">
+
+  <div class="detail-header">
+    <a href="#queue_paused/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">queue_paused(Queue)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L177" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> queue_paused(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="queue_poll/2">
+
+  <div class="detail-header">
+    <a href="#queue_poll/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">queue_poll(Queue, Claimed)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L169" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> queue_poll(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:non_neg_integer/0">non_neg_integer</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="queue_resumed/1">
+
+  <div class="detail-header">
+    <a href="#queue_resumed/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">queue_resumed(Queue)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L184" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> queue_resumed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:binary/0">binary</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="resilience_bulkhead_full/1">
+
+  <div class="detail-header">
+    <a href="#resilience_bulkhead_full/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">resilience_bulkhead_full(Worker)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L211" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> resilience_bulkhead_full(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:module/0">module</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="resilience_circuit_open/1">
+
+  <div class="detail-header">
+    <a href="#resilience_circuit_open/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">resilience_circuit_open(Worker)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L203" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> resilience_circuit_open(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:module/0">module</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="resilience_load_shed/1">
+
+  <div class="detail-header">
+    <a href="#resilience_load_shed/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">resilience_load_shed(Priority)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L219" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> resilience_load_shed(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:integer/0">integer</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="resilience_rate_limited/2">
+
+  <div class="detail-header">
+    <a href="#resilience_rate_limited/2" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">resilience_rate_limited(Worker, RetryAfterMs)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L195" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> resilience_rate_limited(<a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:module/0">module</a>(), <a href="https://www.erlang.org/doc/apps/erts/erlang.html#t:non_neg_integer/0">non_neg_integer</a>()) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+<section class="detail" id="testing_mode_armed/1">
+
+  <div class="detail-header">
+    <a href="#testing_mode_armed/1" class="detail-link" data-no-tooltip="" aria-label="Link to this function">
+      <i class="ri-link-m" aria-hidden="true"></i>
+    </a>
+    <div class="heading-with-actions">
+      <h1 class="signature" translate="no">testing_mode_armed(Mode)</h1>
+
+
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_telemetry.erl#L257" class="icon-action" rel="help nofollow" aria-label="View Source">
+          <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        </a>
+
+    </div>
+  </div>
+
+  <section class="docstring">
+
+      <div class="specs">
+
+          <pre translate="no"><span class="attribute">-spec</span> testing_mode_armed(inline | manual) -> ok.</pre>
+
+      </div>
+
+
+  </section>
+</section>
+
+    </div>
+  </section>
+
+    <footer class="footer">
+
+        <p>
+
+            <span class="line">
+              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+
+            </span>
+
+          <span class="line">
+            <button class="a-main footer-button display-quick-switch" title="Go to package docs">
+              Go to package docs
+            </button>
+
+
+              <a href="shigoto.epub">
+                Download ePub version
+              </a>
+
+          </span>
+        </p>
+
+        <p class="built-using">
+          Built using
+          <a href="https://github.com/elixir-lang/ex_doc" title="ExDoc" target="_blank" rel="help noopener" translate="no">ExDoc</a> (v0.40.3) for the
+
+            <a href="https://erlang.org" title="Erlang" target="_blank" translate="no">Erlang programming language</a>
+
+        </p>
+
+
+    </footer>
+  </div>
+</main>
+</div>
+
+  </body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="ExDoc v0.40.3">
+    <meta name="project" content="shigoto v1.9.3">
+
+
+    <title>Middleware — shigoto v1.9.3</title>
+
+    <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
+
+    <script defer src="dist/sidebar_items-DDF30573.js"></script>
+    <script defer src="docs_config.js"></script>
+    <script defer src="dist/html-Y2MUTVIN.js"></script>
+
+  </head>
+  <body>
+    <script>(()=>{var t="ex_doc:settings",e="dark";var o="dark",s="light";var E="sidebar_state",n="closed";var r="sidebar_width";var a="sidebar-open";var i=new URLSearchParams(window.location.search),S=i.get("theme")||JSON.parse(localStorage.getItem(t)||"{}").theme;(S===o||S!==s&&window.matchMedia("(prefers-color-scheme: dark)").matches)&&document.body.classList.add(e);var d=sessionStorage.getItem(E),A=d!==n&&!window.matchMedia(`screen and (max-width: ${768}px)`).matches;document.body.classList.toggle(a,A);var c=sessionStorage.getItem(r);c&&document.body.style.setProperty("--sidebarWidth",`${c}px`);var p=/(Macintosh|iPhone|iPad|iPod)/.test(window.navigator.userAgent);document.documentElement.classList.toggle("apple-os",p);})();
+</script>
+
+<div class="body-wrapper">
+
+<button id="sidebar-menu" class="sidebar-button sidebar-toggle" aria-label="toggle sidebar" aria-controls="sidebar">
+  <i class="ri-menu-line ri-lg" title="Collapse/expand sidebar"></i>
+</button>
+
+<nav id="sidebar" class="sidebar">
+
+  <div class="sidebar-header">
+    <div class="sidebar-projectInfo">
+
+      <div>
+        <a href="readme.html" class="sidebar-projectName" translate="no">
+shigoto
+        </a>
+        <div class="sidebar-projectVersion" translate="no">
+          v1.9.3
+        </div>
+      </div>
+    </div>
+    <ul id="sidebar-list-nav" class="sidebar-list-nav" role="tablist" data-extras="Pages"></ul>
+  </div>
+</nav>
+
+<output role="status" id="toast"></output>
+
+<main class="content page-extra" id="main" data-type="extras">
+  <div id="content" class="content-inner">
+    <div class="top-search">
+      <div class="search-settings">
+        <form class="search-bar" action="search.html">
+          <label class="search-label">
+            <span class="sr-only">Search documentation of shigoto</span>
+            <div class="search-input-wrapper">
+              <input name="q" type="text" class="search-input" placeholder="Press / to search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <button type="button" tabindex="-1" class="search-close-button" aria-hidden="true">
+                <i class="ri-close-line ri-lg" title="Cancel search"></i>
+              </button>
+            </div>
+          </label>
+        </form>
+        <div class="autocomplete">
+        </div>
+        <div class="engine-selector" data-multiple="false">
+          <button type="button" class="engine-button" aria-label="Select search engine" aria-haspopup="true" aria-expanded="false">
+            <i class="ri-search-2-line" aria-hidden="true"></i>
+            <span class="engine-name">Default</span>
+            <i class="ri-arrow-down-s-line" aria-hidden="true"></i>
+          </button>
+          <div class="engine-dropdown" hidden role="menu">
+
+              <button type="button"
+                      class="engine-option"
+                      data-engine-url="search.html?q="
+                      role="menuitemradio"
+                      aria-checked="true">
+                <span class="name">Default</span>
+                <span class="help">In-browser search</span>
+              </button>
+
+          </div>
+        </div>
+        <button class="icon-settings display-settings">
+          <i class="ri-settings-3-line"></i>
+          <span class="sr-only">Settings</span>
+        </button>
+      </div>
+    </div>
+
+<div id="top-content">
+  <div class="heading-with-actions top-heading">
+    <h1>Middleware</h1>
+
+
+
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/guides/middleware.md#L1" title="View Source" class="icon-action" rel="help nofollow">
+        <i class="ri-code-s-slash-line" aria-hidden="true"></i>
+        <span class="sr-only">View Source</span>
+      </a>
+
+  </div>
+
+
+<p>Middleware wraps job execution with before/after logic. Each middleware is a
+function that receives the job map and a <code class="inline">Next</code> function.</p><h2 id="writing-middleware" class="section-heading"><a href="#writing-middleware" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Writing Middleware</span></h2><h3 id="erlang" class="section-heading"><a href="#erlang" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Erlang</span></h3><pre><code class="makeup erlang" translate="no"><span class="nf">my_logging_middleware</span><span class="p" data-group-id="8832890256-1">(</span><span class="n">Job</span><span class="p">,</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="8832890256-1">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w">
+    </span><span class="n">JobId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">maps</span><span class="p">:</span><span class="nb">get</span><span class="p" data-group-id="8832890256-2">(</span><span class="ss">id</span><span class="p">,</span><span class="w"> </span><span class="n">Job</span><span class="p" data-group-id="8832890256-2">)</span><span class="p">,</span><span class="w">
+    </span><span class="nc">logger</span><span class="p">:</span><span class="nf">info</span><span class="p" data-group-id="8832890256-3">(</span><span class="s">&quot;starting job </span><span class="si">~p</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="8832890256-4">[</span><span class="n">JobId</span><span class="p" data-group-id="8832890256-4">]</span><span class="p" data-group-id="8832890256-3">)</span><span class="p">,</span><span class="w">
+    </span><span class="n">Result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="8832890256-5">(</span><span class="p" data-group-id="8832890256-5">)</span><span class="p">,</span><span class="w">
+    </span><span class="nc">logger</span><span class="p">:</span><span class="nf">info</span><span class="p" data-group-id="8832890256-6">(</span><span class="s">&quot;finished job </span><span class="si">~p</span><span class="s">: </span><span class="si">~p</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="8832890256-7">[</span><span class="n">JobId</span><span class="p">,</span><span class="w"> </span><span class="n">Result</span><span class="p" data-group-id="8832890256-7">]</span><span class="p" data-group-id="8832890256-6">)</span><span class="p">,</span><span class="w">
+    </span><span class="n">Result</span><span class="p">.</span></code></pre><h3 id="elixir" class="section-heading"><a href="#elixir" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Elixir</span></h3><pre><code class="makeup elixir" translate="no"><span class="kd">def</span><span class="w"> </span><span class="nf">my_logging_middleware</span><span class="p" data-group-id="4217194740-1">(</span><span class="n">job</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="p" data-group-id="4217194740-1">)</span><span class="w"> </span><span class="k" data-group-id="4217194740-2">do</span><span class="w">
+  </span><span class="n">job_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="o">.</span><span class="n">id</span><span class="w">
+  </span><span class="nc">Logger</span><span class="o">.</span><span class="n">info</span><span class="p" data-group-id="4217194740-3">(</span><span class="s">&quot;starting job </span><span class="si" data-group-id="4217194740-4">#{</span><span class="n">job_id</span><span class="si" data-group-id="4217194740-4">}</span><span class="s">&quot;</span><span class="p" data-group-id="4217194740-3">)</span><span class="w">
+  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="o">.</span><span class="p" data-group-id="4217194740-5">(</span><span class="p" data-group-id="4217194740-5">)</span><span class="w">
+  </span><span class="nc">Logger</span><span class="o">.</span><span class="n">info</span><span class="p" data-group-id="4217194740-6">(</span><span class="s">&quot;finished job </span><span class="si" data-group-id="4217194740-7">#{</span><span class="n">job_id</span><span class="si" data-group-id="4217194740-7">}</span><span class="s">: </span><span class="si" data-group-id="4217194740-8">#{</span><span class="n">inspect</span><span class="p" data-group-id="4217194740-9">(</span><span class="n">result</span><span class="p" data-group-id="4217194740-9">)</span><span class="si" data-group-id="4217194740-8">}</span><span class="s">&quot;</span><span class="p" data-group-id="4217194740-6">)</span><span class="w">
+  </span><span class="n">result</span><span class="w">
+</span><span class="k" data-group-id="4217194740-2">end</span></code></pre><h2 id="global-middleware" class="section-heading"><a href="#global-middleware" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Global Middleware</span></h2><p>Applied to all jobs via configuration:</p><pre><code class="makeup erlang" translate="no"><span class="p" data-group-id="8894867526-1">{</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="8894867526-2">[</span><span class="w">
+    </span><span class="p" data-group-id="8894867526-3">{</span><span class="ss">middleware</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="8894867526-4">[</span><span class="k">fun</span><span class="w"> </span><span class="nc">my_app_middleware</span><span class="p">:</span><span class="ss">timing</span><span class="p">/</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="k">fun</span><span class="w"> </span><span class="nc">my_app_middleware</span><span class="p">:</span><span class="ss">tracing</span><span class="p">/</span><span class="mi">2</span><span class="p" data-group-id="8894867526-4">]</span><span class="p" data-group-id="8894867526-3">}</span><span class="w">
+</span><span class="p" data-group-id="8894867526-2">]</span><span class="p" data-group-id="8894867526-1">}</span></code></pre><pre><code class="makeup elixir" translate="no"><span class="n">config</span><span class="w"> </span><span class="ss">:shigoto</span><span class="p">,</span><span class="w">
+  </span><span class="ss">middleware</span><span class="p">:</span><span class="w"> </span><span class="p" data-group-id="4357666387-1">[</span><span class="o">&amp;</span><span class="nc">MyAppMiddleware</span><span class="o">.</span><span class="n">timing</span><span class="o">/</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nc">MyAppMiddleware</span><span class="o">.</span><span class="n">tracing</span><span class="o">/</span><span class="mi">2</span><span class="p" data-group-id="4357666387-1">]</span></code></pre><h2 id="worker-middleware" class="section-heading"><a href="#worker-middleware" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Worker Middleware</span></h2><p>Workers can define their own middleware via the <code class="inline">middleware/0</code> callback:</p><pre><code class="makeup erlang" translate="no"><span class="p">-</span><span class="na">module</span><span class="p" data-group-id="0756839022-1">(</span><span class="ss">audited_worker</span><span class="p" data-group-id="0756839022-1">)</span><span class="p">.</span><span class="w">
+</span><span class="p">-</span><span class="na">behaviour</span><span class="p" data-group-id="0756839022-2">(</span><span class="ss">shigoto_worker</span><span class="p" data-group-id="0756839022-2">)</span><span class="p">.</span><span class="w">
+</span><span class="p">-</span><span class="na">export</span><span class="p" data-group-id="0756839022-3">(</span><span class="p" data-group-id="0756839022-4">[</span><span class="ss">perform</span><span class="p">/</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="ss">middleware</span><span class="p">/</span><span class="mi">0</span><span class="p" data-group-id="0756839022-4">]</span><span class="p" data-group-id="0756839022-3">)</span><span class="p">.</span><span class="w">
+
+</span><span class="nf">perform</span><span class="p" data-group-id="0756839022-5">(</span><span class="n">Args</span><span class="p" data-group-id="0756839022-5">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nf">do_work</span><span class="p" data-group-id="0756839022-6">(</span><span class="n">Args</span><span class="p" data-group-id="0756839022-6">)</span><span class="p">.</span><span class="w">
+
+</span><span class="nf">middleware</span><span class="p" data-group-id="0756839022-7">(</span><span class="p" data-group-id="0756839022-7">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w">
+    </span><span class="p" data-group-id="0756839022-8">[</span><span class="k">fun</span><span class="w"> </span><span class="ss">audit_middleware</span><span class="p">/</span><span class="mi">2</span><span class="p" data-group-id="0756839022-8">]</span><span class="p">.</span><span class="w">
+
+</span><span class="nf">audit_middleware</span><span class="p" data-group-id="0756839022-9">(</span><span class="n">Job</span><span class="p">,</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="0756839022-9">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w">
+    </span><span class="nc">audit_log</span><span class="p">:</span><span class="nf">record</span><span class="p" data-group-id="0756839022-10">(</span><span class="ss">started</span><span class="p">,</span><span class="w"> </span><span class="n">Job</span><span class="p" data-group-id="0756839022-10">)</span><span class="p">,</span><span class="w">
+    </span><span class="n">Result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="0756839022-11">(</span><span class="p" data-group-id="0756839022-11">)</span><span class="p">,</span><span class="w">
+    </span><span class="nc">audit_log</span><span class="p">:</span><span class="nf">record</span><span class="p" data-group-id="0756839022-12">(</span><span class="ss">finished</span><span class="p">,</span><span class="w"> </span><span class="n">Job</span><span class="p" data-group-id="0756839022-12">)</span><span class="p">,</span><span class="w">
+    </span><span class="n">Result</span><span class="p">.</span></code></pre><h2 id="execution-order" class="section-heading"><a href="#execution-order" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Execution Order</span></h2><p>Middleware runs in this order:</p><ol><li>Global middleware (from config, in order)</li><li>Worker middleware (from <code class="inline">middleware/0</code> callback, in order)</li><li><code class="inline">Worker:perform/1</code></li></ol><h2 id="short-circuiting" class="section-heading"><a href="#short-circuiting" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Short-Circuiting</span></h2><p>Return early without calling <code class="inline">Next()</code> to skip execution:</p><pre><code class="makeup erlang" translate="no"><span class="nf">maintenance_gate</span><span class="p" data-group-id="6824123194-1">(</span><span class="n">Job</span><span class="p">,</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="6824123194-1">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w">
+    </span><span class="k">case</span><span class="w"> </span><span class="nc">application</span><span class="p">:</span><span class="nf">get_env</span><span class="p" data-group-id="6824123194-2">(</span><span class="ss">my_app</span><span class="p">,</span><span class="w"> </span><span class="ss">maintenance_mode</span><span class="p">,</span><span class="w"> </span><span class="ss">false</span><span class="p" data-group-id="6824123194-2">)</span><span class="w"> </span><span class="k">of</span><span class="w">
+        </span><span class="ss">true</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="p" data-group-id="6824123194-3">{</span><span class="ss">snooze</span><span class="p">,</span><span class="w"> </span><span class="mi">300</span><span class="p" data-group-id="6824123194-3">}</span><span class="p">;</span><span class="w">  </span><span class="c1">%% Snooze for 5 minutes</span><span class="w">
+        </span><span class="ss">false</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="n">Next</span><span class="p" data-group-id="6824123194-4">(</span><span class="p" data-group-id="6824123194-4">)</span><span class="w">
+    </span><span class="k">end</span><span class="p">.</span></code></pre><h2 id="built-in-resilience" class="section-heading"><a href="#built-in-resilience" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Built-in Resilience</span></h2><p>Seki resilience checks (rate limiting, circuit breaking, bulkhead, load
+shedding) run <em>before</em> the middleware chain. See <a href="resilience.html">Resilience</a>.</p>
+
+</div>
+
+<div class="bottom-actions" id="bottom-actions">
+  <div class="bottom-actions-item">
+
+      <a href="dependencies.html" class="bottom-actions-button" rel="prev">
+        <span class="subheader">
+          ← Previous Page
+        </span>
+        <span class="title">
+Job Dependencies
+        </span>
+      </a>
+
+  </div>
+  <div class="bottom-actions-item">
+
+      <a href="fanout-queues.html" class="bottom-actions-button" rel="next">
+        <span class="subheader">
+          Next Page →
+        </span>
+        <span class="title">
+Fanout Queues
+        </span>
+      </a>
+
+  </div>
+</div>
+    <footer class="footer">
+
+        <p>
+
+            <span class="line">
+              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+
+                (<a href="https://preview.hex.pm/preview/shigoto/1.9.3/show/guides/middleware.md">current file</a>)
+
+            </span>
+
+          <span class="line">
+            <button class="a-main footer-button display-quick-switch" title="Go to package docs">
+              Go to package docs
+            </button>
+
+
+              <a href="shigoto.epub">
+                Download ePub version
+              </a>
+
+          </span>
+        </p>
+
+        <p class="built-using">
+          Built using
+          <a href="https://github.com/elixir-lang/ex_doc" title="ExDoc" target="_blank" rel="help noopener" translate="no">ExDoc</a> (v0.40.3) for the
+
+            <a href="https://erlang.org" title="Erlang" target="_blank" translate="no">Erlang programming language</a>
+
+        </p>
+
+
+    </footer>
+  </div>
+</main>
+</div>
+
+  </body>
+</html>

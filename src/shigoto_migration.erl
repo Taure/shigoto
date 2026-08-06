@@ -1,6 +1,6 @@
 -module(shigoto_migration).
 -moduledoc ~"""
-Database migrations for Shigoto tables. Call `up/1` with a pgo pool name
+Database migrations for Shigoto tables. Call `up/1` with a minato pool name
 to create or update the jobs and cron tables.
 
 Migrations are idempotent and safe to run multiple times.
