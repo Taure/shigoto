@@ -5,10 +5,10 @@
     <meta http-equiv="x-ua-compatible" content="ie=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="generator" content="ExDoc v0.40.3">
-    <meta name="project" content="shigoto v1.9.3">
+    <meta name="project" content="shigoto v1.9.4">
 
 
-    <title>shigoto_notifier — shigoto v1.9.3</title>
+    <title>shigoto_notifier — shigoto v1.9.4</title>
 
     <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
 
@@ -37,7 +37,7 @@
 shigoto
         </a>
         <div class="sidebar-projectVersion" translate="no">
-          v1.9.3
+          v1.9.4
         </div>
       </div>
     </div>
@@ -94,34 +94,20 @@ shigoto
   <div class="heading-with-actions top-heading">
     <h1>
       <span translate="no">shigoto_notifier</span> 
-      <small class="app-vsn" translate="no">(shigoto v1.9.3)</small>
+      <small class="app-vsn" translate="no">(shigoto v1.9.4)</small>
 
     </h1>
 
 
 
 
-      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_notifier.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_notifier.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
         <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         <span class="sr-only">View Source</span>
       </a>
 
   </div>
 
-
-    <section id="moduledoc">
-<p>Listens for PostgreSQL NOTIFY events on the <code class="inline">shigoto_jobs_insert</code> channel
-and triggers immediate polling on the relevant queue. Falls back to
-regular polling if the notification connection drops.</p><p>A notification is an optimisation, never the only path: <code class="inline">NOTIFY</code> has no replay,
-so anything published while the listener was away is gone. minato says when that
-happened, and this process answers it by polling every queue once, which is the
-catch up the missed notifications would have caused.</p><p>Requires <code class="inline">notifier</code> config with database connection details:</p><pre><code class="makeup erlang" translate="no"><span class="p" data-group-id="9781463327-1">{</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9781463327-2">[</span><span class="w">
-    </span><span class="p" data-group-id="9781463327-3">{</span><span class="ss">pool</span><span class="p">,</span><span class="w"> </span><span class="ss">my_db</span><span class="p" data-group-id="9781463327-3">}</span><span class="p">,</span><span class="w">
-    </span><span class="p" data-group-id="9781463327-4">{</span><span class="ss">notifier</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9781463327-5">#{</span><span class="ss">host</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">&quot;localhost&quot;</span><span class="p">,</span><span class="w"> </span><span class="ss">port</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">5432</span><span class="p">,</span><span class="w">
-                 </span><span class="ss">database</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">&quot;mydb&quot;</span><span class="p">,</span><span class="w"> </span><span class="ss">user</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">&quot;postgres&quot;</span><span class="p">,</span><span class="w"> </span><span class="ss">password</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">&quot;secret&quot;</span><span class="p" data-group-id="9781463327-5">}</span><span class="p" data-group-id="9781463327-4">}</span><span class="w">
-</span><span class="p" data-group-id="9781463327-2">]</span><span class="p" data-group-id="9781463327-1">}</span></code></pre><p>Without <code class="inline">notifier</code> config, this process is not started and shigoto
-relies solely on polling.</p>
-    </section>
 
 </div>
 
@@ -131,9 +117,9 @@ relies solely on polling.</p>
         <p>
 
             <span class="line">
-              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+              <a href="https://hex.pm/packages/shigoto/1.9.4">Hex Package</a>
 
-              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.4">Hex Preview</a>
 
             </span>
 

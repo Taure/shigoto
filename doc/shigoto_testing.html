@@ -5,10 +5,10 @@
     <meta http-equiv="x-ua-compatible" content="ie=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="generator" content="ExDoc v0.40.3">
-    <meta name="project" content="shigoto v1.9.3">
+    <meta name="project" content="shigoto v1.9.4">
 
 
-    <title>shigoto_testing — shigoto v1.9.3</title>
+    <title>shigoto_testing — shigoto v1.9.4</title>
 
     <link rel="stylesheet" href="dist/html-erlang-KCHZLXSC.css" />
 
@@ -37,7 +37,7 @@
 shigoto
         </a>
         <div class="sidebar-projectVersion" translate="no">
-          v1.9.3
+          v1.9.4
         </div>
       </div>
     </div>
@@ -94,14 +94,14 @@ shigoto
   <div class="heading-with-actions top-heading">
     <h1>
       <span translate="no">shigoto_testing</span> 
-      <small class="app-vsn" translate="no">(shigoto v1.9.3)</small>
+      <small class="app-vsn" translate="no">(shigoto v1.9.4)</small>
 
     </h1>
 
 
 
 
-      <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
+      <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L1" title="View Source" class="icon-action" rel="help nofollow">
         <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         <span class="sr-only">View Source</span>
       </a>
@@ -115,21 +115,21 @@ your code enqueued.</p><h2 id="module-running-a-worker-shigoto-perform_job-2-3" 
 uses (the middleware chain and <code class="inline">deps_results</code> injection) and returns the raw
 worker result, with no database, no queue, no retry, and no resilience gating
 (rate limits, circuit breakers, concurrency caps are skipped). It is a pure,
-in-process unit-test runner — it must never be used on a production path.</p><pre><code class="makeup erlang" translate="no"><span class="ss">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="9189084411-1">(</span><span class="ss">email_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9189084411-2">#{</span><span class="s">~&quot;to&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">~&quot;a@b.com&quot;</span><span class="p" data-group-id="9189084411-2">}</span><span class="p" data-group-id="9189084411-1">)</span><span class="p">,</span><span class="w">
-</span><span class="p" data-group-id="9189084411-3">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Total</span><span class="p" data-group-id="9189084411-3">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="9189084411-4">(</span><span class="ss">sum_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9189084411-5">#{</span><span class="s">~&quot;xs&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="9189084411-6">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p" data-group-id="9189084411-6">]</span><span class="p" data-group-id="9189084411-5">}</span><span class="p" data-group-id="9189084411-4">)</span><span class="p">,</span><span class="w">
+in-process unit-test runner — it must never be used on a production path.</p><pre><code class="makeup erlang" translate="no"><span class="ss">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="7768362100-1">(</span><span class="ss">email_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="7768362100-2">#{</span><span class="s">~&quot;to&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">~&quot;a@b.com&quot;</span><span class="p" data-group-id="7768362100-2">}</span><span class="p" data-group-id="7768362100-1">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="7768362100-3">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="n">Total</span><span class="p" data-group-id="7768362100-3">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="7768362100-4">(</span><span class="ss">sum_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="7768362100-5">#{</span><span class="s">~&quot;xs&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="7768362100-6">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p" data-group-id="7768362100-6">]</span><span class="p" data-group-id="7768362100-5">}</span><span class="p" data-group-id="7768362100-4">)</span><span class="p">,</span><span class="w">
 </span><span class="c1">%% predecessors&#39; results, exactly as a real dependent would see them:</span><span class="w">
-</span><span class="p" data-group-id="9189084411-7">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="p">_</span><span class="p" data-group-id="9189084411-7">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="9189084411-8">(</span><span class="ss">rollup_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9189084411-9">#{</span><span class="p" data-group-id="9189084411-9">}</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="9189084411-10">#{</span><span class="ss">deps_results</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="9189084411-11">#{</span><span class="mi">41</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="9189084411-12">#{</span><span class="s">~&quot;n&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">7</span><span class="p" data-group-id="9189084411-12">}</span><span class="p" data-group-id="9189084411-11">}</span><span class="p" data-group-id="9189084411-10">}</span><span class="p" data-group-id="9189084411-8">)</span><span class="p">.</span></code></pre><h2 id="module-testing-modes" class="section-heading"><a href="#module-testing-modes" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Testing modes</span></h2><p>Set a testing mode so <code class="inline">insert/1,2</code> and <code class="inline">insert_all/1,2</code> stop persisting. Both keys
-are required — see <a href="shigoto_config.html#testing_mode/0"><code class="inline">shigoto_config:testing_mode/0</code></a> for why:</p><pre><code class="makeup erlang" translate="no"><span class="nc">application</span><span class="p">:</span><span class="nf">set_env</span><span class="p" data-group-id="1376978644-1">(</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="ss">testing</span><span class="p">,</span><span class="w"> </span><span class="ss">manual</span><span class="p" data-group-id="1376978644-1">)</span><span class="p">,</span><span class="w">
-</span><span class="nc">application</span><span class="p">:</span><span class="nf">set_env</span><span class="p" data-group-id="1376978644-2">(</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="ss">testing_confirm_no_persistence</span><span class="p">,</span><span class="w"> </span><span class="ss">true</span><span class="p" data-group-id="1376978644-2">)</span><span class="p">.</span></code></pre><ul><li><code class="inline">inline</code> runs each inserted job synchronously and keeps no row. A job that
+</span><span class="p" data-group-id="7768362100-7">{</span><span class="ss">ok</span><span class="p">,</span><span class="w"> </span><span class="p">_</span><span class="p" data-group-id="7768362100-7">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto</span><span class="p">:</span><span class="nf">perform_job</span><span class="p" data-group-id="7768362100-8">(</span><span class="ss">rollup_worker</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="7768362100-9">#{</span><span class="p" data-group-id="7768362100-9">}</span><span class="p">,</span><span class="w"> </span><span class="p" data-group-id="7768362100-10">#{</span><span class="ss">deps_results</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="7768362100-11">#{</span><span class="mi">41</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p" data-group-id="7768362100-12">#{</span><span class="s">~&quot;n&quot;</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mi">7</span><span class="p" data-group-id="7768362100-12">}</span><span class="p" data-group-id="7768362100-11">}</span><span class="p" data-group-id="7768362100-10">}</span><span class="p" data-group-id="7768362100-8">)</span><span class="p">.</span></code></pre><h2 id="module-testing-modes" class="section-heading"><a href="#module-testing-modes" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Testing modes</span></h2><p>Set a testing mode so <code class="inline">insert/1,2</code> and <code class="inline">insert_all/1,2</code> stop persisting. Both keys
+are required — see <a href="shigoto_config.html#testing_mode/0"><code class="inline">shigoto_config:testing_mode/0</code></a> for why:</p><pre><code class="makeup erlang" translate="no"><span class="nc">application</span><span class="p">:</span><span class="nf">set_env</span><span class="p" data-group-id="5046741909-1">(</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="ss">testing</span><span class="p">,</span><span class="w"> </span><span class="ss">manual</span><span class="p" data-group-id="5046741909-1">)</span><span class="p">,</span><span class="w">
+</span><span class="nc">application</span><span class="p">:</span><span class="nf">set_env</span><span class="p" data-group-id="5046741909-2">(</span><span class="ss">shigoto</span><span class="p">,</span><span class="w"> </span><span class="ss">testing_confirm_no_persistence</span><span class="p">,</span><span class="w"> </span><span class="ss">true</span><span class="p" data-group-id="5046741909-2">)</span><span class="p">.</span></code></pre><ul><li><code class="inline">inline</code> runs each inserted job synchronously and keeps no row. A job that
 returns <code class="inline">{error, _}</code> raises <code class="inline">{shigoto_inline_job_failed, Worker, Reason}</code> so
 failures surface loudly in the test.</li><li><code class="inline">manual</code> captures inserted jobs in a <strong>process-local</strong> buffer without running
 or persisting them, for the assertions below.</li></ul><p><code class="inline">manual</code> capture is per-process: it sees enqueues made by the calling process,
 not by other processes it spawned. For cross-process expectations, run against a
 real test pool (the assertions fall back to querying the pool when not in
-<code class="inline">manual</code> mode) and clean the table between tests.</p><h2 id="module-assertions" class="section-heading"><a href="#module-assertions" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Assertions</span></h2><pre><code class="makeup erlang" translate="no"><span class="nf">my_code_that_enqueues</span><span class="p" data-group-id="1145152854-1">(</span><span class="p" data-group-id="1145152854-1">)</span><span class="p">,</span><span class="w">
-</span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">assert_enqueued</span><span class="p" data-group-id="1145152854-2">(</span><span class="p" data-group-id="1145152854-3">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">email_worker</span><span class="p" data-group-id="1145152854-3">}</span><span class="p" data-group-id="1145152854-2">)</span><span class="p">,</span><span class="w">
-</span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">refute_enqueued</span><span class="p" data-group-id="1145152854-4">(</span><span class="p" data-group-id="1145152854-5">#{</span><span class="ss">queue</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">~&quot;sms&quot;</span><span class="p" data-group-id="1145152854-5">}</span><span class="p" data-group-id="1145152854-4">)</span><span class="p">,</span><span class="w">
-</span><span class="p" data-group-id="1145152854-6">[</span><span class="p">_</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="p">_</span><span class="p" data-group-id="1145152854-6">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">all_enqueued</span><span class="p" data-group-id="1145152854-7">(</span><span class="p" data-group-id="1145152854-7">)</span><span class="p">.</span></code></pre><p>Filters: <code class="inline">worker</code>, <code class="inline">queue</code>, <code class="inline">args</code> (containment), <code class="inline">tags</code> (containment), <code class="inline">state</code>.
+<code class="inline">manual</code> mode) and clean the table between tests.</p><h2 id="module-assertions" class="section-heading"><a href="#module-assertions" class="hover-link"><i class="ri-link-m" aria-hidden="true"></i></a><span class="text">Assertions</span></h2><pre><code class="makeup erlang" translate="no"><span class="nf">my_code_that_enqueues</span><span class="p" data-group-id="4838676182-1">(</span><span class="p" data-group-id="4838676182-1">)</span><span class="p">,</span><span class="w">
+</span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">assert_enqueued</span><span class="p" data-group-id="4838676182-2">(</span><span class="p" data-group-id="4838676182-3">#{</span><span class="ss">worker</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="ss">email_worker</span><span class="p" data-group-id="4838676182-3">}</span><span class="p" data-group-id="4838676182-2">)</span><span class="p">,</span><span class="w">
+</span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">refute_enqueued</span><span class="p" data-group-id="4838676182-4">(</span><span class="p" data-group-id="4838676182-5">#{</span><span class="ss">queue</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="s">~&quot;sms&quot;</span><span class="p" data-group-id="4838676182-5">}</span><span class="p" data-group-id="4838676182-4">)</span><span class="p">,</span><span class="w">
+</span><span class="p" data-group-id="4838676182-6">[</span><span class="p">_</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="p">_</span><span class="p" data-group-id="4838676182-6">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nc">shigoto_testing</span><span class="p">:</span><span class="nf">all_enqueued</span><span class="p" data-group-id="4838676182-7">(</span><span class="p" data-group-id="4838676182-7">)</span><span class="p">.</span></code></pre><p>Filters: <code class="inline">worker</code>, <code class="inline">queue</code>, <code class="inline">args</code> (containment), <code class="inline">tags</code> (containment), <code class="inline">state</code>.
 Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test setup to clear the <code class="inline">manual</code> buffer.</p>
     </section>
 
@@ -252,7 +252,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">all_enqueued()</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L215" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L215" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -280,7 +280,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">all_enqueued(Filters)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L220" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L220" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -308,7 +308,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">assert_enqueued(Filters)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L225" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L225" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -336,7 +336,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">assert_enqueued(Filters, Opts)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L230" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L230" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -364,7 +364,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">perform_job(Worker, Args)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L82" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L82" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -392,7 +392,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">perform_job(Worker, Args, Opts)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L91" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L91" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -422,7 +422,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">refute_enqueued(Filters)</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L239" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L239" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -450,7 +450,7 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
       <h1 class="signature" translate="no">reset()</h1>
 
 
-        <a href="https://github.com/Taure/shigoto/blob/v1.9.3/src/shigoto_testing.erl#L253" class="icon-action" rel="help nofollow" aria-label="View Source">
+        <a href="https://github.com/Taure/shigoto/blob/v1.9.4/src/shigoto_testing.erl#L253" class="icon-action" rel="help nofollow" aria-label="View Source">
           <i class="ri-code-s-slash-line" aria-hidden="true"></i>
         </a>
 
@@ -477,9 +477,9 @@ Call <a href="#reset/0"><code class="inline">reset/0</code></a> in your test set
         <p>
 
             <span class="line">
-              <a href="https://hex.pm/packages/shigoto/1.9.3">Hex Package</a>
+              <a href="https://hex.pm/packages/shigoto/1.9.4">Hex Package</a>
 
-              <a href="https://preview.hex.pm/preview/shigoto/1.9.3">Hex Preview</a>
+              <a href="https://preview.hex.pm/preview/shigoto/1.9.4">Hex Preview</a>
 
             </span>
 
