@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.9
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.7
     permissions:
       contents: write
       pull-requests: write
@@ -30,6 +30,6 @@ jobs:
   release:
     needs: ci
     if: ${{ github.event_name == 'push' }}
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.0.9
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.7
     permissions:
       contents: write
