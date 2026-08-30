@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+  # paths-ignore means a docs-only stretch produces no CI run at all, so a
+  # dependency moving underneath a pin goes unnoticed. A weekly run catches
+  # rot that no commit would have triggered.
+  schedule:
+    - cron: '43 5 * * 1'
+  workflow_dispatch:
 jobs:
   ci:
     uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.7
