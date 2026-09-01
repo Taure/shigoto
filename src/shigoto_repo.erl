@@ -227,19 +227,25 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
     JobId = maps:get(id, Job),
     ErrorJson = encode_json(build_structured_error(Job, Reason)),
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET\n"
-            "state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,\n"
-            "discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,\n"
-            "scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at\n"
-            "  ELSE now() + make_interval(secs => $3) END,\n"
-            "errors = errors || $2::jsonb\n"
-            "WHERE id = $1\n"
-            "RETURNING *"
-        >>,
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET
+            state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,
+            discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
+            scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at
+              ELSE now() + make_interval(secs => $3) END,
+            errors = errors || $2::jsonb
+          WHERE id = $1 RETURNING *
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.state = 'discarded' AND done.id = ANY(d.depends_on)
+        )
+        SELECT * FROM done
+        """,
     case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds]) of
         #{rows := [#{state := ~"discarded"} = Updated]} ->
-            _ = resolve_dependencies(Pool, JobId),
             _ = maybe_on_discard(Job, Updated),
             _ = maybe_batch_discard(Pool, Updated),
             ok;
@@ -252,10 +258,21 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
 -doc "Mark a job as discarded. Resolves dependencies so dependent jobs aren't stuck.".
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
-    SQL = ~"UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now() WHERE id = $1",
-    _ = resolve_dependencies(Pool, JobId),
+    SQL =
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now()
+          WHERE id = $1 RETURNING id, result
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.id = ANY(d.depends_on)
+        )
+        SELECT id FROM done
+        """,
     case query(Pool, SQL, [JobId]) of
-        #{command := update} -> ok;
+        #{rows := _} -> ok;
         {error, _} = Err -> Err
     end.
 
@@ -263,13 +280,21 @@ discard_job(Pool, JobId) ->
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() "
-            "WHERE id = $1 AND state IN ('available', 'retryable', 'executing')"
-        >>,
-    _ = resolve_dependencies(Pool, JobId),
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now()
+          WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
+          RETURNING id, result
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.id = ANY(d.depends_on)
+        )
+        SELECT id FROM done
+        """,
     case query(Pool, SQL, [JobId]) of
-        #{command := update} -> ok;
+        #{rows := _} -> ok;
         {error, _} = Err -> Err
     end.
 
