@@ -856,7 +856,8 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
     end.
 
 replace_field_value(args, JobParams) ->
-    {~"args", encode_json(maps:get(args, JobParams, #{}))};
+    ArgsJson = encode_json(maps:get(args, JobParams, #{})),
+    {~"args", shigoto_crypto:encrypt(ArgsJson)};
 replace_field_value(priority, JobParams) ->
     {~"priority", maps:get(priority, JobParams, 0)};
 replace_field_value(max_attempts, JobParams) ->
@@ -985,7 +986,7 @@ build_structured_error(Job, Reason) ->
 
 format_structured_reason({Class, Reason, Stacktrace}) when is_list(Stacktrace) ->
     ErrorBin = iolist_to_binary(io_lib:format("~0p:~0p", [Class, Reason])),
-    StackBin = iolist_to_binary(io_lib:format("~0p", [Stacktrace])),
+    StackBin = iolist_to_binary(io_lib:format("~0p", [redact_stacktrace(Stacktrace)])),
     {ErrorBin, StackBin};
 format_structured_reason({Class, Reason}) ->
     ErrorBin = iolist_to_binary(io_lib:format("~0p:~0p", [Class, Reason])),
@@ -993,6 +994,16 @@ format_structured_reason({Class, Reason}) ->
 format_structured_reason(Reason) ->
     ErrorBin = iolist_to_binary(io_lib:format("~0p", [Reason])),
     {ErrorBin, <<>>}.
+
+%% A function_clause frame carries the call's arguments, which for a worker's
+%% perform/1 is the decrypted args map. Keep the arity, drop the values.
+redact_stacktrace(Stacktrace) ->
+    [redact_frame(Frame) || Frame <- Stacktrace].
+
+redact_frame({M, F, Args, Location}) when is_list(Args) ->
+    {M, F, length(Args), Location};
+redact_frame(Frame) ->
+    Frame.
 
 format_worker(W) when is_atom(W) -> atom_to_binary(W, utf8);
 format_worker(W) when is_binary(W) -> W;
