@@ -76,6 +76,12 @@ key configured, an `args` filter on `shigoto:cancel_by/1,2`,
 `{error, args_filter_unsupported_with_encryption}` rather than matching
 nothing. Filter on `worker`, `queue`, `tags` or `state` instead.
 
+`errors` deserves its own warning, because shigoto writes it rather than you.
+A crash inside `perform/1` records the exception and its stacktrace, and a
+reason that embeds a value - `{badmatch, V}`, `{case_clause, Args}` - puts
+that value into the column. Treat `errors` as sensitive, or prune failed rows
+rather than archiving them.
+
 ## Without Encryption
 
 If no encryption key is configured, args are stored as plaintext JSON.
