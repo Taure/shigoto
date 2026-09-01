@@ -27,6 +27,8 @@
     test_add_queue/1,
     test_add_queue_idempotent/1,
     test_remove_queue/1,
+    test_paused_queues_reported/1,
+    test_queue_stats_reports_paused/1,
     %% Health check
     test_health_ok/1,
     %% Job archival
@@ -64,6 +66,8 @@ all() ->
         test_add_queue,
         test_add_queue_idempotent,
         test_remove_queue,
+        test_paused_queues_reported,
+        test_queue_stats_reports_paused,
         test_health_ok,
         test_archive_jobs,
         test_search_by_state,
@@ -299,6 +303,40 @@ test_add_queue(_Config) ->
         {ok, Pid} = shigoto:add_queue(<<"dynamic_test">>, 5),
         ?assert(is_pid(Pid)),
         ok = shigoto:remove_queue(<<"dynamic_test">>)
+    after
+        unlink(SupPid),
+        exit(SupPid, shutdown)
+    end.
+
+test_paused_queues_reported(_Config) ->
+    ?assertEqual([], shigoto:paused_queues()),
+    {ok, SupPid} = shigoto_queue_sup:start_link([]),
+    try
+        {ok, _} = shigoto:add_queue(~"pause_probe", 1),
+        ?assertEqual([], shigoto:paused_queues()),
+        ok = shigoto:pause_queue(~"pause_probe"),
+        ?assertEqual([~"pause_probe"], shigoto:paused_queues()),
+        ok = shigoto:resume_queue(~"pause_probe"),
+        ?assertEqual([], shigoto:paused_queues()),
+        ok = shigoto:remove_queue(~"pause_probe")
+    after
+        unlink(SupPid),
+        exit(SupPid, shutdown)
+    end.
+
+test_queue_stats_reports_paused(_Config) ->
+    {ok, _} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => ~"stats_paused"}, #{}
+    ),
+    {ok, SupPid} = shigoto_queue_sup:start_link([]),
+    try
+        {ok, _} = shigoto:add_queue(~"stats_paused", 1),
+        {ok, Active} = shigoto_dashboard:queue_stats(),
+        ?assertEqual(false, is_paused_of(~"stats_paused", Active)),
+        ok = shigoto:pause_queue(~"stats_paused"),
+        {ok, Paused} = shigoto_dashboard:queue_stats(),
+        ?assertEqual(true, is_paused_of(~"stats_paused", Paused)),
+        ok = shigoto:remove_queue(~"stats_paused")
     after
         unlink(SupPid),
         exit(SupPid, shutdown)
@@ -555,6 +593,10 @@ test_debounce_resets_scheduled_at(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+is_paused_of(Queue, Stats) ->
+    [Row] = [S || #{queue := Q} = S <- Stats, Q =:= Queue],
+    maps:get(is_paused, Row).
 
 cleanup() ->
     shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),

@@ -6,7 +6,7 @@ weights, and pause/resume.
 """.
 -behaviour(gen_server).
 
--export([start_link/2, pause/1, resume/1]).
+-export([start_link/2, pause/1, resume/1, is_paused/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
@@ -59,11 +59,18 @@ pause(Pid) ->
 resume(Pid) ->
     gen_server:call(Pid, resume).
 
+-doc "Whether this queue process is currently paused.".
+-spec is_paused(pid()) -> boolean().
+is_paused(Pid) ->
+    gen_server:call(Pid, is_paused).
+
 -doc false.
 handle_call(pause, _From, State) ->
     {reply, ok, State#state{paused = true}};
 handle_call(resume, _From, State) ->
     {reply, ok, State#state{paused = false}};
+handle_call(is_paused, _From, #state{paused = Paused} = State) ->
+    {reply, Paused, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
