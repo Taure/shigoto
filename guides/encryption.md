@@ -98,6 +98,12 @@ Everything else on the row - `queue`, `worker`, `tags`, `errors`, `result`,
 sensitive values in a tag, a partition key, or a returned result and expect
 encryption to cover them.
 
+`errors` deserves its own warning, because shigoto writes it rather than you.
+A crash inside `perform/1` records the exception and its stacktrace, and a
+reason that embeds a value - `{badmatch, V}`, `{case_clause, Args}` - puts
+that value into the column. Treat `errors` as sensitive, or prune failed rows
+rather than archiving them.
+
 ## Without Encryption
 
 If no encryption key is configured, args are stored as plaintext JSON.
