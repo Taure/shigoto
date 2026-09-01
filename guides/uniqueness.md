@@ -24,9 +24,11 @@ Any keys you omit fall back to `?DEFAULT_UNIQUE` in `shigoto_repo`:
 ```
 
 - **keys** - which fields form the identity of the job. Supported: `worker`,
-  `args`, `queue`. The key is built by `build_unique_key/4`: the selected fields
-  are sorted, `args` is JSON-encoded, and the parts are joined with `:` into the
-  job's `unique_key` column.
+  `args`, `queue`. `unique_identity/4` sorts the selected fields, JSON-encodes
+  `args`, and joins the parts with `:`. That identity is then digested by
+  `shigoto_crypto:unique_digest/1` and only the digest is stored in the job's
+  `unique_key` column, so args never reach the table in the clear - see
+  [Encryption](encryption.md).
 - **states** - a new insert only conflicts with an existing job whose `state` is
   in this list. The default covers in-flight work (`available`, `executing`,
   `retryable`) but **not** terminal states, so a `completed`, `discarded`, or
@@ -64,14 +66,20 @@ of `{ok, Job}`, so callers can tell a deduplicated enqueue from a fresh one.
 and no `unique/0` callback) it goes straight to `do_insert/4` - a plain insert
 with no deduplication. Otherwise it calls `insert_unique/4`, which:
 
-1. Builds the `unique_key` with `build_unique_key/4`.
-2. Derives a lock key with `erlang:phash2(UniqueKey)`.
-3. Opens a `pgo:transaction/2` and takes a **Postgres advisory transaction
+1. Builds the identity with `unique_identity/4` and digests it into the
+   `unique_key`.
+2. Derives a lock key with `erlang:phash2/1` over the **identity**, never over
+   the digest. The digest is key-dependent, so deriving the lock from it would
+   have nodes on different keys take different advisory-lock slots mid-rotation
+   and lose the serialisation entirely.
+3. Opens a `shigoto_db:transaction/2` and takes a **Postgres advisory transaction
    lock**: `SELECT pg_advisory_xact_lock($1)`. This serialises concurrent
    inserts that hash to the same key; the lock is released automatically when
    the transaction commits or rolls back.
 4. Calls `find_existing_job/3` to look for a matching job within the configured
-   `states` (and `period`, if set).
+   `states` (and `period`, if set). It matches `unique_key = ANY(...)` over one
+   candidate digest per configured encryption key, so a job digested under a
+   retired key still matches while that key remains in `encryption_keys`.
 5. If one exists, `maybe_replace/4` applies the `replace`/`debounce` policy and
    returns `{ok, {conflict, Job}}`. If none exists, it does the real
    `do_insert/4`.

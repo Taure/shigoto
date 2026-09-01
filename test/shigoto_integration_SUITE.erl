@@ -27,6 +27,10 @@
     test_unique_opts_override/1,
     test_unique_different_queues_allowed/1,
     test_unique_key_stored/1,
+    test_unique_key_is_digested/1,
+    test_unique_key_survives_key_rotation/1,
+    test_unique_key_survives_enabling_encryption/1,
+    test_unique_key_unkeyed_digest_rejected_by_default/1,
     test_unique_concurrent_insert/1,
     test_non_unique_has_null_key/1,
     test_worker_defaults_applied/1,
@@ -83,6 +87,10 @@ all() ->
         test_unique_opts_override,
         test_unique_different_queues_allowed,
         test_unique_key_stored,
+        test_unique_key_is_digested,
+        test_unique_key_survives_key_rotation,
+        test_unique_key_survives_enabling_encryption,
+        test_unique_key_unkeyed_digest_rejected_by_default,
         test_unique_concurrent_insert,
         test_non_unique_has_null_key,
         test_worker_defaults_applied,
@@ -332,6 +340,47 @@ test_unique_key_stored(_Config) ->
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
     {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(null, maps:get(unique_key, Job)).
+
+test_unique_key_is_digested(_Config) ->
+    Unique = #{keys => [worker, args]},
+    Secret = ~"191212121212",
+    Params = #{worker => shigoto_test_worker, args => #{~"ssn" => Secret}},
+    {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    UniqueKey = maps:get(unique_key, Job),
+    ?assertEqual(nomatch, binary:match(UniqueKey, Secret)),
+    ?assertEqual(nomatch, binary:match(UniqueKey, ~"shigoto_test_worker")),
+    ?assertEqual(64, byte_size(UniqueKey)),
+    %% The digest still deduplicates, which is the only thing it is read for.
+    {ok, {conflict, Existing}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    ?assertEqual(maps:get(id, Job), maps:get(id, Existing)).
+
+test_unique_key_survives_key_rotation(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{~"rotate" => 1}},
+    K1 = crypto:strong_rand_bytes(32),
+    K2 = crypto:strong_rand_bytes(32),
+    Job = with_keys([K1], fun() -> insert_unique_job(Params) end),
+    %% Rotated to K2, K1 retired but still configured: the job stays matchable.
+    Conflict = with_keys([K2, K1], fun() -> insert_unique_raw(Params) end),
+    ?assertEqual(maps:get(id, Job), conflict_id(Conflict)).
+
+test_unique_key_survives_enabling_encryption(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{~"adopt" => 1}},
+    Job = insert_unique_job(Params),
+    %% Encryption switched on after the job was queued, for one drain cycle.
+    Conflict = with_unkeyed_accepted(fun() ->
+        with_keys([crypto:strong_rand_bytes(32)], fun() -> insert_unique_raw(Params) end)
+    end),
+    ?assertEqual(maps:get(id, Job), conflict_id(Conflict)).
+
+test_unique_key_unkeyed_digest_rejected_by_default(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{~"forge" => 1}},
+    Job = insert_unique_job(Params),
+    %% Without the flag an unkeyed digest must NOT match, so a planted row
+    %% cannot suppress a keyed job.
+    Result = with_keys([crypto:strong_rand_bytes(32)], fun() -> insert_unique_raw(Params) end),
+    ?assertMatch({ok, #{id := _}}, Result),
+    {ok, Fresh} = Result,
+    ?assertNotEqual(maps:get(id, Job), maps:get(id, Fresh)).
 
 test_unique_concurrent_insert(_Config) ->
     Unique = #{keys => [worker, args]},
@@ -723,19 +772,25 @@ test_global_concurrency_admits_two_of_three(_Config) ->
 %%----------------------------------------------------------------------
 
 test_stager_surfaces_due_queue(_Config) ->
-    {ok, _} = shigoto_repo:insert_job(
+    {ok, Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
             args => #{},
             queue => ~"soon",
-            scheduled_at => seconds_from_now(1)
+            scheduled_at => seconds_from_now(3600)
         },
         #{}
     ),
     {ok, Before} = shigoto_stager:due_queues(?POOL),
     ?assertNot(lists:member(~"soon", Before)),
-    timer:sleep(1200),
+    %% Become due against the database clock rather than sleeping out a margin
+    %% the CI host is free to overshoot.
+    #{command := update} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_jobs SET scheduled_at = now() - interval '1 second' WHERE id = $1",
+        [maps:get(id, Job)]
+    ),
     {ok, After} = shigoto_stager:due_queues(?POOL),
     ?assert(lists:member(~"soon", After)).
 
@@ -901,6 +956,36 @@ test_deps_results_fan_in(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+conflict_id({ok, {conflict, Existing}}) ->
+    maps:get(id, Existing).
+
+with_unkeyed_accepted(Fun) ->
+    application:set_env(shigoto, accept_unkeyed_unique_digests, true),
+    try
+        Fun()
+    after
+        application:unset_env(shigoto, accept_unkeyed_unique_digests)
+    end.
+
+insert_unique_raw(Params) ->
+    shigoto_repo:insert_job(?POOL, Params, #{unique => #{keys => [worker, args]}}).
+
+insert_unique_job(Params) ->
+    {ok, Job} = insert_unique_raw(Params),
+    Job.
+
+with_keys(Keys, Fun) ->
+    Saved = application:get_env(shigoto, encryption_keys),
+    application:set_env(shigoto, encryption_keys, Keys),
+    try
+        Fun()
+    after
+        case Saved of
+            undefined -> application:unset_env(shigoto, encryption_keys);
+            {ok, Old} -> application:set_env(shigoto, encryption_keys, Old)
+        end
+    end.
 
 seconds_from_now(Seconds) ->
     Secs = calendar:datetime_to_gregorian_seconds(calendar:universal_time()),

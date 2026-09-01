@@ -227,19 +227,25 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
     JobId = maps:get(id, Job),
     ErrorJson = encode_json(build_structured_error(Job, Reason)),
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET\n"
-            "state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,\n"
-            "discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,\n"
-            "scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at\n"
-            "  ELSE now() + make_interval(secs => $3) END,\n"
-            "errors = errors || $2::jsonb\n"
-            "WHERE id = $1\n"
-            "RETURNING *"
-        >>,
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET
+            state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,
+            discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
+            scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at
+              ELSE now() + make_interval(secs => $3) END,
+            errors = errors || $2::jsonb
+          WHERE id = $1 RETURNING *
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.state = 'discarded' AND done.id = ANY(d.depends_on)
+        )
+        SELECT * FROM done
+        """,
     case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds]) of
         #{rows := [#{state := ~"discarded"} = Updated]} ->
-            _ = resolve_dependencies(Pool, JobId),
             _ = maybe_on_discard(Job, Updated),
             _ = maybe_batch_discard(Pool, Updated),
             ok;
@@ -252,10 +258,21 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
 -doc "Mark a job as discarded. Resolves dependencies so dependent jobs aren't stuck.".
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
-    SQL = ~"UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now() WHERE id = $1",
-    _ = resolve_dependencies(Pool, JobId),
+    SQL =
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now()
+          WHERE id = $1 RETURNING id, result
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.id = ANY(d.depends_on)
+        )
+        SELECT id FROM done
+        """,
     case query(Pool, SQL, [JobId]) of
-        #{command := update} -> ok;
+        #{rows := _} -> ok;
         {error, _} = Err -> Err
     end.
 
@@ -263,13 +280,21 @@ discard_job(Pool, JobId) ->
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() "
-            "WHERE id = $1 AND state IN ('available', 'retryable', 'executing')"
-        >>,
-    _ = resolve_dependencies(Pool, JobId),
+        ~"""
+        WITH done AS (
+          UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now()
+          WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
+          RETURNING id, result
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = array_remove(d.depends_on, done.id),
+              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
+          FROM done WHERE done.id = ANY(d.depends_on)
+        )
+        SELECT id FROM done
+        """,
     case query(Pool, SQL, [JobId]) of
-        #{command := update} -> ok;
+        #{rows := _} -> ok;
         {error, _} = Err -> Err
     end.
 
@@ -634,11 +659,13 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-    UniqueKey = build_unique_key(UniqueOpts, Worker, Args, Queue),
-    LockKey = erlang:phash2(UniqueKey),
+    Identity = unique_identity(UniqueOpts, Worker, Args, Queue),
+    [UniqueKey | _] = Candidates = shigoto_crypto:unique_digests(Identity),
+    %% Key-independent so every node locks the same slot mid key-rotation.
+    LockKey = erlang:phash2(crypto:hash(sha256, Identity)),
     shigoto_db:transaction(Pool, fun() ->
         _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-        case find_existing_job(Pool, UniqueOpts, UniqueKey) of
+        case find_existing_job(Pool, UniqueOpts, Candidates) of
             {ok, Existing} ->
                 maybe_replace(Pool, Existing, JobParams, UniqueOpts);
             not_found ->
@@ -646,7 +673,7 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
         end
     end).
 
-build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
+unique_identity(#{keys := Keys}, Worker, Args, Queue) ->
     Parts = lists:map(
         fun
             (worker) -> Worker;
@@ -657,27 +684,27 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
     ),
     iolist_to_binary(lists:join(~":", Parts)).
 
-find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
+find_existing_job(Pool, #{states := States, period := Period}, Candidates) ->
     StatesClause = states_in_clause(States),
     {SQL, Params} =
         case Period of
             infinity ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey]
+                    [Candidates]
                 };
             Secs ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") AND inserted_at >= now() - make_interval(secs => $2) ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey, Secs]
+                    [Candidates, Secs]
                 }
         end,
     case query(Pool, SQL, Params) of

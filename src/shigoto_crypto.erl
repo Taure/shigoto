@@ -28,7 +28,7 @@ Old jobs are re-encrypted with the current key when claimed and re-inserted
 it have been processed.
 """.
 
--export([encrypt/1, decrypt/1, is_enabled/0]).
+-export([encrypt/1, decrypt/1, is_enabled/0, unique_digest/1, unique_digests/1]).
 
 -define(AAD, <<"shigoto">>).
 
@@ -58,6 +58,48 @@ decrypt(MaybeEncrypted) ->
 -spec is_enabled() -> boolean().
 is_enabled() ->
     current_key() =/= undefined.
+
+-doc """
+Digest a uniqueness identity for storage in `shigoto_jobs.unique_key`.
+
+The identity is built from the job's worker, args and queue, so storing it
+verbatim would put args in the clear next to the encrypted `args` column.
+Only equality matters to deduplication, so a digest is enough. With a key
+configured the digest is HMAC-SHA-256 under the current key, which stops a
+reader of the table from confirming a guessed argument offline.
+""".
+-spec unique_digest(binary()) -> binary().
+unique_digest(Identity) ->
+    hd(unique_digests(Identity)).
+
+-doc """
+Every digest a stored `unique_key` could carry for this identity, current
+key first. Under key rotation an in-flight job was keyed with an older key,
+so a lookup has to match any of them.
+
+The unkeyed digest is a candidate only when no key is configured, or when
+`accept_unkeyed_unique_digests` is set. It is computable without the key, so
+accepting it lets anyone who can write to `shigoto_jobs` plant a row that
+suppresses a unique job - use it for one drain cycle when adopting
+encryption, not as a standing setting.
+
+Neither switch covers *disabling* encryption: the key needed to recompute
+those digests is gone. Leave a retired key in `encryption_keys` until the
+jobs digested under it have drained, exactly as decryption requires.
+""".
+-spec unique_digests(binary()) -> [binary(), ...].
+unique_digests(Identity) ->
+    Unkeyed = hex(crypto:hash(sha256, Identity)),
+    case all_keys() of
+        [] ->
+            [Unkeyed];
+        Keys ->
+            Keyed = [hex(crypto:mac(hmac, sha256, Key, Identity)) || Key <- Keys],
+            case shigoto_config:accept_unkeyed_unique_digests() of
+                true -> Keyed ++ [Unkeyed];
+                false -> Keyed
+            end
+    end.
 
 %%----------------------------------------------------------------------
 %% Internal
@@ -103,6 +145,9 @@ do_decrypt(Key, <<"enc:", Encoded/binary>>) ->
     crypto:crypto_one_time_aead(
         aes_256_gcm, Key, IV, Ciphertext, ?AAD, Tag, false
     ).
+
+hex(Bin) ->
+    binary:encode_hex(Bin, lowercase).
 
 unwrap_json_string(<<"\"", Rest/binary>>) ->
     Size = byte_size(Rest) - 1,

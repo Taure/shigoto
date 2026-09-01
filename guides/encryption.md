@@ -59,7 +59,50 @@ key on the next write.
 ## What's Encrypted
 
 - Job `args` — the arguments map passed to workers
-- The `meta` field is **not** encrypted (it's used for internal tracking)
+- Job `meta` - encrypted and decrypted on the same path as `args`
+
+The `unique_key` column is a digest, never the identity it was built from,
+so a job with `unique => #{keys => [worker, args]}` does not leak its args
+into a neighbouring column. With a key configured the digest is HMAC-SHA-256
+under the current key, so a low-entropy argument cannot be confirmed by
+guessing it and hashing offline.
+
+Without a key it is a plain SHA-256, which is **not** a confidentiality
+control: `queue` and `worker` sit in the clear in their own columns, so an
+attacker holding the table only has to guess the args, which are usually a
+user id or an email. That is no worse than the unencrypted `args` column
+beside it, but do not read it as protection.
+
+### Enabling encryption on a running system
+
+New jobs are digested under the key; jobs already queued were digested
+unkeyed, so they stop matching and can be enqueued a second time. To avoid
+that, set `accept_unkeyed_unique_digests` for one drain cycle:
+
+```erlang
+{shigoto, [{accept_unkeyed_unique_digests, true}]}
+```
+
+Lookups then also match the unkeyed digest. Turn it back off once the older
+jobs have drained: the unkeyed digest is computable without the key, so while
+it is accepted anyone able to write to `shigoto_jobs` can plant a row that
+suppresses a unique job. Shigoto logs a warning at boot while it is on.
+
+Disabling encryption cannot be smoothed over the same way - the key needed to
+recompute those digests is gone. Leave a retired key in `encryption_keys`
+until the jobs digested under it have drained, exactly as decryption already
+requires.
+
+Everything else on the row - `queue`, `worker`, `tags`, `errors`, `result`,
+`deps_results`, and the timestamps - is stored in the clear. Do not put
+sensitive values in a tag, a partition key, or a returned result and expect
+encryption to cover them.
+
+`errors` deserves its own warning, because shigoto writes it rather than you.
+A crash inside `perform/1` records the exception and its stacktrace, and a
+reason that embeds a value - `{badmatch, V}`, `{case_clause, Args}` - puts
+that value into the column. Treat `errors` as sensitive, or prune failed rows
+rather than archiving them.
 
 ## Without Encryption
 

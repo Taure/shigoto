@@ -31,6 +31,8 @@
     test_depends_on_resolved_on_complete/1,
     test_depends_on_resolved_on_discard/1,
     test_depends_on_resolved_on_cancel/1,
+    test_depends_on_resolved_when_attempts_exhausted/1,
+    test_depends_on_held_while_parent_retryable/1,
     test_depends_on_chain/1,
     test_on_discard_callback/1
 ]).
@@ -59,6 +61,8 @@ all() ->
         test_depends_on_resolved_on_complete,
         test_depends_on_resolved_on_discard,
         test_depends_on_resolved_on_cancel,
+        test_depends_on_resolved_when_attempts_exhausted,
+        test_depends_on_held_while_parent_retryable,
         test_depends_on_chain,
         test_on_discard_callback
     ].
@@ -489,6 +493,34 @@ test_depends_on_resolved_on_cancel(_Config) ->
     {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed)),
     ?assertEqual(ChildId, maps:get(id, hd(Claimed))).
+
+test_depends_on_resolved_when_attempts_exhausted(_Config) ->
+    ChildId = insert_parent_and_child(1),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 1),
+    {ok, Next} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([ChildId], [maps:get(id, J) || J <- Next]).
+
+test_depends_on_held_while_parent_retryable(_Config) ->
+    _ChildId = insert_parent_and_child(3),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 3600),
+    %% The parent is retryable, not finished, so the child stays blocked.
+    ?assertEqual({ok, []}, shigoto_repo:claim_jobs(?POOL, ~"default", 10)).
+
+insert_parent_and_child(MaxAttempts) ->
+    {ok, Parent} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_test_worker, args => #{}, max_attempts => MaxAttempts},
+        #{}
+    ),
+    ParentId = maps:get(id, Parent),
+    {ok, Child} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_test_worker, args => #{}, depends_on => [ParentId]},
+        #{}
+    ),
+    maps:get(id, Child).
 
 test_depends_on_chain(_Config) ->
     %% A -> B -> C chain

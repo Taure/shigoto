@@ -90,6 +90,7 @@ end).
     drain_queue/2,
     pause_queue/1,
     resume_queue/1,
+    paused_queues/0,
     add_queue/2,
     remove_queue/1,
     new_batch/1,
@@ -281,6 +282,26 @@ resume_queue(Queue) ->
         _ -> ok
     end,
     Result.
+
+-doc """
+The queues paused on this node.
+
+Pause is per-node process state, so this reports what the local queue
+processes are doing, not a cluster-wide view.
+""".
+-spec paused_queues() -> [binary()].
+paused_queues() ->
+    case whereis(shigoto_queue_sup) of
+        undefined ->
+            [];
+        Sup ->
+            [
+                Queue
+             || {{shigoto_queue, Queue}, Pid, worker, _} <- supervisor:which_children(Sup),
+                is_pid(Pid),
+                shigoto_queue:is_paused(Pid)
+            ]
+    end.
 
 -doc "Create a new batch for grouping jobs.".
 -spec new_batch(map()) -> {ok, map()} | {error, term()}.

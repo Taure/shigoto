@@ -23,6 +23,7 @@ Configuration access for Shigoto. Reads from application env.
     queue_weights/0,
     fair_queues/0,
     encryption_keys/0,
+    accept_unkeyed_unique_digests/0,
     fanout_queues/0
 ]).
 
@@ -163,6 +164,19 @@ fair_queues() ->
 -spec encryption_keys() -> [binary()].
 encryption_keys() ->
     application:get_env(shigoto, encryption_keys, []).
+
+-doc """
+Whether a `unique_key` lookup also matches the unkeyed SHA-256 digest while
+encryption is configured. Default: `false`.
+
+Turn this on for one drain cycle when enabling encryption on a system that
+already has unique jobs in flight, then turn it back off. While it is on the
+digest is forgeable by anyone who can write to `shigoto_jobs`, since the
+unkeyed digest is computable without the key.
+""".
+-spec accept_unkeyed_unique_digests() -> boolean().
+accept_unkeyed_unique_digests() ->
+    application:get_env(shigoto, accept_unkeyed_unique_digests, false).
 
 -doc """
 Fanout queues — every node processes every job. Format:
