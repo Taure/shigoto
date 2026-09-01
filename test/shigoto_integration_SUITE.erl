@@ -27,6 +27,8 @@
     test_unique_opts_override/1,
     test_unique_different_queues_allowed/1,
     test_unique_key_stored/1,
+    test_replace_args_stay_encrypted/1,
+    test_error_stacktrace_redacts_args/1,
     test_unique_concurrent_insert/1,
     test_non_unique_has_null_key/1,
     test_worker_defaults_applied/1,
@@ -83,6 +85,8 @@ all() ->
         test_unique_opts_override,
         test_unique_different_queues_allowed,
         test_unique_key_stored,
+        test_replace_args_stay_encrypted,
+        test_error_stacktrace_redacts_args,
         test_unique_concurrent_insert,
         test_non_unique_has_null_key,
         test_worker_defaults_applied,
@@ -332,6 +336,42 @@ test_unique_key_stored(_Config) ->
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
     {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(null, maps:get(unique_key, Job)).
+
+test_replace_args_stay_encrypted(_Config) ->
+    Secret = ~"191212121212",
+    Unique = #{keys => [worker], replace => [args]},
+    Params = #{worker => shigoto_test_worker, args => #{~"ssn" => Secret}},
+    with_encryption(fun() ->
+        {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        ?assertMatch(<<"\"enc:", _/binary>>, stored_args(maps:get(id, Job))),
+        %% The conflict path rewrites args; it must not write them in the clear.
+        {ok, {conflict, _}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        Stored = stored_args(maps:get(id, Job)),
+        ?assertEqual(nomatch, binary:match(Stored, Secret)),
+        ?assertMatch(<<"\"enc:", _/binary>>, Stored)
+    end).
+
+test_error_stacktrace_redacts_args(_Config) ->
+    Secret = ~"191212121212",
+    Args = #{~"ssn" => Secret},
+    with_encryption(fun() ->
+        {ok, Job} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => Args}, #{}
+        ),
+        {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+        %% The {Class, Reason, Stack} shape the executor hands to fail_job when a
+        %% worker's perform/1 has no matching clause: frame 1 holds the args.
+        Fun = fun(#{~"absent" := _}) -> ok end,
+        Err =
+            try
+                Fun(Args)
+            catch
+                C:R:St -> {C, R, St}
+            end,
+        ok = shigoto_repo:fail_job(?POOL, Claimed, Err, 60),
+        Errors = stored_errors(maps:get(id, Job)),
+        ?assertEqual(nomatch, binary:match(Errors, Secret))
+    end).
 
 test_unique_concurrent_insert(_Config) ->
     Unique = #{keys => [worker, args]},
@@ -901,6 +941,30 @@ test_deps_results_fan_in(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+stored_args(JobId) ->
+    #{rows := [#{args := Args}]} = shigoto_db:query(
+        ?POOL, ~"SELECT args FROM shigoto_jobs WHERE id = $1", [JobId]
+    ),
+    iolist_to_binary(Args).
+
+stored_errors(JobId) ->
+    #{rows := [#{errors := Errors}]} = shigoto_db:query(
+        ?POOL, ~"SELECT errors::text FROM shigoto_jobs WHERE id = $1", [JobId]
+    ),
+    iolist_to_binary(Errors).
+
+with_encryption(Fun) ->
+    Saved = application:get_env(shigoto, encryption_key),
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        Fun()
+    after
+        case Saved of
+            undefined -> application:unset_env(shigoto, encryption_key);
+            {ok, Old} -> application:set_env(shigoto, encryption_key, Old)
+        end
+    end.
 
 seconds_from_now(Seconds) ->
     Secs = calendar:datetime_to_gregorian_seconds(calendar:universal_time()),
