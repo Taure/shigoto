@@ -59,7 +59,18 @@ key on the next write.
 ## What's Encrypted
 
 - Job `args` — the arguments map passed to workers
-- The `meta` field is **not** encrypted (it's used for internal tracking)
+- Job `meta` - encrypted and decrypted on the same path as `args`
+
+The `unique_key` column is a digest, never the identity it was built from,
+so a job with `unique => #{keys => [worker, args]}` does not leak its args
+into a neighbouring column. With a key configured the digest is HMAC-SHA-256
+under the current key, so a low-entropy argument cannot be confirmed by
+guessing it and hashing offline; without one it is a plain SHA-256.
+
+Everything else on the row - `queue`, `worker`, `tags`, `errors`, `result`,
+`deps_results`, and the timestamps - is stored in the clear. Do not put
+sensitive values in a tag, a partition key, or a returned result and expect
+encryption to cover them.
 
 ## Without Encryption
 

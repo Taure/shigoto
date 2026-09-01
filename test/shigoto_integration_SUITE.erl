@@ -27,6 +27,7 @@
     test_unique_opts_override/1,
     test_unique_different_queues_allowed/1,
     test_unique_key_stored/1,
+    test_unique_key_is_digested/1,
     test_unique_concurrent_insert/1,
     test_non_unique_has_null_key/1,
     test_worker_defaults_applied/1,
@@ -83,6 +84,7 @@ all() ->
         test_unique_opts_override,
         test_unique_different_queues_allowed,
         test_unique_key_stored,
+        test_unique_key_is_digested,
         test_unique_concurrent_insert,
         test_non_unique_has_null_key,
         test_worker_defaults_applied,
@@ -332,6 +334,19 @@ test_unique_key_stored(_Config) ->
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
     {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(null, maps:get(unique_key, Job)).
+
+test_unique_key_is_digested(_Config) ->
+    Unique = #{keys => [worker, args]},
+    Secret = ~"191212121212",
+    Params = #{worker => shigoto_test_worker, args => #{~"ssn" => Secret}},
+    {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    UniqueKey = maps:get(unique_key, Job),
+    ?assertEqual(nomatch, binary:match(UniqueKey, Secret)),
+    ?assertEqual(nomatch, binary:match(UniqueKey, ~"shigoto_test_worker")),
+    ?assertEqual(64, byte_size(UniqueKey)),
+    %% The digest still deduplicates, which is the only thing it is read for.
+    {ok, {conflict, Existing}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    ?assertEqual(maps:get(id, Job), maps:get(id, Existing)).
 
 test_unique_concurrent_insert(_Config) ->
     Unique = #{keys => [worker, args]},

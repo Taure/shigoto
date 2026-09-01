@@ -634,11 +634,12 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-    UniqueKey = build_unique_key(UniqueOpts, Worker, Args, Queue),
+    Identity = unique_identity(UniqueOpts, Worker, Args, Queue),
+    [UniqueKey | _] = Candidates = shigoto_crypto:unique_digests(Identity),
     LockKey = erlang:phash2(UniqueKey),
     shigoto_db:transaction(Pool, fun() ->
         _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-        case find_existing_job(Pool, UniqueOpts, UniqueKey) of
+        case find_existing_job(Pool, UniqueOpts, Candidates) of
             {ok, Existing} ->
                 maybe_replace(Pool, Existing, JobParams, UniqueOpts);
             not_found ->
@@ -646,7 +647,7 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
         end
     end).
 
-build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
+unique_identity(#{keys := Keys}, Worker, Args, Queue) ->
     Parts = lists:map(
         fun
             (worker) -> Worker;
@@ -657,27 +658,27 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
     ),
     iolist_to_binary(lists:join(~":", Parts)).
 
-find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
+find_existing_job(Pool, #{states := States, period := Period}, Candidates) ->
     StatesClause = states_in_clause(States),
     {SQL, Params} =
         case Period of
             infinity ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey]
+                    [Candidates]
                 };
             Secs ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") AND inserted_at >= now() - make_interval(secs => $2) ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey, Secs]
+                    [Candidates, Secs]
                 }
         end,
     case query(Pool, SQL, Params) of
