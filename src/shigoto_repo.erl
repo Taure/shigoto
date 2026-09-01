@@ -661,7 +661,8 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
     Identity = unique_identity(UniqueOpts, Worker, Args, Queue),
     [UniqueKey | _] = Candidates = shigoto_crypto:unique_digests(Identity),
-    LockKey = erlang:phash2(UniqueKey),
+    %% Key-independent so every node locks the same slot mid key-rotation.
+    LockKey = erlang:phash2(crypto:hash(sha256, Identity)),
     shigoto_db:transaction(Pool, fun() ->
         _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
         case find_existing_job(Pool, UniqueOpts, Candidates) of

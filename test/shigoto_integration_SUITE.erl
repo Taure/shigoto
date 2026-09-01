@@ -28,6 +28,8 @@
     test_unique_different_queues_allowed/1,
     test_unique_key_stored/1,
     test_unique_key_is_digested/1,
+    test_unique_key_survives_key_rotation/1,
+    test_unique_key_survives_enabling_encryption/1,
     test_unique_concurrent_insert/1,
     test_non_unique_has_null_key/1,
     test_worker_defaults_applied/1,
@@ -85,6 +87,8 @@ all() ->
         test_unique_different_queues_allowed,
         test_unique_key_stored,
         test_unique_key_is_digested,
+        test_unique_key_survives_key_rotation,
+        test_unique_key_survives_enabling_encryption,
         test_unique_concurrent_insert,
         test_non_unique_has_null_key,
         test_worker_defaults_applied,
@@ -347,6 +351,25 @@ test_unique_key_is_digested(_Config) ->
     %% The digest still deduplicates, which is the only thing it is read for.
     {ok, {conflict, Existing}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertEqual(maps:get(id, Job), maps:get(id, Existing)).
+
+test_unique_key_survives_key_rotation(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{~"rotate" => 1}},
+    K1 = crypto:strong_rand_bytes(32),
+    K2 = crypto:strong_rand_bytes(32),
+    Job = with_keys([K1], fun() -> insert_unique_job(Params) end),
+    %% Rotated to K2, K1 retired but still configured: the job stays matchable.
+    with_keys([K2, K1], fun() ->
+        ?assertMatch({ok, {conflict, #{id := _}}}, insert_unique_raw(Params))
+    end),
+    ?assertMatch(#{id := _}, Job).
+
+test_unique_key_survives_enabling_encryption(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{~"adopt" => 1}},
+    _ = insert_unique_job(Params),
+    %% Encryption switched on after the job was already queued.
+    with_keys([crypto:strong_rand_bytes(32)], fun() ->
+        ?assertMatch({ok, {conflict, #{id := _}}}, insert_unique_raw(Params))
+    end).
 
 test_unique_concurrent_insert(_Config) ->
     Unique = #{keys => [worker, args]},
@@ -922,6 +945,25 @@ test_deps_results_fan_in(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+insert_unique_raw(Params) ->
+    shigoto_repo:insert_job(?POOL, Params, #{unique => #{keys => [worker, args]}}).
+
+insert_unique_job(Params) ->
+    {ok, Job} = insert_unique_raw(Params),
+    Job.
+
+with_keys(Keys, Fun) ->
+    Saved = application:get_env(shigoto, encryption_keys),
+    application:set_env(shigoto, encryption_keys, Keys),
+    try
+        Fun()
+    after
+        case Saved of
+            undefined -> application:unset_env(shigoto, encryption_keys);
+            {ok, Old} -> application:set_env(shigoto, encryption_keys, Old)
+        end
+    end.
 
 seconds_from_now(Seconds) ->
     Secs = calendar:datetime_to_gregorian_seconds(calendar:universal_time()),

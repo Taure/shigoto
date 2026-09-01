@@ -75,13 +75,21 @@ unique_digest(Identity) ->
 -doc """
 Every digest a stored `unique_key` could carry for this identity, current
 key first. Under key rotation an in-flight job was keyed with an older key,
-so a lookup has to match any of them.
+so a lookup has to match any of them. The unkeyed digest is always a
+candidate, so enabling encryption on a running system keeps matching the
+jobs already in flight.
+
+Disabling encryption cannot be covered the same way: the key needed to
+recompute those digests is gone. Leave a retired key in `encryption_keys`
+until the jobs digested under it have drained, exactly as decryption
+requires.
 """.
 -spec unique_digests(binary()) -> [binary(), ...].
 unique_digests(Identity) ->
+    Unkeyed = hex(crypto:hash(sha256, Identity)),
     case all_keys() of
-        [] -> [hex(crypto:hash(sha256, Identity))];
-        Keys -> [hex(crypto:mac(hmac, sha256, Key, Identity)) || Key <- Keys]
+        [] -> [Unkeyed];
+        Keys -> [hex(crypto:mac(hmac, sha256, Key, Identity)) || Key <- Keys] ++ [Unkeyed]
     end.
 
 %%----------------------------------------------------------------------

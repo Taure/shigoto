@@ -53,6 +53,18 @@ keyed_digest_differs_from_unkeyed_test() ->
     end),
     ?assertNotEqual(Unkeyed, Keyed).
 
+unkeyed_digest_is_always_a_candidate_test() ->
+    Identity = <<"worker:args">>,
+    Unkeyed = with_env([{encryption_key, undefined}, {encryption_keys, []}], fun() ->
+        shigoto_crypto:unique_digest(Identity)
+    end),
+    with_env([{encryption_key, ?KEY_A}, {encryption_keys, []}], fun() ->
+        Candidates = shigoto_crypto:unique_digests(Identity),
+        %% Stored value stays the HMAC; the unkeyed digest only widens lookup.
+        ?assertNotEqual(Unkeyed, hd(Candidates)),
+        ?assertEqual(Unkeyed, lists:last(Candidates))
+    end).
+
 rotation_yields_a_candidate_per_key_current_first_test() ->
     Identity = <<"worker:args">>,
     Current = with_env([{encryption_key, undefined}, {encryption_keys, [?KEY_A]}], fun() ->
@@ -61,8 +73,11 @@ rotation_yields_a_candidate_per_key_current_first_test() ->
     Old = with_env([{encryption_key, undefined}, {encryption_keys, [?KEY_B]}], fun() ->
         shigoto_crypto:unique_digest(Identity)
     end),
+    Unkeyed = with_env([{encryption_key, undefined}, {encryption_keys, []}], fun() ->
+        shigoto_crypto:unique_digest(Identity)
+    end),
     with_env([{encryption_key, undefined}, {encryption_keys, [?KEY_A, ?KEY_B]}], fun() ->
-        ?assertEqual([Current, Old], shigoto_crypto:unique_digests(Identity))
+        ?assertEqual([Current, Old, Unkeyed], shigoto_crypto:unique_digests(Identity))
     end).
 
 distinct_identities_give_distinct_digests_test() ->
