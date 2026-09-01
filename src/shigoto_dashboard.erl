@@ -8,7 +8,8 @@ for building admin UIs, monitoring dashboards, and Nova Liveboard pages.
 ```erlang
 shigoto_dashboard:queue_stats() ->
     [#{queue => <<\"default\">>, available => 42, executing => 5,
-       retryable => 2, completed => 1000, discarded => 3}]
+       retryable => 2, completed => 1000, discarded => 3,
+       is_paused => false}]
 ```
 
 ## Job Search
@@ -30,7 +31,13 @@ shigoto_dashboard:search_jobs(#{worker => my_worker, state => failed, limit => 2
 
 -define(POOL, (shigoto_config:pool())).
 
--doc "Get per-queue job counts grouped by state.".
+-doc """
+Get per-queue job counts grouped by state.
+
+Each row also carries `is_paused`, taken from the local queue processes.
+Pause is per-node, so a queue paused on another node reads as `false` here,
+as does a queue with rows in the table but no process on this node.
+""".
 -spec queue_stats() -> {ok, [map()]} | {error, term()}.
 queue_stats() ->
     SQL =
@@ -41,7 +48,7 @@ queue_stats() ->
             "ORDER BY queue, state"
         >>,
     case query(SQL, []) of
-        #{rows := Rows} -> {ok, pivot_queue_stats(Rows)};
+        #{rows := Rows} -> {ok, pivot_queue_stats(Rows, shigoto:paused_queues())};
         {error, _} = Err -> Err
     end.
 
@@ -169,7 +176,7 @@ batch_stats() ->
 query(SQL, Params) ->
     shigoto_db:query(?POOL, SQL, Params).
 
-pivot_queue_stats(Rows) ->
+pivot_queue_stats(Rows, Paused) ->
     GroupedByQueue = lists:foldl(
         fun(#{queue := Queue, state := State, count := Count}, Acc) ->
             QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
@@ -179,7 +186,10 @@ pivot_queue_stats(Rows) ->
         #{},
         Rows
     ),
-    maps:values(GroupedByQueue).
+    [
+        Stats#{is_paused => lists:member(Queue, Paused)}
+     || #{queue := Queue} = Stats <- maps:values(GroupedByQueue)
+    ].
 
 build_search_clauses(Filters, StartIdx) ->
     maps:fold(
