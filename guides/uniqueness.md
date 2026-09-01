@@ -68,13 +68,18 @@ with no deduplication. Otherwise it calls `insert_unique/4`, which:
 
 1. Builds the identity with `unique_identity/4` and digests it into the
    `unique_key`.
-2. Derives a lock key with `erlang:phash2(UniqueKey)`.
+2. Derives a lock key with `erlang:phash2/1` over the **identity**, never over
+   the digest. The digest is key-dependent, so deriving the lock from it would
+   have nodes on different keys take different advisory-lock slots mid-rotation
+   and lose the serialisation entirely.
 3. Opens a `shigoto_db:transaction/2` and takes a **Postgres advisory transaction
    lock**: `SELECT pg_advisory_xact_lock($1)`. This serialises concurrent
    inserts that hash to the same key; the lock is released automatically when
    the transaction commits or rolls back.
 4. Calls `find_existing_job/3` to look for a matching job within the configured
-   `states` (and `period`, if set).
+   `states` (and `period`, if set). It matches `unique_key = ANY(...)` over one
+   candidate digest per configured encryption key, so a job digested under a
+   retired key still matches while that key remains in `encryption_keys`.
 5. If one exists, `maybe_replace/4` applies the `replace`/`debounce` policy and
    returns `{ok, {conflict, Job}}`. If none exists, it does the real
    `do_insert/4`.

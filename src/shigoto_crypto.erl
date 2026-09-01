@@ -75,21 +75,30 @@ unique_digest(Identity) ->
 -doc """
 Every digest a stored `unique_key` could carry for this identity, current
 key first. Under key rotation an in-flight job was keyed with an older key,
-so a lookup has to match any of them. The unkeyed digest is always a
-candidate, so enabling encryption on a running system keeps matching the
-jobs already in flight.
+so a lookup has to match any of them.
 
-Disabling encryption cannot be covered the same way: the key needed to
-recompute those digests is gone. Leave a retired key in `encryption_keys`
-until the jobs digested under it have drained, exactly as decryption
-requires.
+The unkeyed digest is a candidate only when no key is configured, or when
+`accept_unkeyed_unique_digests` is set. It is computable without the key, so
+accepting it lets anyone who can write to `shigoto_jobs` plant a row that
+suppresses a unique job - use it for one drain cycle when adopting
+encryption, not as a standing setting.
+
+Neither switch covers *disabling* encryption: the key needed to recompute
+those digests is gone. Leave a retired key in `encryption_keys` until the
+jobs digested under it have drained, exactly as decryption requires.
 """.
 -spec unique_digests(binary()) -> [binary(), ...].
 unique_digests(Identity) ->
     Unkeyed = hex(crypto:hash(sha256, Identity)),
     case all_keys() of
-        [] -> [Unkeyed];
-        Keys -> [hex(crypto:mac(hmac, sha256, Key, Identity)) || Key <- Keys] ++ [Unkeyed]
+        [] ->
+            [Unkeyed];
+        Keys ->
+            Keyed = [hex(crypto:mac(hmac, sha256, Key, Identity)) || Key <- Keys],
+            case shigoto_config:accept_unkeyed_unique_digests() of
+                true -> Keyed ++ [Unkeyed];
+                false -> Keyed
+            end
     end.
 
 %%----------------------------------------------------------------------
