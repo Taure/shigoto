@@ -738,19 +738,25 @@ test_global_concurrency_admits_two_of_three(_Config) ->
 %%----------------------------------------------------------------------
 
 test_stager_surfaces_due_queue(_Config) ->
-    {ok, _} = shigoto_repo:insert_job(
+    {ok, Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
             args => #{},
             queue => ~"soon",
-            scheduled_at => seconds_from_now(1)
+            scheduled_at => seconds_from_now(3600)
         },
         #{}
     ),
     {ok, Before} = shigoto_stager:due_queues(?POOL),
     ?assertNot(lists:member(~"soon", Before)),
-    timer:sleep(1200),
+    %% Become due against the database clock rather than sleeping out a margin
+    %% the CI host is free to overshoot.
+    #{command := update} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_jobs SET scheduled_at = now() - interval '1 second' WHERE id = $1",
+        [maps:get(id, Job)]
+    ),
     {ok, After} = shigoto_stager:due_queues(?POOL),
     ?assert(lists:member(~"soon", After)).
 
