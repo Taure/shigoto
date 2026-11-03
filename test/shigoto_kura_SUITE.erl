@@ -26,6 +26,7 @@ whose pool shigoto shares would do.
     shigoto_transaction_with_a_pool_keeps_its_own_connection/1,
     a_commit_kura_refuses_raises_like_shigoto/1,
     kura_is_available/1,
+    migration_and_cron_refuse_a_kura_transaction/1,
     repo_transaction_rolls_back_its_jobs/1,
     repo_transaction_commits_its_jobs/1,
     repo_writes_join_shigoto_transaction/1
@@ -44,6 +45,7 @@ all() ->
         shigoto_transaction_with_a_pool_keeps_its_own_connection,
         a_commit_kura_refuses_raises_like_shigoto,
         kura_is_available,
+        migration_and_cron_refuse_a_kura_transaction,
         repo_transaction_rolls_back_its_jobs,
         repo_transaction_commits_its_jobs,
         repo_writes_join_shigoto_transaction
@@ -184,6 +186,12 @@ a_commit_kura_refuses_raises_like_shigoto(_Config) ->
 
 kura_is_available(_Config) ->
     ?assert(shigoto_db:kura_available()).
+
+migration_and_cron_refuse_a_kura_transaction(_Config) ->
+    kura_transaction(fun() ->
+        ?assertEqual({error, in_transaction}, shigoto_migration:up(?POOL)),
+        ?assertEqual({error, in_transaction}, shigoto_cron:schedule_once())
+    end).
 
 %%----------------------------------------------------------------------
 %% A real kura repo

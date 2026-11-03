@@ -22,6 +22,7 @@
     cron_logs_no_row_values/1,
     cron_encrypts_entry_args/1,
     cron_resets_a_last_run_far_ahead/1,
+    cron_pass_refuses_an_open_transaction/1,
     cron_warns_when_its_lock_is_held_elsewhere/1,
     cron_does_not_warn_while_a_peer_schedules/1,
     stager_warns_when_its_lock_is_held_elsewhere/1,
@@ -46,6 +47,7 @@ all() ->
         cron_logs_no_row_values,
         cron_encrypts_entry_args,
         cron_resets_a_last_run_far_ahead,
+        cron_pass_refuses_an_open_transaction,
         cron_warns_when_its_lock_is_held_elsewhere,
         cron_does_not_warn_while_a_peer_schedules,
         stager_warns_when_its_lock_is_held_elsewhere,
@@ -257,6 +259,13 @@ stager_warns_when_its_lock_is_held_elsewhere(_Config) ->
         Holder ! stop,
         flush_ticks()
     end.
+
+cron_pass_refuses_an_open_transaction(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    ?assertEqual(
+        {error, in_transaction}, shigoto:transaction(fun() -> shigoto_cron:schedule_once() end)
+    ),
+    ?assertEqual([], jobs()).
 
 cron_resets_a_last_run_far_ahead(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),

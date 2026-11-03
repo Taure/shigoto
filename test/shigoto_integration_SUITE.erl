@@ -19,6 +19,7 @@
     test_migration/1,
     test_migration_reports_failure/1,
     test_concurrent_migrations/1,
+    test_migration_refuses_an_open_transaction/1,
     test_current_migration_does_not_block_claims/1,
     test_migration_behind_a_reader_times_out/1,
     test_commit_refused_raises/1,
@@ -76,6 +77,7 @@ all() ->
         test_migration,
         test_migration_reports_failure,
         test_concurrent_migrations,
+        test_migration_refuses_an_open_transaction,
         test_current_migration_does_not_block_claims,
         test_migration_behind_a_reader_times_out,
         test_commit_refused_raises,
@@ -186,6 +188,12 @@ test_concurrent_migrations(_Config) ->
      || Pid <- Pids
     ],
     ?assertEqual([ok, ok, ok], Results).
+
+test_migration_refuses_an_open_transaction(_Config) ->
+    ?assertEqual(
+        {error, in_transaction},
+        shigoto_db:transaction(?POOL, fun() -> shigoto_migration:up(?POOL) end)
+    ).
 
 test_current_migration_does_not_block_claims(_Config) ->
     ok = shigoto_migration:up(?POOL),

@@ -51,13 +51,21 @@ start_link() ->
 Run one scheduling pass now, in the calling process.
 
 Answers `ok` when the pass ran or another node held the lock, and `retry` when
-the pool was not ready. Mainly for tests; the scheduler runs passes on its own.
+the pool was not ready. Inside an open shigoto or kura transaction it answers
+`{error, in_transaction}` without running, since the pass would join the
+caller's transaction and hold the cron lock until it ends. Mainly for tests; the
+scheduler runs passes on its own.
 """.
--spec schedule_once() -> ok | retry.
+-spec schedule_once() -> ok | retry | {error, in_transaction}.
 schedule_once() ->
-    case safe_with_leader_lock(fun schedule_due/0) of
-        retry -> retry;
-        _Ran -> ok
+    case shigoto_db:transaction_open(shigoto_config:pool()) of
+        true ->
+            {error, in_transaction};
+        false ->
+            case safe_with_leader_lock(fun schedule_due/0) of
+                retry -> retry;
+                _Ran -> ok
+            end
     end.
 
 -doc false.

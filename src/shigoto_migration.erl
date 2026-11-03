@@ -28,13 +28,20 @@ one node at a quiet moment.
 Stops at the first statement that fails, rolls back, and answers
 `{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
 database that does not exist yet, or a role that may not create tables, is an
-error here rather than a node that boots with no tables.
+error here rather than a node that boots with no tables. Called inside an open
+shigoto or kura transaction it answers `{error, in_transaction}` and does
+nothing, since the lock and the DDL would join the caller's transaction.
 """.
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
-    case shigoto_db:query(Pool, ~"SELECT 1", []) of
-        {error, Reason} -> {error, shigoto_db:reduced(Reason)};
-        #{} -> locked(Pool)
+    case shigoto_db:transaction_open(Pool) of
+        true ->
+            {error, in_transaction};
+        false ->
+            case shigoto_db:query(Pool, ~"SELECT 1", []) of
+                {error, Reason} -> {error, shigoto_db:reduced(Reason)};
+                #{} -> locked(Pool)
+            end
     end.
 
 locked(Pool) ->

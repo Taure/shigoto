@@ -67,6 +67,7 @@ opened through kura raises them the same way. A server error keeps only its
     query/4,
     transaction/2,
     in_transaction/1,
+    transaction_open/1,
     reduced/1,
     kura_available/0,
     start_pool/2,
@@ -139,6 +140,11 @@ kura holds.
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
     erlang:get({?HOLDER, Pool}).
+
+-doc false.
+-spec transaction_open(atom()) -> boolean().
+transaction_open(Pool) ->
+    in_transaction(Pool) =/= undefined orelse kura_transaction(Pool) =/= undefined.
 
 -doc """
 `Reason` with a server error cut down to the fields that cannot carry row values.
