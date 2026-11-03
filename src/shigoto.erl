@@ -50,14 +50,15 @@ shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
 
 ## Transactional Enqueue
 
-Enqueue jobs atomically with your own database writes. Jobs inserted inside
-`transaction/1` commit together with the surrounding work, and are dropped if it
-rolls back — so a job is never orphaned by a failed transaction, nor lost after a
-successful one.
+Enqueue jobs atomically with your own database writes. With `{repo, Repo}`
+configured, shigoto runs on the kura repo's minato pool and shares its
+transactions: a job inserted inside `Repo:transaction/1` commits or rolls back
+with it, and kura writes inside `transaction/1` join shigoto's transaction. So a
+job is never orphaned by a failed transaction, nor lost after a successful one.
 
 ```erlang
 shigoto:transaction(fun() ->
-    {ok, User} = my_app:create_user(Params),
+    {ok, User} = my_app_repo:insert(UserChangeset),
     {ok, _Job} = shigoto:insert(#{
         worker => welcome_email_worker,
         args => #{~"user_id" => maps:get(id, User)}
@@ -65,6 +66,16 @@ shigoto:transaction(fun() ->
     User
 end).
 ```
+
+With `{pool, Pool}`, `transaction/1` covers shigoto's own statements on that
+pool. See `m:shigoto_db` for how the two share a connection.
+
+## Returned jobs
+
+Jobs returned by `insert/1,2`, `insert_all/1,2` and `get_job/1` are the stored
+row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
+`deps_results`) are JSON text binaries; decode them with `json:decode/1`.
+`perform/1` always gets `args` decoded.
 """.
 
 -define(TXN_KEY, '$shigoto_txn').

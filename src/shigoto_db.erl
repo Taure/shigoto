@@ -20,6 +20,25 @@ commits or rolls back. Statements the function runs find that connection here
 rather than being handed it, because a job queue's transaction functions are
 ordinary code that calls `shigoto_repo` and cannot thread a connection through.
 
+## Sharing a transaction with kura
+
+An app on [kura](https://hex.pm/packages/kura) configures shigoto with
+`{repo, Repo}`, and shigoto then runs on the minato pool that `kura_postgres`
+started for the repo. The two share transactions on that pool, in both
+directions, without shigoto depending on kura:
+
+- A statement shigoto runs while the process is inside a kura transaction on the
+  same pool (`Repo:transaction/1`, or `kura_repo_worker:transaction/2`) runs on
+  that transaction's connection, so a job inserted there commits or rolls back
+  with the caller's writes.
+- When the pool is the configured `repo` and `kura_postgres` is loaded,
+  `transaction/2` opens the transaction through `kura_driver_minato`, so kura
+  writes made inside `shigoto:transaction/1` join it too.
+
+Either way a nested call joins the transaction already open. The one opened
+through kura behaves as kura's does: a statement in it that commits or rolls it
+back raises, and nothing meant for it runs outside it.
+
 A `COMMIT` the server answers with `ROLLBACK` raises `transaction_rolled_back`.
 PostgreSQL does that when the transaction had already failed, and a job queue
 that reads it as success has marked jobs done that were never written - which is
@@ -36,6 +55,8 @@ the same job running twice on the next poll.
 ]).
 
 -define(HOLDER, {?MODULE, holder}).
+-define(KURA_DRIVER, kura_driver_minato).
+-define(KURA_POOL, kura_pool_minato).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
 
@@ -61,9 +82,13 @@ options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
-    case in_transaction(Pool) of
-        undefined -> answered(minato:query(Pool, SQL, Params, decoding(Opts)));
-        Holder -> ran(Holder, SQL, Params, decoding(Opts))
+    case {in_transaction(Pool), kura_transaction(Pool)} of
+        {undefined, undefined} ->
+            answered(minato:query(Pool, SQL, Params, decoding(Opts)));
+        {undefined, _Kura} ->
+            kura(?KURA_DRIVER, query, [?KURA_POOL, Pool, SQL, Params, decoding(Opts)]);
+        {Holder, _} ->
+            ran(Holder, SQL, Params, decoding(Opts))
     end.
 
 -doc """
@@ -75,12 +100,17 @@ know whether it is nested.
 """.
 -spec transaction(atom(), fun(() -> Result)) -> Result.
 transaction(Pool, Fun) ->
-    case in_transaction(Pool) of
-        undefined -> opened(Pool, Fun);
-        _Holder -> Fun()
+    case {in_transaction(Pool), kura_transaction(Pool)} of
+        {undefined, undefined} -> begun(Pool, Fun);
+        _Open -> Fun()
     end.
 
--doc "The connection holding this process's transaction on `Pool`, or `undefined`.".
+-doc """
+The connection holding this process's transaction on `Pool`, or `undefined`.
+
+Only a transaction `transaction/2` opened on its own; see the moduledoc for one
+kura holds.
+""".
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
     erlang:get({?HOLDER, Pool}).
@@ -122,6 +152,24 @@ start_listener(Name, Config) ->
 %%----------------------------------------------------------------------
 %% Transactions
 %%----------------------------------------------------------------------
+
+-spec begun(atom(), fun(() -> Result)) -> Result.
+begun(Pool, Fun) ->
+    case kura_repo(Pool) of
+        true -> kura_opened(Pool, Fun);
+        false -> opened(Pool, Fun)
+    end.
+
+-spec kura_opened(atom(), fun(() -> Result)) -> Result.
+kura_opened(Pool, Fun) ->
+    try
+        kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}])
+    catch
+        error:{kura_driver_minato, {no_connection, checkout_timeout}} ->
+            error({?MODULE, checkout_timeout});
+        error:{kura_driver_minato, {no_connection, Reason}} ->
+            error({?MODULE, {no_connection, Reason}})
+    end.
 
 -spec opened(atom(), fun(() -> Result)) -> Result.
 opened(Pool, Fun) ->
@@ -223,6 +271,27 @@ release(Holder) ->
             ok
     after ?CALL_TIMEOUT -> ok
     end.
+
+%%----------------------------------------------------------------------
+%% kura, when it is there
+%%----------------------------------------------------------------------
+
+-spec kura_transaction(atom()) -> pid() | undefined.
+kura_transaction(Pool) ->
+    case erlang:function_exported(?KURA_POOL, transaction_conn, 1) of
+        true -> kura(?KURA_POOL, transaction_conn, [Pool]);
+        false -> undefined
+    end.
+
+%% Called by name so that kura_postgres stays an optional runtime dependency.
+-spec kura(module(), atom(), [term()]) -> dynamic().
+kura(Module, Function, Args) ->
+    erlang:apply(Module, Function, Args).
+
+-spec kura_repo(atom()) -> boolean().
+kura_repo(Pool) ->
+    application:get_env(shigoto, repo) =:= {ok, Pool} andalso
+        code:ensure_loaded(?KURA_DRIVER) =:= {module, ?KURA_DRIVER}.
 
 %%----------------------------------------------------------------------
 %% Shapes
