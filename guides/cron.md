@@ -107,7 +107,10 @@ time starts from the current minute and is not backfilled.
 The current minute is read from PostgreSQL (`date_trunc('minute', now())`), not
 from the node, so nodes whose clocks disagree still agree on the minute. The
 stored `last_scheduled_at` only ever moves forward: a pass never sets it to an
-earlier minute than the one already stored.
+earlier minute than the one already stored. A stored minute ahead of the
+database's is logged as `shigoto_cron_last_run_in_future`; one more than 60
+minutes ahead is put back to the current minute, so it cannot stop the entry
+until that time comes.
 
 ## How It Works
 

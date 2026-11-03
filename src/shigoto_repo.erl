@@ -563,7 +563,9 @@ Upsert a cron entry, keyed by `name`.
 
 `last_scheduled_at`, when given, is the minute the entry was last scheduled for.
 It only ever moves forward: an upsert without it, or with an earlier minute
-than the stored one, keeps the stored one.
+than the stored one, keeps the stored one. A stored minute more than 60 minutes
+ahead of the database clock is replaced, so a minute stored by a node whose
+clock was far ahead does not stop the entry until that time comes.
 
 `args` is stored encrypted when an encryption key is configured, as job args
 are (`m:shigoto_crypto`). shigoto never reads the column back; the args a cron
@@ -579,7 +581,11 @@ upsert_cron_entry(Pool, Entry) ->
             "ON CONFLICT (name) DO UPDATE SET\n"
             "worker = EXCLUDED.worker, args = EXCLUDED.args, schedule = EXCLUDED.schedule,\n"
             "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts,\n"
-            "last_scheduled_at = GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)"
+            "last_scheduled_at = CASE\n"
+            "  WHEN shigoto_cron.last_scheduled_at > now() + interval '60 minutes'\n"
+            "  THEN EXCLUDED.last_scheduled_at\n"
+            "  ELSE GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)\n"
+            "END"
         >>,
     EncArgs = shigoto_crypto:encrypt(encode_json(maps:get(args, Entry, #{}))),
     case

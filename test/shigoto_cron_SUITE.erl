@@ -21,6 +21,7 @@
     cron_telemetry_fires_after_the_pass_commits/1,
     cron_logs_no_row_values/1,
     cron_encrypts_entry_args/1,
+    cron_resets_a_last_run_far_ahead/1,
     stager_notifies_a_due_queue/1
 ]).
 
@@ -40,6 +41,7 @@ all() ->
         cron_telemetry_fires_after_the_pass_commits,
         cron_logs_no_row_values,
         cron_encrypts_entry_args,
+        cron_resets_a_last_run_far_ahead,
         stager_notifies_a_due_queue
     ].
 
@@ -190,6 +192,28 @@ cron_logs_no_row_values(_Config) ->
         #{} = shigoto_db:query(
             ?POOL, ~"ALTER TABLE shigoto_cron DROP CONSTRAINT shigoto_cron_probe", []
         )
+    end.
+
+cron_resets_a_last_run_far_ahead(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    ok = shigoto_repo:upsert_cron_entry(?POOL, #{
+        name => ~"every_minute",
+        worker => shigoto_test_worker,
+        schedule => ~"* * * * *",
+        last_scheduled_at => {{2099, 1, 1}, {0, 0, 0}}
+    }),
+    ok = shigoto_log_probe:attach(),
+    try
+        ok = shigoto_cron:schedule_once(),
+        ?assertMatch(
+            #{name := ~"every_minute", last_scheduled_at := {{2099, 1, 1}, _}},
+            receive_log(~"shigoto_cron_last_run_in_future")
+        ),
+        [#{last_scheduled_at := Stored}] = cron_rows(),
+        {ok, Now} = shigoto_repo:current_minute(?POOL),
+        ?assert(Stored =< Now andalso Stored >= minutes_ago(2))
+    after
+        shigoto_log_probe:detach()
     end.
 
 cron_encrypts_entry_args(_Config) ->

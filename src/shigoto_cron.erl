@@ -144,7 +144,9 @@ schedule_entry(Pool, Entry, LastRuns, Now) ->
     case shigoto_cron_parser:parse(Schedule) of
         {ok, Expr} ->
             Tz = entry_timezone(Entry),
-            Minutes = due_minutes(maps:get(Name, LastRuns, null), Now),
+            LastRun = maps:get(Name, LastRuns, null),
+            warn_if_ahead(Name, LastRun, Now),
+            Minutes = due_minutes(LastRun, Now),
             case
                 lists:any(
                     fun(M) -> shigoto_cron_parser:matches(Expr, to_timezone(M, Tz)) end, Minutes
@@ -165,6 +167,18 @@ schedule_entry(Pool, Entry, LastRuns, Now) ->
         {error, Reason} ->
             ?LOG_WARNING(#{msg => ~"shigoto_cron_invalid_schedule", name => Name, reason => Reason})
     end.
+
+%% Stored by a node whose clock ran ahead. Up to an hour ahead the entry waits
+%% for that minute; further ahead the upsert puts it back to now.
+warn_if_ahead(Name, {_, _} = LastRun, Now) when LastRun > Now ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_cron_last_run_in_future",
+        name => Name,
+        last_scheduled_at => LastRun,
+        now => Now
+    });
+warn_if_ahead(_Name, _LastRun, _Now) ->
+    ok.
 
 insert(Name, Schedule, Worker, Args) ->
     shigoto_telemetry:cron_scheduled(Name, Worker, Schedule),
