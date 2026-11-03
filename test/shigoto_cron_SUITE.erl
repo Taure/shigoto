@@ -263,7 +263,7 @@ stager_warns_when_its_lock_is_held_elsewhere(_Config) ->
 cron_pass_refuses_an_open_transaction(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
     ?assertEqual(
-        {error, in_transaction}, shigoto:transaction(fun() -> shigoto_cron:schedule_once() end)
+        {error, in_transaction}, shigoto:transaction(fun shigoto_cron:schedule_once/0)
     ),
     ?assertEqual([], jobs()).
 
@@ -294,10 +294,10 @@ cron_encrypts_entry_args(_Config) ->
     application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
     try
         ok = shigoto_cron:schedule_once(),
-        #{rows := [#{args := Stored}]} = shigoto_db:query(
-            ?POOL, ~"SELECT args::text AS args FROM shigoto_cron", []
-        ),
-        ?assertEqual(nomatch, binary:match(Stored, ~"hunter2"))
+        case shigoto_db:query(?POOL, ~"SELECT args::text AS args FROM shigoto_cron", []) of
+            #{rows := [#{args := Stored}]} when is_binary(Stored) ->
+                ?assertEqual(nomatch, binary:match(Stored, ~"hunter2"))
+        end
     after
         application:unset_env(shigoto, encryption_key)
     end.

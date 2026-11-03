@@ -67,7 +67,7 @@ stage_once() ->
 
 counted(missed, #{misses := Misses0} = State) ->
     Misses = Misses0 + 1,
-    Threshold = max(?MIN_STUCK_PASSES, ?STUCK_AFTER_MS div shigoto_config:stage_interval()),
+    Threshold = stuck_passes(),
     case Misses >= Threshold andalso (Misses - Threshold) rem Threshold =:= 0 of
         true ->
             ?LOG_WARNING(#{
@@ -86,6 +86,13 @@ counted(retry, State) ->
     State;
 counted(held, State) ->
     State#{misses := 0}.
+
+-spec stuck_passes() -> pos_integer().
+stuck_passes() ->
+    case ?STUCK_AFTER_MS div shigoto_config:stage_interval() of
+        Passes when Passes > ?MIN_STUCK_PASSES -> Passes;
+        _Fewer -> ?MIN_STUCK_PASSES
+    end.
 
 safe_with_leader_lock(Fun) ->
     try
