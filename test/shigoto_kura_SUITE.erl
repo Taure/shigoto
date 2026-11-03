@@ -24,7 +24,8 @@ whose pool shigoto shares would do.
     kura_write_in_a_rolled_back_shigoto_transaction_is_undone/1,
     kura_write_in_a_shigoto_transaction_commits_with_it/1,
     shigoto_transaction_with_a_pool_keeps_its_own_connection/1,
-    a_commit_kura_refuses_raises_like_shigoto/1
+    a_commit_kura_refuses_raises_like_shigoto/1,
+    kura_is_available/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -37,7 +38,8 @@ all() ->
         kura_write_in_a_rolled_back_shigoto_transaction_is_undone,
         kura_write_in_a_shigoto_transaction_commits_with_it,
         shigoto_transaction_with_a_pool_keeps_its_own_connection,
-        a_commit_kura_refuses_raises_like_shigoto
+        a_commit_kura_refuses_raises_like_shigoto,
+        kura_is_available
     ].
 
 init_per_suite(Config) ->
@@ -152,6 +154,9 @@ a_commit_kura_refuses_raises_like_shigoto(_Config) ->
             ok = kura_write_deferred(1)
         end)
     ).
+
+kura_is_available(_Config) ->
+    ?assert(shigoto_db:kura_available()).
 
 %%----------------------------------------------------------------------
 %% Helpers

@@ -11,6 +11,7 @@ OTP application callback for Shigoto.
 -doc false.
 start(_StartType, _StartArgs) ->
     warn_if_testing_mode(),
+    _ = shigoto_db:kura_available(),
     migrate(shigoto_config:pool()),
     shigoto_sup:start_link().
 

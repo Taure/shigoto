@@ -37,7 +37,8 @@ directions, without shigoto depending on kura:
 
 Either way a nested call joins the transaction already open. The one opened
 through kura behaves as kura's does: a statement in it that commits or rolls it
-back raises, and nothing meant for it runs outside it.
+back raises, and nothing meant for it runs outside it. Whether kura_postgres is
+there is decided once (`kura_available/0`).
 
 ## When a transaction does not commit
 
@@ -55,11 +56,14 @@ opened through kura raises them the same way. A server error keeps only its
 `code`, `constraint` and severity, since its message can carry row values.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     query/3,
     query/4,
     transaction/2,
     in_transaction/1,
+    kura_available/0,
     start_pool/2,
     start_listener/2
 ]).
@@ -67,6 +71,12 @@ opened through kura raises them the same way. A server error keeps only its
 -define(HOLDER, {?MODULE, holder}).
 -define(KURA_DRIVER, kura_driver_minato).
 -define(KURA_POOL, kura_pool_minato).
+-define(KURA_CALLS, [
+    {?KURA_DRIVER, query, 5},
+    {?KURA_DRIVER, transaction, 4},
+    {?KURA_POOL, transaction_conn, 1}
+]).
+-define(KURA_AVAILABLE, {?MODULE, kura_available}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
 
@@ -318,9 +328,47 @@ release(Holder) ->
 
 -spec kura_transaction(atom()) -> pid() | undefined.
 kura_transaction(Pool) ->
-    case erlang:function_exported(?KURA_POOL, transaction_conn, 1) of
+    case kura_available() of
         true -> kura(?KURA_POOL, transaction_conn, [Pool]);
         false -> undefined
+    end.
+
+-doc """
+Whether kura_postgres is there to share transactions with, decided once.
+
+Checks that `kura_driver_minato` and `kura_pool_minato` load and export what
+shigoto calls, and keeps the answer. A kura_postgres that loads but lacks one of
+them is logged as a warning rather than quietly not shared with. The shigoto
+application calls this at start; anything else gets the kept answer.
+""".
+-spec kura_available() -> boolean().
+kura_available() ->
+    case persistent_term:get(?KURA_AVAILABLE, undefined) of
+        undefined ->
+            Available = kura_checked(),
+            persistent_term:put(?KURA_AVAILABLE, Available),
+            Available;
+        Available when is_boolean(Available) ->
+            Available
+    end.
+
+-spec kura_checked() -> boolean().
+kura_checked() ->
+    Loaded = [M || M <- [?KURA_DRIVER, ?KURA_POOL], code:ensure_loaded(M) =:= {module, M}],
+    Missing = [MFA || {M, F, A} = MFA <- ?KURA_CALLS, not erlang:function_exported(M, F, A)],
+    case {Loaded, Missing} of
+        {[], _} ->
+            false;
+        {_, []} ->
+            true;
+        {_, _} ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_kura_transactions_unavailable",
+                missing => Missing,
+                action =>
+                    ~"shigoto will not share transactions with kura; upgrade kura_postgres"
+            }),
+            false
     end.
 
 %% Called by name so that kura_postgres stays an optional runtime dependency.
@@ -330,8 +378,7 @@ kura(Module, Function, Args) ->
 
 -spec kura_repo(atom()) -> boolean().
 kura_repo(Pool) ->
-    application:get_env(shigoto, repo) =:= {ok, Pool} andalso
-        code:ensure_loaded(?KURA_DRIVER) =:= {module, ?KURA_DRIVER}.
+    application:get_env(shigoto, repo) =:= {ok, Pool} andalso kura_available().
 
 %%----------------------------------------------------------------------
 %% Shapes
