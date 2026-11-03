@@ -23,6 +23,7 @@
     test_retry_by_tags/1,
     test_retry_by_empty_filter/1,
     test_retry_by_only_retries_terminal/1,
+    test_retry_by_state/1,
     %% Dynamic queues
     test_add_queue/1,
     test_add_queue_idempotent/1,
@@ -63,6 +64,7 @@ all() ->
         test_retry_by_tags,
         test_retry_by_empty_filter,
         test_retry_by_only_retries_terminal,
+        test_retry_by_state,
         test_add_queue,
         test_add_queue_idempotent,
         test_remove_queue,
@@ -292,6 +294,20 @@ test_retry_by_only_retries_terminal(_Config) ->
     ),
     %% Job is available, not terminal — retry_by should not touch it
     {ok, 0} = shigoto_repo:retry_by(?POOL, #{worker => shigoto_test_worker}).
+
+test_retry_by_state(_Config) ->
+    {ok, #{id := A}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, #{id := B}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    ok = shigoto_repo:discard_job(?POOL, A),
+    ok = shigoto_repo:cancel_job(?POOL, B),
+    ?assertEqual({ok, 1}, shigoto:retry_by(?POOL, #{state => ~"discarded"})),
+    ?assertMatch({ok, #{state := ~"available"}}, shigoto_repo:get_job(?POOL, A)),
+    ?assertMatch({ok, #{state := ~"cancelled"}}, shigoto_repo:get_job(?POOL, B)),
+    ?assertEqual({ok, 1}, shigoto:retry_by(?POOL, #{state => [cancelled]})).
 
 %%----------------------------------------------------------------------
 %% Dynamic queues

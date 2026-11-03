@@ -278,7 +278,7 @@ cancel_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc "Cancel jobs matching a pattern. Supports worker, queue, tags filters.".
+-doc "Cancel available or retryable jobs matching a pattern. Filters: `worker`, `queue`, `tags`, `args`, `state`.".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
@@ -335,7 +335,12 @@ retry_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc "Retry all jobs matching a filter. Supports worker, queue, state, tags.".
+-doc """
+Retry all discarded or cancelled jobs matching a filter.
+
+Filters: `worker`, `queue`, `tags`, `args`, and `state` (`discarded` or
+`cancelled`, or a list of them) to retry only one of the two.
+""".
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
@@ -860,7 +865,16 @@ filter_clause(tags, Tags, Idx) when is_list(Tags) ->
     {<<"tags @> $", IBin/binary>>, [encode_pg_array(Tags)], Idx + 1};
 filter_clause(args, ArgsMatch, Idx) when is_map(ArgsMatch) ->
     IBin = integer_to_binary(Idx),
-    {<<"args @> $", IBin/binary, "::jsonb">>, [encode_json(ArgsMatch)], Idx + 1}.
+    {<<"args @> $", IBin/binary, "::jsonb">>, [encode_json(ArgsMatch)], Idx + 1};
+filter_clause(state, State, Idx) ->
+    IBin = integer_to_binary(Idx),
+    {<<"state = ANY($", IBin/binary, ")">>, [state_names(State)], Idx + 1}.
+
+state_names(States) when is_list(States) -> [state_name(S) || S <- States];
+state_names(State) -> [state_name(State)].
+
+state_name(State) when is_atom(State) -> atom_to_binary(State);
+state_name(State) when is_binary(State) -> State.
 
 %%----------------------------------------------------------------------
 %% Internal: structured errors
