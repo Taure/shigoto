@@ -25,10 +25,14 @@ whose pool shigoto shares would do.
     kura_write_in_a_shigoto_transaction_commits_with_it/1,
     shigoto_transaction_with_a_pool_keeps_its_own_connection/1,
     a_commit_kura_refuses_raises_like_shigoto/1,
-    kura_is_available/1
+    kura_is_available/1,
+    repo_transaction_rolls_back_its_jobs/1,
+    repo_transaction_commits_its_jobs/1,
+    repo_writes_join_shigoto_transaction/1
 ]).
 
 -define(POOL, shigoto_test_pool).
+-define(REPO, shigoto_kura_test_repo).
 
 all() ->
     [
@@ -39,7 +43,10 @@ all() ->
         kura_write_in_a_shigoto_transaction_commits_with_it,
         shigoto_transaction_with_a_pool_keeps_its_own_connection,
         a_commit_kura_refuses_raises_like_shigoto,
-        kura_is_available
+        kura_is_available,
+        repo_transaction_rolls_back_its_jobs,
+        repo_transaction_commits_its_jobs,
+        repo_writes_join_shigoto_transaction
     ].
 
 init_per_suite(Config) ->
@@ -59,11 +66,30 @@ init_per_suite(Config) ->
         """,
         []
     ),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"CREATE TABLE IF NOT EXISTS shigoto_kura_posts (id bigserial PRIMARY KEY, title text NOT NULL)",
+        []
+    ),
+    application:set_env(kura, repos, #{
+        ?REPO => #{
+            backend => kura_backend_postgres,
+            host => "localhost",
+            port => shigoto_test_repo:port(),
+            database => "shigoto_test",
+            user => "postgres",
+            password => "root",
+            pool_size => 2
+        }
+    }),
+    {ok, _} = application:ensure_all_started(kura),
     Config.
 
 end_per_suite(_Config) ->
+    _ = application:stop(kura),
     _ = shigoto_db:query(?POOL, ~"DROP TABLE IF EXISTS shigoto_kura_probe", []),
     _ = shigoto_db:query(?POOL, ~"DROP TABLE IF EXISTS shigoto_kura_deferred", []),
+    _ = shigoto_db:query(?POOL, ~"DROP TABLE IF EXISTS shigoto_kura_posts", []),
     ok.
 
 init_per_testcase(_TestCase, Config) ->
@@ -74,6 +100,7 @@ end_per_testcase(_TestCase, _Config) ->
     _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
     _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_kura_probe", []),
     _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_kura_deferred", []),
+    _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_kura_posts", []),
     ok.
 
 %%----------------------------------------------------------------------
@@ -159,6 +186,44 @@ kura_is_available(_Config) ->
     ?assert(shigoto_db:kura_available()).
 
 %%----------------------------------------------------------------------
+%% A real kura repo
+%%----------------------------------------------------------------------
+
+repo_transaction_rolls_back_its_jobs(_Config) ->
+    application:set_env(shigoto, repo, ?REPO),
+    ?assertError(
+        boom,
+        ?REPO:transaction(fun() ->
+            {ok, _Post} = ?REPO:insert(shigoto_kura_test_post:changeset(#{title => ~"a"})),
+            {ok, _Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+            error(boom)
+        end)
+    ),
+    ?assertEqual({0, 0}, {count_jobs(), count_posts()}).
+
+repo_transaction_commits_its_jobs(_Config) ->
+    application:set_env(shigoto, repo, ?REPO),
+    {ok, _} = ?REPO:transaction(fun() ->
+        {ok, Post} = ?REPO:insert(shigoto_kura_test_post:changeset(#{title => ~"a"})),
+        {ok, _Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+        ?assertEqual(0, elsewhere(fun count_jobs/0)),
+        {ok, Post}
+    end),
+    ?assertEqual({1, 1}, {count_jobs(), count_posts()}).
+
+repo_writes_join_shigoto_transaction(_Config) ->
+    application:set_env(shigoto, repo, ?REPO),
+    ?assertError(
+        boom,
+        shigoto:transaction(fun() ->
+            {ok, _Post} = ?REPO:insert(shigoto_kura_test_post:changeset(#{title => ~"a"})),
+            {ok, _Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+            error(boom)
+        end)
+    ),
+    ?assertEqual({0, 0}, {count_jobs(), count_posts()}).
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 
@@ -167,6 +232,9 @@ kura_write_deferred(Id) ->
         kura_pool_minato, ?POOL, ~"INSERT INTO shigoto_kura_deferred (id) VALUES ($1)", [Id], #{}
     ),
     ok.
+
+count_posts() ->
+    count(~"SELECT count(*) AS n FROM shigoto_kura_posts").
 
 kura_transaction(Fun) ->
     kura_driver_minato:transaction(kura_pool_minato, ?POOL, Fun, #{}).
