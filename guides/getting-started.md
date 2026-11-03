@@ -8,7 +8,7 @@ Add `shigoto` to your `rebar.config` dependencies:
 
 ```erlang
 {deps, [
-    {shigoto, "~> 1.9"}
+    {shigoto, "~> 1.10"}
 ]}.
 ```
 
@@ -19,7 +19,7 @@ Add `shigoto` to your `mix.exs`:
 ```elixir
 defp deps do
   [
-    {:shigoto, "~> 1.9"}
+    {:shigoto, "~> 1.10"}
   ]
 end
 ```
@@ -62,8 +62,8 @@ config :shigoto,
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `repo` | — | kura repo whose minato pool shigoto shares; read before `pool` |
-| `pool` | — | minato pool name, when not using `repo`; one of the two is required |
+| `repo` | none | kura repo whose minato pool shigoto shares; read before `pool` |
+| `pool` | none | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are archived |

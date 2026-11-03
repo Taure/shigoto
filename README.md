@@ -52,7 +52,7 @@ Add to your deps:
 
 ```erlang
 {deps, [
-    {shigoto, "~> 1.9"}
+    {shigoto, "~> 1.10"}
 ]}.
 ```
 
@@ -196,8 +196,8 @@ All optional except `perform/1`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `repo` | — | kura repo whose minato pool shigoto shares (read before `pool`) |
-| `pool` | — | minato pool name, when not using `repo`; one of the two is required |
+| `repo` | none | kura repo whose minato pool shigoto shares (read before `pool`) |
+| `pool` | none | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names and concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling |
 | `cron` | `[]` | `{Name, Schedule, Worker, Args}` tuples |

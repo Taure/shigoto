@@ -61,11 +61,13 @@ tables, trigger, and notify function. Edit the versioned statements in
 
 ## Pre-push checklist
 
-`fmt --check` -> `xref` -> `dialyzer` -> `lint` -> `hank` -> `eunit` -> `ct`
-(against Docker Postgres) -> `ex_doc`, all green. CI (`Taure/erlang-ci` ci.yml
-`@v2.0.9`) runs ct, ex_doc, hank, coverage, elp-lint, sbom + sbom-scan, and
-dependency submission; `elp-eqwalize` and `audit` are disabled for this repo, so
-do not rely on them locally either. Every push to `main` runs release.yml.
+`fmt --check` -> `xref` -> `dialyzer` -> `elp lint` -> `hank` -> `eunit` ->
+`ct` (against Docker Postgres) -> `ex_doc`, all green. `rebar3 lint` does not
+work here: the `rebar3_lint` plugin is listed but there is no elvis config, so
+it fails before linting anything; use `elp lint`. CI (`Taure/erlang-ci` ci.yml
+`@v2.1.7`) runs ct, ex_doc, hank, audit, coverage, elp-lint, and dependency
+submission; `elp-eqwalize`, `sbom` and `sbom-scan` are disabled for this repo.
+Every push to `main` runs release.yml.
 
 ## Conventions
 
