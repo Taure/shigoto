@@ -8,7 +8,7 @@ Add `shigoto` to your `rebar.config` dependencies:
 
 ```erlang
 {deps, [
-    {shigoto, {git, "https://github.com/Taure/shigoto.git", {branch, "main"}}}
+    {shigoto, "~> 1.9"}
 ]}.
 ```
 
@@ -19,18 +19,24 @@ Add `shigoto` to your `mix.exs`:
 ```elixir
 defp deps do
   [
-    {:shigoto, github: "Taure/shigoto", branch: "main"}
+    {:shigoto, "~> 1.9"}
   ]
 end
 ```
 
 ## Configuration
 
+shigoto runs on a [minato](https://hex.pm/packages/minato) pool. In an app on
+[kura](https://hex.pm/packages/kura), name the repo with `repo`: `kura_postgres`
+starts a minato pool named after the repo, and shigoto shares it and its
+transactions. Without kura, start a pool with `shigoto_db:start_pool/2` and name
+it with `pool`.
+
 ### Erlang (sys.config)
 
 ```erlang
 {shigoto, [
-    {pool, my_app_db},
+    {repo, my_app_repo},
     {queues, [{<<"default">>, 10}, {<<"mailers">>, 5}]},
     {poll_interval, 5000},
     {prune_after_days, 14},
@@ -43,7 +49,7 @@ end
 
 ```elixir
 config :shigoto,
-  pool: :my_app_db,
+  repo: :my_app_repo,
   queues: [{"default", 10}, {"mailers", 5}],
   poll_interval: 5000,
   prune_after_days: 14,
@@ -55,7 +61,8 @@ config :shigoto,
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `pool` | *required* | Your pgo pool name |
+| `repo` | — | kura repo whose minato pool shigoto shares; read before `pool` |
+| `pool` | — | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are archived |
@@ -71,15 +78,22 @@ config :shigoto,
 
 ## Run the Migration
 
-Create the necessary tables:
+The shigoto application creates or updates its tables when it starts. That
+needs the pool up and the database there; if it is not, the application logs
+`shigoto_migration_failed` with the reason and starts without tables. On the
+first boot of a fresh database, where kura's migrator creates it after shigoto
+has started, run the migration again once it exists:
 
 ```erlang
-shigoto_migration:up(my_app_db).
+ok = shigoto_migration:up(my_app_repo).
 ```
 
 ```elixir
-:shigoto_migration.up(:my_app_db)
+:ok = :shigoto_migration.up(:my_app_repo)
 ```
+
+`up/1` is idempotent and answers `{error, Reason}` for the first statement that
+fails.
 
 ## Create a Worker
 
@@ -168,13 +182,17 @@ shigoto:insert_all([
 
 ## Transactional Enqueue
 
-If shigoto uses the same pgo pool as your application, job inserts participate in
-your database transactions. The job is only enqueued if the transaction commits:
+With `{repo, Repo}`, a job inserted inside the repo's transaction is part of
+it, and commits or rolls back with your writes:
 
 ```erlang
-pgo:transaction(fun() ->
-    pgo:query(~"INSERT INTO users (name, email) VALUES ($1, $2)", [Name, Email]),
-    shigoto:insert(#{worker => welcome_email_worker, args => #{<<"email">> => Email}})
+my_app_repo:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{
+        worker => welcome_email_worker,
+        args => #{<<"user_id">> => maps:get(id, User)}
+    }),
+    User
 end).
 ```
 
@@ -182,12 +200,21 @@ If the transaction rolls back (e.g. a unique constraint violation on the user),
 the job is never inserted. No "user created but email lost" or "email sent but
 user creation failed" bugs.
 
-This works with Kura too — just configure shigoto to use the same pool:
+`shigoto:transaction/1` works the other way round: kura writes made inside it
+join the same transaction, and `job_inserted` telemetry for its jobs fires only
+after the commit.
 
 ```erlang
-{pgo, [{pools, [{default, #{...}}]}]},
-{shigoto, [{pool, default}]}
+shigoto:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    User
+end).
 ```
+
+With `{pool, Pool}` instead of `repo`, `shigoto:transaction/1` covers shigoto's
+own statements on that pool; a kura transaction on the same pool is still
+joined by jobs inserted inside it.
 
 ## Testing with drain_queue
 

@@ -7,16 +7,16 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 ## Features
 
 ### Core
-- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [pgo](https://github.com/erleans/pgo). Transactional enqueue using the same pool as your application.
+- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [minato](https://hex.pm/packages/minato). With [kura](https://hex.pm/packages/kura), shigoto shares the repo's pool and its transactions, so a job enqueued with your writes commits or rolls back with them.
 - **Multi-node safe** — `FOR UPDATE SKIP LOCKED` ensures each job is claimed by exactly one node. No coordination required.
 - **Priority queues** — Higher priority jobs are claimed first. Multiple queues with independent concurrency limits.
 - **Dynamic queues** — Add and remove queues at runtime without restart.
 - **Exponential backoff** — Failed jobs retry with `min(attempt^4 + jitter, 1800)` second delays, or provide a custom `backoff/2` callback.
 
 ### Scheduling
-- **Cron scheduling** — Built-in 5-field cron parser with leader election via advisory locks. Catches up on missed intervals after restarts.
+- **Cron scheduling** — Built-in 5-field cron parser with leader election via advisory locks. Each minute is scheduled once across nodes, and a run missed in the last hour is caught up after a restart.
 - **Scheduled jobs** — Enqueue jobs for future execution with `scheduled_at`.
-- **Job snoozing** — Workers can return `{snooze, Seconds}` to reschedule without consuming a retry attempt.
+- **Job snoozing** — Workers can return `{snooze, Seconds}` to reschedule without using up a retry attempt.
 
 ### Reliability
 - **Job dependencies** — `depends_on` chains ensure jobs execute in order. Cycle detection prevents deadlocks.
@@ -52,15 +52,16 @@ Add to your deps:
 
 ```erlang
 {deps, [
-    {shigoto, {git, "https://github.com/Taure/shigoto.git", {branch, "main"}}}
+    {shigoto, "~> 1.9"}
 ]}.
 ```
 
-Configure in `sys.config`:
+Configure in `sys.config`. With kura, name the repo; shigoto runs on the
+minato pool `kura_postgres` starts for it:
 
 ```erlang
 {shigoto, [
-    {pool, my_app_db},
+    {repo, my_app_repo},
     {queues, [{<<"default">>, 10}, {<<"emails">>, 5}]},
     {poll_interval, 5000},
     {cron, [
@@ -69,10 +70,22 @@ Configure in `sys.config`:
 ]}
 ```
 
-Run the migration:
+Without kura, start a pool of its own and name it with `pool`:
 
 ```erlang
-shigoto_migration:up(my_app_db).
+{ok, _} = shigoto_db:start_pool(my_app_jobs, #{
+    host => "localhost", database => "my_app", user => "postgres", password => "postgres"
+}).
+```
+
+`shigoto` creates or updates its tables when it starts, which needs the pool
+running and the database there. If that fails it logs
+`shigoto_migration_failed` and keeps running without tables; call the
+migration yourself once the database exists, for instance after kura's
+migrator has created it:
+
+```erlang
+ok = shigoto_migration:up(my_app_repo).
 ```
 
 Define a worker:
@@ -111,13 +124,42 @@ shigoto:insert(#{
 }).
 ```
 
+## Transactional Enqueue
+
+With `{repo, Repo}`, shigoto and kura share transactions on the repo's pool, in
+both directions:
+
+```erlang
+%% A job inserted inside a kura transaction commits or rolls back with it.
+my_app_repo:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{
+        worker => welcome_email_worker,
+        args => #{<<"user_id">> => maps:get(id, User)}
+    }),
+    User
+end).
+
+%% kura writes inside shigoto:transaction/1 join it too.
+shigoto:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    User
+end).
+```
+
+A raise inside either rolls back both the rows and the jobs. Telemetry for jobs
+inserted inside `shigoto:transaction/1` fires after the commit; inside a kura
+transaction it fires on insert. With `{pool, Pool}`, `shigoto:transaction/1`
+covers shigoto's own statements on that pool.
+
 ## Job Lifecycle
 
 ```
 available → executing → completed
                      ↘ retryable → available (retry with backoff)
                      ↘ discarded (max attempts reached)
-                     ↘ snoozed → available (rescheduled, attempt preserved)
+                     ↘ snoozed → available (rescheduled, the attempt given back)
 ```
 
 Jobs can also be `cancelled` via `shigoto:cancel/2` and retried via `shigoto:retry/2`.
@@ -147,7 +189,8 @@ All optional except `perform/1`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `pool` | *required* | pgo pool name |
+| `repo` | — | kura repo whose minato pool shigoto shares (read before `pool`) |
+| `pool` | — | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names and concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling |
 | `cron` | `[]` | `{Name, Schedule, Worker, Args}` tuples |

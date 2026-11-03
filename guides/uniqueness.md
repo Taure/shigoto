@@ -66,7 +66,7 @@ with no deduplication. Otherwise it calls `insert_unique/4`, which:
 
 1. Builds the `unique_key` with `build_unique_key/4`.
 2. Derives a lock key with `erlang:phash2(UniqueKey)`.
-3. Opens a `pgo:transaction/2` and takes a **Postgres advisory transaction
+3. Opens a `shigoto_db:transaction/2` (or joins the one already open) and takes a **Postgres advisory transaction
    lock**: `SELECT pg_advisory_xact_lock($1)`. This serialises concurrent
    inserts that hash to the same key; the lock is released automatically when
    the transaction commits or rolls back.

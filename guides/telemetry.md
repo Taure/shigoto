@@ -156,3 +156,26 @@ def metrics do
   ]
 end
 ```
+
+## Seeing shigoto's own logs
+
+Alongside each event, shigoto logs the job lifecycle (`job inserted`,
+`job completed`, `job failed`, `job discarded`, ...) with `domain => [shigoto]`
+in the metadata. OTP's `default` handler only passes events with no domain or
+an `[otp, ...]` one, so out of the box these logs are dropped, failures
+included. Let the shigoto domain through to see them:
+
+```erlang
+ok = logger:add_handler_filter(
+    default, shigoto, {fun logger_filters:domain/2, {log, sub, [shigoto]}}
+).
+```
+
+or in `sys.config`, as a filter on the handler that should show them. The
+completed and inserted lines are at `info`, so the primary level must allow
+`info` as well. Common Test redirects logging and shows these lines whatever
+the filters, so a test run is not a reliable check.
+
+While a job runs, its process carries `shigoto_job_id`, `shigoto_worker`,
+`shigoto_queue` and `shigoto_attempt` in its logger metadata, so log lines a
+worker writes from `perform/1` can be correlated with the job.

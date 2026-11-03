@@ -119,8 +119,7 @@ A typical CT suite for shigoto tests:
 all() -> [test_email_job].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
-    {ok, _} = pgo:start_pool(?POOL, #{
+    {ok, _} = shigoto_db:start_pool(?POOL, #{
         host => "localhost",
         port => 5432,
         database => "my_app_test",
@@ -139,7 +138,7 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    pgo:query(<<"DELETE FROM shigoto_jobs">>, [], #{pool => ?POOL}),
+    _ = shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),
     ok.
 
 test_email_job(_Config) ->
@@ -150,6 +149,9 @@ test_email_job(_Config) ->
     ?assertEqual(<<"available">>, maps:get(state, Job)),
     ok = shigoto:drain_queue(<<"default">>).
 ```
+
+In an app on kura, start the repo instead and set `{repo, my_app_repo}`;
+shigoto then runs on the repo's pool.
 
 ## Testing Workers Directly
 

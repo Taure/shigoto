@@ -4,7 +4,7 @@ Working agreement for agents and contributors on **shigoto** (仕事, "work") -
 PostgreSQL-backed background job processing for Erlang. Jobs live in Postgres
 and are claimed with `FOR UPDATE SKIP LOCKED`, so any node with the DB pool is a
 worker: no Redis, no external broker, no coordination. A small OTP library on
-[pgo](https://github.com/erleans/pgo) + [telemetry](https://hex.pm/packages/telemetry)
+[minato](https://hex.pm/packages/minato) + [telemetry](https://hex.pm/packages/telemetry)
 + [seki](https://github.com/Taure/seki) (resilience). Bring your own app.
 
 ## Job-correctness scope (the pillars)
@@ -51,7 +51,8 @@ rebar3 ex_doc               # fix every new warning
 ```
 
 Migrations are not hand-written. `shigoto_migration:up/Pool` runs the versioned,
-idempotent statement sets (`v1..v5`) against a pgo pool; `down/1` drops the
+idempotent statement sets (`v1..v6`) against a minato pool and answers
+`{error, Reason}` for the first one that fails; `down/1` drops the
 tables, trigger, and notify function. Edit the versioned statements in
 `shigoto_migration.erl`, never scatter DDL elsewhere.
 
@@ -90,26 +91,35 @@ shigoto_sup (one_for_one)
   └─ shigoto_notifier       LISTEN/NOTIFY wake-ups (optional)
 ```
 
-- **Enqueue.** `shigoto:insert/1,2` -> `shigoto_repo:insert_job` in the app's own
-  pgo pool (transactional with the caller's work). An `AFTER INSERT` trigger
-  emits `NOTIFY shigoto_jobs_insert`.
+- **Enqueue.** `shigoto:insert/1,2` -> `shigoto_repo:insert_job` on the
+  configured minato pool. With `{repo, Repo}` that is the pool kura_postgres
+  started for the repo, and `shigoto_db` joins a kura transaction open in the
+  calling process (and opens `shigoto:transaction/1` through kura), so enqueue
+  is transactional with the caller's kura writes. kura_postgres is an optional
+  runtime integration, not a dependency. An `AFTER INSERT` trigger emits
+  `NOTIFY shigoto_jobs_insert`.
 - **Dequeue.** Each `shigoto_queue` polls every `poll_interval`, claims up to
-  `concurrency - active` jobs via `FOR UPDATE SKIP LOCKED` (ROW_NUMBER subquery
-  wrapped in an outer locking select), and starts one monitored executor per
+  `concurrency - active` jobs via `FOR UPDATE SKIP LOCKED` (the locking select
+  runs once as `id = ANY(ARRAY(SELECT ... LIMIT n FOR UPDATE SKIP LOCKED))`;
+  never `id IN (SELECT ...)`, whose semi join can rescan the subquery and claim
+  past the limit), and starts one monitored executor per
   job under `shigoto_executor_sup`. Weighted / fair (partition-key) claiming and
   pause/resume live here.
 - **Retry / backoff.** On error, timeout, or crash the executor records a
   structured failure and reschedules: `retryable -> available`. Delay is the
   worker's `backoff/2` or the default `min(round(Attempt^4) + jitter(1..30),
   1800)` seconds. At `max_attempts` the job is `discarded` and `on_discard/2`
-  fires. `{snooze, Secs}` reschedules without consuming an attempt.
-- **Notify + polling fallback.** `shigoto_notifier` LISTENs via
-  `pgo_notifications`, pokes the matching queue to `poll` immediately, and
+  fires. `{snooze, Secs}` reschedules and raises `max_attempts` by one, giving
+  back the attempt the claim counted.
+- **Notify + polling fallback.** `shigoto_notifier` LISTENs via a
+  minato listener, pokes the matching queue to `poll` immediately, and
   reconnects on drop; the timed poll loop always runs underneath it.
 - **Batches.** `shigoto_batch` groups jobs, tracks completed/discarded counts
   transactionally, and runs a callback worker on completion.
-- **Cron.** `shigoto_cron` uses `pg_try_advisory_xact_lock` so one node owns
-  scheduling; it catches up on intervals missed during downtime.
+- **Cron.** `shigoto_cron` runs each pass in a transaction that takes
+  `pg_try_advisory_xact_lock`, so one node schedules at a time, and stores each
+  entry's `last_scheduled_at` in `shigoto_cron` in the same transaction, so a
+  minute is scheduled once; it catches up on the last hour after downtime.
 - **Stale rescue.** Heartbeats + a per-queue `rescue` tick re-queue zombie jobs
   whose owner died (threshold `heartbeat_interval * 2`).
 - **Resilience** (via seki): per-worker rate limit, circuit breaker, local +
@@ -117,11 +127,12 @@ shigoto_sup (one_for_one)
 
 ## Gotchas
 
-- `pgo` is structurally the right driver here (caller-driven I/O + ETS-holder
-  pool, ships `pgo_notifications`). Do not propose a pgo -> X swap without first
-  benchmarking the candidate on a real insert/claim/complete loop; the last such
-  attempt (epgsql+hnc, 2026-05) measured 6-38% slower and was abandoned.
-- CT suites need Docker Postgres (`:5556`); they exercise the real locking and
+- The driver is minato (since "feat: run on minato", #48). Do not propose a
+  driver swap without first benchmarking the candidate on a real
+  insert/claim/complete loop.
+- `shigoto_db` decodes rows as maps with atom keys. Match `#{rows := [#{col :=
+  V}]}`, never tuple rows; tuple matches silently never match.
+- CT suites need Docker Postgres (`:5556`, or set `SHIGOTO_TEST_DB_PORT`); they exercise the real locking and
   transactions - do not stub the DB out of them.
 - `enable-elp-eqwalize` is off in CI; if you add eqwalizer specs, do not let
   OTP behaviour result types panic the checker - hand-roll local types.
