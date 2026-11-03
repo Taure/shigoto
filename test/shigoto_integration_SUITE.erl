@@ -26,6 +26,8 @@
     test_newer_schema_is_left_alone/1,
     test_huge_schema_comment_is_not_a_version/1,
     test_migration_does_not_queue_behind_a_reader/1,
+    test_migration_succeeds_under_steady_writes/1,
+    test_comment_with_a_trailing_newline_is_not_a_version/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -88,6 +90,8 @@ all() ->
         test_newer_schema_is_left_alone,
         test_huge_schema_comment_is_not_a_version,
         test_migration_does_not_queue_behind_a_reader,
+        test_migration_succeeds_under_steady_writes,
+        test_comment_with_a_trailing_newline_is_not_a_version,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -154,6 +158,7 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
+    _ = persistent_term:erase({shigoto_migration, unstamped_warned}),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -273,10 +278,55 @@ test_migration_does_not_queue_behind_a_reader(_Config) ->
         {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
         ct:pal("claim latency with a migration refused its table locks: ~p ms", [ClaimMs]),
         ?assertEqual({error, lock_timeout}, Migration),
-        ?assert(ClaimMs < 500)
+        ?assert(ClaimMs < 700)
     after
         ok = shigoto_migration:up(?POOL)
     end.
+
+%% Short insert transactions keep shigoto_jobs locked almost all the time. A
+%% migration that waits briefly for its table locks still gets them; one that
+%% refuses to wait never does.
+test_migration_succeeds_under_steady_writes(_Config) ->
+    Stop = atomics:new(1, []),
+    Writers = [spawn_link(fun() -> write_until(Stop) end) || _ <- [1, 2]],
+    timer:sleep(300),
+    try
+        Results = [
+            begin
+                #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+                shigoto_migration:up(?POOL)
+            end
+         || _ <- lists:seq(1, 5)
+        ],
+        ?assertEqual([ok, ok, ok, ok, ok], Results)
+    after
+        atomics:put(Stop, 1, 1),
+        [unlink(Writer) || Writer <- Writers],
+        timer:sleep(300)
+    end,
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+write_until(Stop) ->
+    case atomics:get(Stop, 1) of
+        1 ->
+            ok;
+        0 ->
+            shigoto_db:transaction(?POOL, fun() ->
+                #{} = shigoto_db:query(
+                    ?POOL,
+                    ~"INSERT INTO shigoto_jobs (queue, worker, args) VALUES ('writes', 'w', '{}')",
+                    []
+                ),
+                #{} = shigoto_db:query(?POOL, ~"SELECT pg_sleep(0.02)", [])
+            end),
+            write_until(Stop)
+    end.
+
+test_comment_with_a_trailing_newline_is_not_a_version(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS E'shigoto 6\\n'", []),
+    ?assertEqual(<<"shigoto 6\n">>, schema_comment()),
+    ?assertEqual(ok, shigoto_migration:up(?POOL)),
+    ?assertEqual(~"shigoto 6", schema_comment()).
 
 schema_comment() ->
     #{rows := [#{version := Version}]} =

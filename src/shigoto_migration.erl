@@ -33,15 +33,16 @@ only read and write rows can run it. Run `up/1` once as the table owner to
 record the version.
 
 Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
-`shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode with `NOWAIT`,
-then runs every statement in order, each waiting at most 2 seconds for a table
-lock (`lock_timeout`). DDL locks a table against every reader and writer until
-the transaction ends, so a migration that took one table and then waited on
-another would stall job claims for as long. When a table is in use, or the wait
-runs out, the migration rolls back and answers `{error, lock_timeout}`: retry
-it, or run migrations from one node at a quiet moment. On a busy system the
-`NOWAIT` lock can fail often; the boot retries and `m:shigoto_migrator` cover
-that.
+`shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
+statement, then runs every statement in order. Every lock wait is bounded at
+500 ms (`lock_timeout`). A queued ACCESS EXCLUSIVE request makes new claims and
+inserts wait behind it, so the bound is also the longest a migration stalls
+them; short transactions that keep writing to the tables finish within it, and
+the migration gets its locks. Taking every table at once means it never holds
+one table while it waits on another. When a long transaction (a slow reader, an
+open batch) keeps a table past the bound, the migration rolls back and answers
+`{error, lock_timeout}`: retry it, or run migrations from one node at a quiet
+moment. The boot retries and `m:shigoto_migrator` retry it for you.
 
 Stops at the first statement that fails, rolls back, and answers
 `{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
@@ -68,7 +69,7 @@ locked(Pool) ->
             %% The advisory lock first: lock_timeout would also cut short the
             %% wait for another node's migration.
             answered(shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)", [?LOCK_ID])),
-            answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '2s'", [])),
+            answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '500ms'", [])),
             case current(Pool) of
                 true ->
                     ok;
@@ -96,10 +97,9 @@ schema_version() ->
     ?SCHEMA_VERSION.
 
 version_statement() ->
-    <<"COMMENT ON TABLE shigoto_jobs IS '", (version_comment())/binary, "'">>.
-
-version_comment() ->
-    <<"shigoto ", (integer_to_binary(?SCHEMA_VERSION))/binary>>.
+    iolist_to_binary([
+        ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto ", integer_to_binary(?SCHEMA_VERSION), ~"'"
+    ]).
 
 current(Pool) ->
     SQL =
@@ -158,17 +158,18 @@ warn_unstamped_once(Pool) ->
 
 %% At most 9 digits: a longer number is not a version this code wrote.
 recorded(<<"shigoto ", Number/binary>>) ->
-    case re:run(Number, ~"^[1-9][0-9]{0,8}$", [{capture, none}]) of
+    case re:run(Number, ~"^[1-9][0-9]{0,8}$", [dollar_endonly, {capture, none}]) of
         match -> binary_to_integer(Number);
         nomatch -> 0
     end;
 recorded(_Comment) ->
     0.
 
-%% Take every table lock the DDL needs at once, or none. Without NOWAIT the
-%% first ALTER holds shigoto_jobs ACCESS EXCLUSIVE while a later statement
-%% waits on another table, and every claim queues behind it. A fresh database
-%% has no tables to lock.
+%% Take every table lock the DDL needs in one statement, so the first ALTER
+%% never holds shigoto_jobs while a later one waits on another table with every
+%% claim queued behind it. Waiting (bounded by lock_timeout) rather than NOWAIT:
+%% NOWAIT fails whenever any short write transaction is open, which under steady
+%% writes is nearly always. A fresh database has no tables to lock.
 lock_tables(Pool) ->
     SQL =
         ~"""
@@ -192,7 +193,7 @@ lock_statement([First | Rest]) ->
         ~"LOCK TABLE ",
         First,
         [[~", ", Table] || Table <- Rest],
-        ~" IN ACCESS EXCLUSIVE MODE NOWAIT"
+        ~" IN ACCESS EXCLUSIVE MODE"
     ]).
 
 answered({error, Reason}) -> throw({?MODULE, Reason});

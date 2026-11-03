@@ -81,9 +81,9 @@ config :shigoto,
 
 The shigoto application creates or updates its tables when it starts. It tries
 up to 5 times, 1 to 5 seconds apart. If the schema is still not current (the
-database does not exist yet, the pool cannot reach it, or a migration statement
-waited more than 2 seconds for a table lock), the application starts without
-its queues:
+database does not exist yet, the pool cannot reach it, or the migration could
+not get its table locks within 500 ms), the application starts without its
+queues:
 
 - it logs `shigoto_migration_pending` at error level and emits
   `[shigoto, migration, pending]` telemetry;
@@ -118,10 +118,13 @@ are already running).
 
 `up/1` is idempotent and answers `{error, Reason}` for the first statement that
 fails. Nodes that boot together migrate one at a time, and a schema that is
-already current is left alone without taking a table lock. When a statement has
-to wait more than 2 seconds for a table lock (a long query on a shigoto table),
-`up/1` rolls back and answers `{error, lock_timeout}` instead of stalling job
-claims behind it. Retry it, or run migrations from one node at a quiet moment.
+already current is left alone without taking a table lock. Otherwise `up/1`
+locks the existing shigoto tables all at once, waiting at most 500 ms; claims and
+inserts wait behind it for no longer than that, and steady short writes do not
+keep it out. When a long transaction holds a table past 500 ms (a slow query on
+a shigoto table), `up/1` rolls back and answers `{error, lock_timeout}` instead
+of stalling job claims behind it. Retry it, or run migrations from one node at
+a quiet moment.
 
 Upgrading from shigoto 1.9.x, whose schema carries no version comment: when the
 tables already have the newest columns, `up/1` treats the schema as current,
