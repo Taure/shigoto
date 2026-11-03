@@ -926,7 +926,7 @@ start_pool2() ->
     case
         shigoto_db:start_pool(Pool2, #{
             host => "localhost",
-            port => 5556,
+            port => shigoto_test_repo:port(),
             database => "shigoto_test",
             user => "postgres",
             password => "root",
