@@ -286,7 +286,7 @@ encodable(_Args) ->
 
 schedule_due(Entries) ->
     Pool = shigoto_config:pool(),
-    case {shigoto_repo:current_minute(Pool), shigoto_repo:get_cron_entries(Pool)} of
+    case {shigoto_repo:current_minute(Pool), shigoto_repo:get_due_cron_entries(Pool)} of
         {{ok, Now}, {ok, Stored}} ->
             LastRuns = #{N => L || #{name := N, last_scheduled_at := L} <- Stored},
             lists:foreach(fun(Entry) -> schedule_entry(Pool, Entry, LastRuns, Now) end, Entries);
