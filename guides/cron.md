@@ -118,7 +118,8 @@ earlier minute than the one already stored.
    worker's `priority/0` and `max_attempts/0`; the `shigoto_cron` row records
    the same three values
 3. The job inserts and the new `last_scheduled_at` commit together, so a minute
-   is never scheduled twice, even by two nodes
+   is never scheduled twice, even by two nodes. The pass runs in
+   `shigoto:transaction/2`, so `job_inserted` telemetry fires after the commit
 4. Jobs also use a 60-second unique constraint (`[worker, args]`, states
    `available` and `executing`), so a run still waiting is not queued again
 5. Cron jobs follow the same retry, backoff, and pruning rules as regular jobs

@@ -18,6 +18,7 @@
     cron_catches_up_a_missed_minute/1,
     cron_does_not_backfill_a_new_entry/1,
     cron_never_moves_the_last_run_back/1,
+    cron_telemetry_fires_after_the_pass_commits/1,
     stager_notifies_a_due_queue/1
 ]).
 
@@ -34,6 +35,7 @@ all() ->
         cron_catches_up_a_missed_minute,
         cron_does_not_backfill_a_new_entry,
         cron_never_moves_the_last_run_back,
+        cron_telemetry_fires_after_the_pass_commits,
         stager_notifies_a_due_queue
     ].
 
@@ -140,6 +142,28 @@ cron_never_moves_the_last_run_back(_Config) ->
     ok = shigoto_cron:schedule_once(),
     ?assertEqual([], jobs()),
     ?assertMatch([#{last_scheduled_at := Ahead}], cron_rows()).
+
+cron_telemetry_fires_after_the_pass_commits(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    Handler = {?MODULE, inserted},
+    Self = self(),
+    ok = telemetry:attach(
+        Handler,
+        [shigoto, job, inserted],
+        fun(_Event, _Measure, _Meta, _HandlerConfig) ->
+            Self ! {inserted, shigoto_db:in_transaction(?POOL)}
+        end,
+        undefined
+    ),
+    try
+        ok = shigoto_cron:schedule_once(),
+        receive
+            {inserted, Holder} -> ?assertEqual(undefined, Holder)
+        after 2000 -> ct:fail(no_job_inserted_telemetry)
+        end
+    after
+        telemetry:detach(Handler)
+    end.
 
 %%----------------------------------------------------------------------
 %% Stager

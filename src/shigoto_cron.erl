@@ -17,7 +17,8 @@ the first pass. An entry seen for the first time is scheduled from the current
 minute on.
 
 Jobs go to the worker's `queue/0` when it defines one, and to `default`
-otherwise.
+otherwise. Each pass runs inside `shigoto:transaction/2`, so `job_inserted`
+telemetry for cron jobs fires after the pass commits.
 
 Entries may carry a `timezone` in their `Opts` map (`utc`, an integer hour
 offset, a `"+/-N"`/`"UTC"` binary, or a named IANA zone such as
@@ -111,13 +112,16 @@ not_ready() ->
 
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
-    shigoto_db:transaction(Pool, fun() ->
-        case shigoto_repo:try_advisory_xact_lock(Pool, ?CRON_LOCK_ID) of
-            true -> Fun();
-            false -> ok;
-            {error, Reason} -> error({shigoto_cron, {lock_failed, Reason}})
-        end
-    end).
+    shigoto:transaction(
+        fun() ->
+            case shigoto_repo:try_advisory_xact_lock(Pool, ?CRON_LOCK_ID) of
+                true -> Fun();
+                false -> ok;
+                {error, Reason} -> error({shigoto_cron, {lock_failed, Reason}})
+            end
+        end,
+        #{pool => Pool}
+    ).
 
 schedule_due() ->
     Pool = shigoto_config:pool(),
