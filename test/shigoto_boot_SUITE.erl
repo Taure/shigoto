@@ -10,6 +10,7 @@
     notifier_survives_while_queues_wait/1,
     a_queue_failing_on_the_late_path_is_logged/1,
     boot_does_not_retry_a_refused_migration/1,
+    the_migrator_stops_before_the_queue_supervisor/1,
     retries_asked_together_run_once/1,
     an_unstamped_schema_boots_with_a_dml_role/1
 ]).
@@ -23,6 +24,7 @@ all() ->
         notifier_survives_while_queues_wait,
         a_queue_failing_on_the_late_path_is_logged,
         boot_does_not_retry_a_refused_migration,
+        the_migrator_stops_before_the_queue_supervisor,
         retries_asked_together_run_once,
         an_unstamped_schema_boots_with_a_dml_role
     ].
@@ -32,7 +34,10 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(telemetry),
     ok = shigoto_test_repo:start(),
     ok = shigoto_migration:up(?POOL),
-    ok = application:load(shigoto),
+    case application:load(shigoto) of
+        ok -> ok;
+        {error, {already_loaded, shigoto}} -> ok
+    end,
     application:set_env(shigoto, pool, ?POOL),
     Config.
 
@@ -42,11 +47,13 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
+    _ = persistent_term:erase({shigoto_migration, unstamped_warned}),
     application:set_env(shigoto, queues, [{~"boot_probe", 1}]),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     _ = application:stop(shigoto),
+    _ = persistent_term:erase({shigoto_migrator, pending}),
     application:unset_env(shigoto, notifier),
     application:unset_env(shigoto, fanout_queues),
     ok = shigoto_migration:up(?POOL).
@@ -59,7 +66,7 @@ queues_wait_for_the_migration(_Config) ->
         ?assertEqual([], supervisor:which_children(shigoto_queue_sup)),
         ?assert(is_pid(whereis(shigoto_migrator)))
     after
-        Reader ! stop
+        stop_reader(Reader)
     end,
     ok = shigoto_migrator:retry_now(),
     ok = wait_for(fun() -> supervisor:which_children(shigoto_queue_sup) =/= [] end, 50),
@@ -96,7 +103,7 @@ notifier_survives_while_queues_wait(_Config) ->
             ?assertEqual({error, not_found}, shigoto:pause_queue(~"boot_probe")),
             Pids
         after
-            Reader ! stop
+            stop_reader(Reader)
         end,
     ok = shigoto_migrator:retry_now(),
     ok = wait_for(fun() -> whereis(shigoto_migrator) =:= undefined end, 50),
@@ -182,13 +189,32 @@ retries_asked_together_run_once(_Config) ->
         [ok = shigoto_migrator:retry_now() || _ <- lists:seq(1, 50)],
         ok = sys:resume(Migrator),
         _ = sys:get_state(Migrator),
-        ?assertEqual(1, count_pending(0))
+        ?assertEqual(1, count_pending(0)),
+        ?assertEqual({error, unknown_call}, gen_server:call(Migrator, anything))
     after
         unlink(Migrator),
         exit(Migrator, kill),
         telemetry:detach(pending),
         application:set_env(shigoto, pool, ?POOL)
     end.
+
+%% Children stop in reverse start order, and which_children lists them in that
+%% order: a retry that succeeds during shutdown must not find the queue
+%% supervisor already stopping.
+the_migrator_stops_before_the_queue_supervisor(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+    Reader = read_the_archive(),
+    try
+        {ok, _} = application:ensure_all_started(shigoto),
+        ?assertEqual([], supervisor:which_children(shigoto_queue_sup)),
+        Ids = [Id || {Id, _, _, _} <- supervisor:which_children(shigoto_sup)],
+        ?assert(position(shigoto_migrator, Ids) < position(shigoto_queue_sup, Ids))
+    after
+        stop_reader(Reader)
+    end.
+
+position(Id, Ids) ->
+    length(lists:takewhile(fun(Other) -> Other =/= Id end, Ids)).
 
 an_unstamped_schema_boots_with_a_dml_role(_Config) ->
     #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
@@ -282,6 +308,14 @@ read_the_archive() ->
     receive
         reading -> Reader
     after 5000 -> ct:fail(reader_did_not_start)
+    end.
+
+stop_reader(Reader) ->
+    Ref = monitor(process, Reader),
+    Reader ! stop,
+    receive
+        {'DOWN', Ref, process, Reader, _} -> ok
+    after 5000 -> ct:fail(reader_did_not_stop)
     end.
 
 wait_for(_Check, 0) ->

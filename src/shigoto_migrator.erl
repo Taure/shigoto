@@ -28,7 +28,7 @@ After it stops, its child spec stays in `shigoto_sup`, so
 
 -include_lib("kernel/include/logger.hrl").
 
--export([boot/1, retry_now/0, pending/0, start_link/0]).
+-export([boot/1, retry_now/0, pending/0, held_back/0, start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(BOOT_ATTEMPTS, 5).
@@ -58,7 +58,7 @@ boot(Pool, Attempt) ->
                     timer:sleep(999 + rand:uniform(4001)),
                     boot(Pool, Attempt + 1);
                 false ->
-                    pending(Pool, Reason),
+                    report_pending(Pool, Reason),
                     false
             end
     end.
@@ -86,7 +86,13 @@ retry_now() ->
 -doc false.
 -spec pending() -> boolean().
 pending() ->
-    persistent_term:get(?PENDING, false) =:= true andalso is_pid(whereis(?MODULE)).
+    held_back() andalso is_pid(whereis(?MODULE)).
+
+%% Read by shigoto_queue_sup:init/1, which starts before this process.
+-doc false.
+-spec held_back() -> boolean().
+held_back() ->
+    persistent_term:get(?PENDING, false) =:= true.
 
 -doc false.
 start_link() ->
@@ -98,7 +104,7 @@ init([]) ->
 
 -doc false.
 handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
+    {reply, {error, unknown_call}, State}.
 
 -doc false.
 handle_cast(_Msg, State) ->
@@ -118,7 +124,7 @@ handle_info(retry, #{timer := Timer} = State) ->
             ),
             {stop, normal, State};
         {error, Reason} ->
-            pending(Pool, Reason),
+            report_pending(Pool, Reason),
             {noreply, State#{timer := retry_later()}}
     end;
 handle_info(_Info, State) ->
@@ -147,7 +153,7 @@ flush_retries() ->
 retry_later() ->
     erlang:send_after(?RETRY_INTERVAL, self(), retry).
 
-pending(Pool, Reason) ->
+report_pending(Pool, Reason) ->
     ?LOG_ERROR(#{
         msg => ~"shigoto_migration_pending",
         pool => Pool,

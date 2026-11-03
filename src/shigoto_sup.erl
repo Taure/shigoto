@@ -5,7 +5,9 @@ scheduler, pruner, heartbeat, and optional LISTEN/NOTIFY notifier
 plus its due-job stager.
 
 When the schema is not current at boot, `shigoto_migrator` also runs, and the
-queue supervisor starts with no queues until the migration succeeds.
+queue supervisor starts with no queues until the migration succeeds. The
+migrator starts after the queue supervisor, so it stops before it at shutdown
+and a retry never adds queues to a supervisor that is stopping.
 """.
 -behaviour(supervisor).
 
@@ -36,15 +38,15 @@ init(Migrated) ->
                 id => shigoto_executor_sup,
                 start => {shigoto_executor_sup, start_link, []},
                 type => supervisor
+            },
+            #{
+                id => shigoto_queue_sup,
+                start => {shigoto_queue_sup, start_link, [shigoto_config:queues()]},
+                type => supervisor
             }
         ] ++
             migrator(Migrated) ++
             [
-                #{
-                    id => shigoto_queue_sup,
-                    start => {shigoto_queue_sup, start_link, [shigoto_config:queues()]},
-                    type => supervisor
-                },
                 #{
                     id => shigoto_cron,
                     start => {shigoto_cron, start_link, []},

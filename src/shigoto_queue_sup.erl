@@ -47,7 +47,7 @@ shutdown_ms() ->
 -doc false.
 init(Queues) ->
     Children =
-        case shigoto_migrator:pending() of
+        case shigoto_migrator:held_back() of
             true -> [];
             false -> child_specs(Queues)
         end,
