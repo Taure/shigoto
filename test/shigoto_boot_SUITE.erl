@@ -1,4 +1,5 @@
 -module(shigoto_boot_SUITE).
+-behaviour(ct_suite).
 -moduledoc "The application holds its queues back while the schema cannot be migrated.".
 
 -include_lib("stdlib/include/assert.hrl").

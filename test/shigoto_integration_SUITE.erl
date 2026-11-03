@@ -201,10 +201,8 @@ test_schema_version_covers_every_version(_Config) ->
     Versions = [
         binary_to_integer(Version)
      || {Function, 0} <- shigoto_migration:module_info(functions),
-        {match, [Version]} <- [
-            re:run(atom_to_binary(Function), ~"^v([0-9]+)_statements$", [
-                {capture, all_but_first, binary}
-            ])
+        [<<"v", Version/binary>>, ~"statements"] <- [
+            string:split(atom_to_binary(Function), ~"_")
         ]
     ],
     ?assertEqual(lists:max(Versions), shigoto_migration:schema_version()),
