@@ -76,6 +76,16 @@ Emitted with the `shigoto_cron_lock_held_elsewhere` and
 been taken by something other than a shigoto pass for `consecutive_misses`
 passes in a row.
 
+## Migration Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, migration, pending]` | `count` | reason |
+
+Emitted with the `shigoto_migration_pending` error, when boot could not bring
+the schema up to date and the queues are held back (see `m:shigoto_migrator`),
+and on each failed background retry.
+
 ## Testing Events
 
 | Event | Measurements | Metadata |
@@ -113,6 +123,8 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     cron_entry_skipped/3,
     %% Leader lock events
     leader_lock_unavailable/2,
+    %% Migration events
+    migration_pending/1,
     %% Testing events
     testing_mode_armed/1
 ]).
@@ -268,6 +280,12 @@ leader_lock_unavailable(Lock, Misses) ->
         [shigoto, leader_lock, unavailable],
         #{count => 1, consecutive_misses => Misses},
         #{lock => Lock, domain => [shigoto]}
+    ).
+
+-spec migration_pending(term()) -> ok.
+migration_pending(Reason) ->
+    telemetry:execute(
+        [shigoto, migration, pending], #{count => 1}, #{reason => Reason, domain => [shigoto]}
     ).
 
 -spec cron_entry_skipped(binary(), term(), term()) -> ok.

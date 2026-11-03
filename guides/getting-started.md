@@ -79,11 +79,20 @@ config :shigoto,
 
 ## Run the Migration
 
-The shigoto application creates or updates its tables when it starts. That
-needs the pool up and the database there; if it is not, the application logs
-`shigoto_migration_failed` with the reason and starts without tables. On the
-first boot of a fresh database, where kura's migrator creates it after shigoto
-has started, run the migration again once it exists:
+The shigoto application creates or updates its tables when it starts. It tries
+up to 5 times, 1 to 5 seconds apart. If the schema is still not current (the
+database does not exist yet, the pool cannot reach it, or a migration statement
+waited more than 2 seconds for a table lock), the application starts without
+its queues:
+
+- it logs `shigoto_migration_pending` at error level and emits
+  `[shigoto, migration, pending]` telemetry;
+- it retries every 30 seconds, and starts the queues as soon as the migration
+  succeeds.
+
+Jobs inserted while the queues wait (once the tables exist) run when the
+queues start. To migrate sooner, for example right after kura's migrator creates the
+database on a first boot, run it yourself:
 
 ```erlang
 ok = shigoto_migration:up(my_app_repo).
@@ -98,7 +107,7 @@ fails. Nodes that boot together migrate one at a time, and a schema that is
 already current is left alone without taking a table lock. When a statement has
 to wait more than 2 seconds for a table lock (a long query on a shigoto table),
 `up/1` rolls back and answers `{error, lock_timeout}` instead of stalling job
-claims behind it: retry it, or run migrations from one node at a quiet moment.
+claims behind it. Retry it, or run migrations from one node at a quiet moment.
 
 ## Create a Worker
 

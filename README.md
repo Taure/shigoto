@@ -80,10 +80,11 @@ Without kura, start a pool of its own and name it with `pool`:
 ```
 
 `shigoto` creates or updates its tables when it starts, which needs the pool
-running and the database there. If that fails it logs
-`shigoto_migration_failed` and keeps running without tables; call the
-migration yourself once the database exists, for instance after kura's
-migrator has created it:
+running and the database there. It tries 5 times; if the schema is still not
+current it starts without its queues, logs `shigoto_migration_pending`, retries
+every 30 seconds and starts the queues once the migration succeeds (see the
+getting-started guide). To migrate sooner, for instance right after kura's
+migrator has created the database, call it yourself:
 
 ```erlang
 ok = shigoto_migration:up(my_app_repo).

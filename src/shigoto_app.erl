@@ -12,24 +12,7 @@ OTP application callback for Shigoto.
 start(_StartType, _StartArgs) ->
     warn_if_testing_mode(),
     _ = shigoto_db:kura_available(),
-    migrate(shigoto_config:pool()),
-    shigoto_sup:start_link().
-
-migrate(Pool) ->
-    case shigoto_migration:up(Pool) of
-        ok ->
-            ok;
-        {error, Reason} ->
-            ?LOG_ERROR(
-                #{
-                    msg => ~"shigoto_migration_failed",
-                    pool => Pool,
-                    reason => Reason,
-                    action =>
-                        ~"jobs cannot be stored until shigoto_migration:up/1 succeeds; call it once the database exists"
-                }
-            )
-    end.
+    shigoto_sup:start_link(shigoto_migrator:boot(shigoto_config:pool())).
 
 warn_if_testing_mode() ->
     case shigoto_config:testing_mode() of
