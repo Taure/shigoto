@@ -105,12 +105,12 @@ start the queues now rather than at its next 30 second tick:
 
 ```erlang
 ok = shigoto_migration:up(my_app_repo),
-ok = shigoto_migrator:retry_now().
+_ = shigoto_migrator:retry_now().
 ```
 
 ```elixir
 :ok = :shigoto_migration.up(:my_app_repo)
-:ok = :shigoto_migrator.retry_now()
+_ = :shigoto_migrator.retry_now()
 ```
 
 `retry_now/0` answers `not_running` when no migration is pending (the queues
@@ -122,6 +122,12 @@ already current is left alone without taking a table lock. When a statement has
 to wait more than 2 seconds for a table lock (a long query on a shigoto table),
 `up/1` rolls back and answers `{error, lock_timeout}` instead of stalling job
 claims behind it. Retry it, or run migrations from one node at a quiet moment.
+
+Upgrading from shigoto 1.9.x, whose schema carries no version comment: when the
+tables already have the newest columns, `up/1` treats the schema as current,
+logs `shigoto_schema_unstamped` once and runs no DDL, so an application role
+that may only read and write rows still boots with its queues. Run
+`shigoto_migration:up/1` once as the table owner to record the version.
 
 ## Create a Worker
 

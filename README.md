@@ -91,7 +91,7 @@ at once:
 
 ```erlang
 ok = shigoto_migration:up(my_app_repo),
-ok = shigoto_migrator:retry_now().
+_ = shigoto_migrator:retry_now().
 ```
 
 `retry_now/0` answers `not_running` when nothing is pending.
