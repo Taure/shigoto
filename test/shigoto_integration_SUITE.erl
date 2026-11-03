@@ -18,6 +18,7 @@
     test_drain_queue/1,
     test_migration/1,
     test_migration_reports_failure/1,
+    test_concurrent_migrations/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -72,6 +73,7 @@ all() ->
     [
         test_migration,
         test_migration_reports_failure,
+        test_concurrent_migrations,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -164,6 +166,22 @@ test_migration_reports_failure(_Config) ->
         #{} = shigoto_db:query(?POOL, ~"DROP VIEW shigoto_jobs", [])
     end,
     ok = shigoto_migration:up(?POOL).
+
+test_concurrent_migrations(_Config) ->
+    shigoto_migration:down(?POOL),
+    Self = self(),
+    Pids = [
+        spawn_link(fun() -> Self ! {self(), shigoto_migration:up(?POOL)} end)
+     || _ <- [1, 2, 3]
+    ],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 30000 -> timeout
+        end
+     || Pid <- Pids
+    ],
+    ?assertEqual([ok, ok, ok], Results).
 
 test_commit_refused_raises(_Config) ->
     #{} = shigoto_db:query(

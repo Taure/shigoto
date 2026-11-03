@@ -8,21 +8,44 @@ Migrations are idempotent and safe to run multiple times.
 
 -export([up/1, down/1]).
 
+-define(LOCK_ID, 839274630).
+
 -doc """
 Create or update the shigoto tables.
 
-Runs every statement in order and stops at the first one that fails, answering
-`{error, Reason}` with what the database answered. A database that does not
-exist yet, or a role that may not create tables, is an error here rather than a
-node that boots with no tables.
+Runs every statement in order, in one transaction that first takes an advisory
+lock, so nodes booting at the same time migrate one after the other rather than
+racing on `CREATE ... IF NOT EXISTS`. Stops at the first statement that fails,
+rolls back, and answers `{error, Reason}` with what the database answered. A
+database that does not exist yet, or a role that may not create tables, is an
+error here rather than a node that boots with no tables.
 """.
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
-    run(
-        Pool,
-        v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
-            v5_statements() ++ v6_statements()
-    ).
+    case shigoto_db:query(Pool, ~"SELECT 1", []) of
+        {error, Reason} -> {error, Reason};
+        #{} -> locked(Pool)
+    end.
+
+locked(Pool) ->
+    try
+        shigoto_db:transaction(Pool, fun() ->
+            answered(shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)", [?LOCK_ID])),
+            answered(
+                run(
+                    Pool,
+                    v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
+                        v5_statements() ++ v6_statements()
+                )
+            )
+        end)
+    catch
+        throw:{?MODULE, Reason} -> {error, Reason};
+        error:{shigoto_db, Reason} -> {error, Reason}
+    end.
+
+answered({error, Reason}) -> throw({?MODULE, Reason});
+answered(_Ran) -> ok.
 
 run(_Pool, []) ->
     ok;
