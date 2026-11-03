@@ -69,6 +69,8 @@ retryable(_Reason) -> true.
 -doc """
 Retry the migration now instead of at the next 30 second tick.
 
+Retries asked for while one is queued or running are coalesced into one.
+
 Answers `not_running` when no migration is pending.
 """.
 -spec retry_now() -> ok | not_running.
@@ -105,6 +107,7 @@ handle_cast(_Msg, State) ->
 -doc false.
 handle_info(retry, #{timer := Timer} = State) ->
     _ = erlang:cancel_timer(Timer),
+    flush_retries(),
     Pool = shigoto_config:pool(),
     case shigoto_migration:up(Pool) of
         ok ->
@@ -132,6 +135,13 @@ start_queue(#{id := {_Kind, Queue}} = Spec) ->
         {error, Reason} ->
             ?LOG_ERROR(#{msg => ~"shigoto_queue_start_failed", queue => Queue, reason => Reason}),
             shigoto_telemetry:queue_start_failed(Queue, Reason)
+    end.
+
+%% Retries asked for while one ran are answered by the next one.
+flush_retries() ->
+    receive
+        retry -> flush_retries()
+    after 0 -> ok
     end.
 
 retry_later() ->
