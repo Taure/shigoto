@@ -27,6 +27,7 @@
     test_get_job/1,
     test_encryption_roundtrip/1,
     test_encrypted_unique_key_hides_args/1,
+    test_encrypted_args_filter_is_refused/1,
     test_heartbeat_stale_threshold/1,
     test_depends_on_blocks_claiming/1,
     test_depends_on_resolved_on_complete/1,
@@ -56,6 +57,7 @@ all() ->
         test_get_job,
         test_encryption_roundtrip,
         test_encrypted_unique_key_hides_args,
+        test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
         test_depends_on_blocks_claiming,
         test_depends_on_resolved_on_complete,
@@ -364,6 +366,25 @@ test_encrypted_unique_key_hides_args(_Config) ->
             {ok, {conflict, #{id := Id}}},
             shigoto_repo:insert_job(?POOL, Params, #{unique => Unique})
         )
+    after
+        application:unset_env(shigoto, encryption_key)
+    end.
+
+test_encrypted_args_filter_is_refused(_Config) ->
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        Args = #{~"user_id" => 5},
+        {ok, _} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => Args}, #{}
+        ),
+        Refused = {error, args_filter_unsupported_with_encryption},
+        ?assertEqual(Refused, shigoto_repo:find_jobs(?POOL, #{args => Args})),
+        ?assertEqual(Refused, shigoto:cancel_by(?POOL, #{args => Args})),
+        ?assertEqual(Refused, shigoto:retry_by(?POOL, #{args => Args})),
+        ?assertMatch(
+            {ok, [_]}, shigoto_repo:find_jobs(?POOL, #{worker => shigoto_test_worker})
+        ),
+        ?assertEqual({ok, 1}, shigoto:cancel_by(?POOL, #{worker => shigoto_test_worker}))
     after
         application:unset_env(shigoto, encryption_key)
     end.

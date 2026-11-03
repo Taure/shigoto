@@ -247,12 +247,12 @@ cancel(Pool, JobId) ->
     end,
     Result.
 
--doc "Cancel available or retryable jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args, state.".
+-doc "Cancel available or retryable jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Filters) ->
     cancel_by(txn_pool(), Filters).
 
--doc "Cancel available or retryable jobs matching a pattern. Filters: worker, queue, tags, args, state.".
+-doc "Cancel available or retryable jobs matching a pattern. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Pool, Filters) ->
     shigoto_repo:cancel_by(Pool, Filters).
@@ -321,12 +321,12 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).
 
--doc "Retry discarded or cancelled jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags, args.".
+-doc "Retry discarded or cancelled jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Filters) ->
     retry_by(txn_pool(), Filters).
 
--doc "Retry discarded or cancelled jobs matching a filter. Filters: worker, queue, state (`discarded`, `cancelled` or a list), tags, args.".
+-doc "Retry discarded or cancelled jobs matching a filter. Filters: worker, queue, state (`discarded`, `cancelled` or a list), tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Pool, Filters) ->
     shigoto_repo:retry_by(Pool, Filters).

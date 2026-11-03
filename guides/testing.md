@@ -68,7 +68,10 @@ Call `shigoto_testing:reset/0` in `init_per_testcase` to clear the buffer.
 `manual` capture is per-process — it sees enqueues made by the calling process,
 not by other processes it spawns. For cross-process expectations, use a real test
 pool: outside `manual` mode the assertions query the pool via `find_jobs`, so the
-same assertions work against a live database.
+same assertions work against a live database. With an encryption key
+configured, an `args` filter there raises
+`{shigoto_testing_query_failed, args_filter_unsupported_with_encryption}`,
+since the stored args are ciphertext.
 
 Note: `batch`, `depends_on`, and `unique` are no-ops under `inline`/`manual`
 (shigoto logs a warning). Exercise those against a real pool with `drain_queue/1`.

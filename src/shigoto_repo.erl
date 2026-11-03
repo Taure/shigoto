@@ -279,9 +279,22 @@ cancel_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc "Cancel available or retryable jobs matching a pattern. Filters: `worker`, `queue`, `tags`, `args`, `state`.".
+-doc """
+Cancel available or retryable jobs matching a pattern. Filters: `worker`,
+`queue`, `tags`, `args`, `state`.
+
+With an encryption key configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
+""".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> cancel_matching(Pool, Filters)
+    end.
+
+cancel_matching(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
     WhereSQL =
         case WhereClauses of
@@ -341,9 +354,19 @@ Retry all discarded or cancelled jobs matching a filter.
 
 Filters: `worker`, `queue`, `tags`, `args`, and `state` (`discarded` or
 `cancelled`, or a list of them) to retry only one of the two.
+
+With an encryption key configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
 """.
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> retry_matching(Pool, Filters)
+    end.
+
+retry_matching(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
     WhereSQL =
         case WhereClauses of
@@ -459,10 +482,19 @@ DB-backed enqueue assertions.
 
 Filters: `worker`, `queue`, `args` (jsonb containment), `tags` (array
 containment), and `state` (a state binary or a list of them). An empty filter
-returns all jobs. Args are decrypted so callers can match on plaintext.
+returns all jobs. Returned args are decrypted. With an encryption key
+configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
 """.
 -spec find_jobs(atom(), map()) -> {ok, [map()]} | {error, term()}.
-find_jobs(Pool, Filters0) ->
+find_jobs(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> find_matching(Pool, Filters)
+    end.
+
+find_matching(Pool, Filters0) ->
     {StateClauses, StateParams, NextIdx} = state_filter_clause(
         maps:get(state, Filters0, undefined), 1
     ),
@@ -857,6 +889,14 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
 %%----------------------------------------------------------------------
 %% Internal: filters for cancel_by
 %%----------------------------------------------------------------------
+
+args_filter_refused(#{args := _}) ->
+    case shigoto_crypto:is_enabled() of
+        true -> {error, args_filter_unsupported_with_encryption};
+        false -> ok
+    end;
+args_filter_refused(_Filters) ->
+    ok.
 
 build_filter_clauses(Filters, StartIdx) ->
     maps:fold(

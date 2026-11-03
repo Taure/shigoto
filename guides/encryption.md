@@ -67,6 +67,15 @@ key on the next write.
   one inserted after it with the same args are not deduplicated against each
   other.
 
+## Filtering on args
+
+Stored args are ciphertext, so PostgreSQL cannot match them. With an encryption
+key configured, an `args` filter on `shigoto:cancel_by/1,2`,
+`shigoto:retry_by/1,2` or `shigoto_repo:find_jobs/2` (and so the DB-backed
+`shigoto_testing` assertions) answers
+`{error, args_filter_unsupported_with_encryption}` rather than matching
+nothing. Filter on `worker`, `queue`, `tags` or `state` instead.
+
 ## Without Encryption
 
 If no encryption key is configured, args are stored as plaintext JSON.
