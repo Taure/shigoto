@@ -23,7 +23,8 @@ whose pool shigoto shares would do.
     unique_insert_in_a_kura_transaction_joins_it/1,
     kura_write_in_a_rolled_back_shigoto_transaction_is_undone/1,
     kura_write_in_a_shigoto_transaction_commits_with_it/1,
-    shigoto_transaction_with_a_pool_keeps_its_own_connection/1
+    shigoto_transaction_with_a_pool_keeps_its_own_connection/1,
+    a_commit_kura_refuses_raises_like_shigoto/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -35,7 +36,8 @@ all() ->
         unique_insert_in_a_kura_transaction_joins_it,
         kura_write_in_a_rolled_back_shigoto_transaction_is_undone,
         kura_write_in_a_shigoto_transaction_commits_with_it,
-        shigoto_transaction_with_a_pool_keeps_its_own_connection
+        shigoto_transaction_with_a_pool_keeps_its_own_connection,
+        a_commit_kura_refuses_raises_like_shigoto
     ].
 
 init_per_suite(Config) ->
@@ -46,10 +48,20 @@ init_per_suite(Config) ->
     #{} = shigoto_db:query(
         ?POOL, ~"CREATE TABLE IF NOT EXISTS shigoto_kura_probe (id integer)", []
     ),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE TABLE IF NOT EXISTS shigoto_kura_deferred (
+          id integer, CONSTRAINT shigoto_kura_deferred_id UNIQUE (id) DEFERRABLE INITIALLY DEFERRED
+        )
+        """,
+        []
+    ),
     Config.
 
 end_per_suite(_Config) ->
     _ = shigoto_db:query(?POOL, ~"DROP TABLE IF EXISTS shigoto_kura_probe", []),
+    _ = shigoto_db:query(?POOL, ~"DROP TABLE IF EXISTS shigoto_kura_deferred", []),
     ok.
 
 init_per_testcase(_TestCase, Config) ->
@@ -59,6 +71,7 @@ end_per_testcase(_TestCase, _Config) ->
     application:unset_env(shigoto, repo),
     _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
     _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_kura_probe", []),
+    _ = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_kura_deferred", []),
     ok.
 
 %%----------------------------------------------------------------------
@@ -129,9 +142,26 @@ shigoto_transaction_with_a_pool_keeps_its_own_connection(_Config) ->
         ?assertEqual(undefined, kura_pool_minato:transaction_conn(?POOL))
     end).
 
+a_commit_kura_refuses_raises_like_shigoto(_Config) ->
+    application:set_env(shigoto, repo, ?POOL),
+    ?assertError(
+        {shigoto_db, {commit_failed, {pgsql_error, #{code := ~"23505"}}}},
+        shigoto:transaction(fun() ->
+            ?assertEqual(undefined, shigoto_db:in_transaction(?POOL)),
+            ok = kura_write_deferred(1),
+            ok = kura_write_deferred(1)
+        end)
+    ).
+
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+kura_write_deferred(Id) ->
+    #{command := insert} = kura_driver_minato:query(
+        kura_pool_minato, ?POOL, ~"INSERT INTO shigoto_kura_deferred (id) VALUES ($1)", [Id], #{}
+    ),
+    ok.
 
 kura_transaction(Fun) ->
     kura_driver_minato:transaction(kura_pool_minato, ?POOL, Fun, #{}).

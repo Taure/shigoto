@@ -18,6 +18,8 @@
     test_drain_queue/1,
     test_migration/1,
     test_migration_reports_failure/1,
+    test_commit_refused_raises/1,
+    test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
     test_unique_prevents_duplicate/1,
@@ -70,6 +72,8 @@ all() ->
     [
         test_migration,
         test_migration_reports_failure,
+        test_commit_refused_raises,
+        test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
         test_insert_and_claim,
         test_job_execution_success,
@@ -160,6 +164,38 @@ test_migration_reports_failure(_Config) ->
         #{} = shigoto_db:query(?POOL, ~"DROP VIEW shigoto_jobs", [])
     end,
     ok = shigoto_migration:up(?POOL).
+
+test_commit_refused_raises(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE TABLE IF NOT EXISTS shigoto_deferred_probe (
+          id integer, CONSTRAINT shigoto_deferred_probe_id UNIQUE (id) DEFERRABLE INITIALLY DEFERRED
+        )
+        """,
+        []
+    ),
+    try
+        ?assertError(
+            {shigoto_db, {commit_failed, {pgsql_error, #{code := ~"23505"}}}},
+            shigoto_db:transaction(?POOL, fun() ->
+                #{} = shigoto_db:query(?POOL, ~"INSERT INTO shigoto_deferred_probe VALUES (1)", []),
+                #{} = shigoto_db:query(?POOL, ~"INSERT INTO shigoto_deferred_probe VALUES (1)", [])
+            end)
+        )
+    after
+        #{} = shigoto_db:query(?POOL, ~"DROP TABLE shigoto_deferred_probe", [])
+    end.
+
+test_commit_unanswered_raises(_Config) ->
+    ?assertError(
+        {shigoto_db, {commit_unknown, {holder_died, _}}},
+        shigoto_db:transaction(?POOL, fun() ->
+            Holder = shigoto_db:in_transaction(?POOL),
+            true = is_pid(Holder),
+            exit(Holder, kill)
+        end)
+    ).
 
 test_worker_inherits_logger_metadata(_Config) ->
     register(shigoto_metadata_probe, self()),

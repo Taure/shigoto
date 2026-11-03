@@ -39,10 +39,20 @@ Either way a nested call joins the transaction already open. The one opened
 through kura behaves as kura's does: a statement in it that commits or rolls it
 back raises, and nothing meant for it runs outside it.
 
+## When a transaction does not commit
+
 A `COMMIT` the server answers with `ROLLBACK` raises `transaction_rolled_back`.
 PostgreSQL does that when the transaction had already failed, and a job queue
 that reads it as success has marked jobs done that were never written - which is
 the same job running twice on the next poll.
+
+A `COMMIT` the server refuses raises `{shigoto_db, {commit_failed, Reason}}`, and
+one that gets no answer (a timeout, a lost connection) raises
+`{shigoto_db, {commit_unknown, Reason}}`: whether it committed is not known. A
+`BEGIN` that fails raises `{shigoto_db, {begin_failed, Reason}}` before the
+function runs. These are the shapes kura_driver_minato uses, and a transaction
+opened through kura raises them the same way. A server error keeps only its
+`code`, `constraint` and severity, since its message can carry row values.
 """.
 
 -export([
@@ -167,8 +177,13 @@ kura_opened(Pool, Fun) ->
     catch
         error:{kura_driver_minato, {no_connection, checkout_timeout}} ->
             error({?MODULE, checkout_timeout});
-        error:{kura_driver_minato, {no_connection, Reason}} ->
-            error({?MODULE, {no_connection, Reason}})
+        error:{kura_driver_minato, {Failure, Reason}} when
+            Failure =:= no_connection;
+            Failure =:= begin_failed;
+            Failure =:= commit_failed;
+            Failure =:= commit_unknown
+        ->
+            error({?MODULE, {Failure, Reason}})
     end.
 
 -spec opened(atom(), fun(() -> Result)) -> Result.
@@ -176,7 +191,7 @@ opened(Pool, Fun) ->
     Holder = holder(Pool),
     _ = erlang:put({?HOLDER, Pool}, Holder),
     try
-        _ = ran(Holder, ~"BEGIN", [], #{}),
+        ok = begun_on(Holder),
         committed(Holder, Fun())
     catch
         Class:Reason:Stacktrace ->
@@ -187,12 +202,37 @@ opened(Pool, Fun) ->
         release(Holder)
     end.
 
+-spec begun_on(pid()) -> ok.
+begun_on(Holder) ->
+    case ran(Holder, ~"BEGIN", [], #{}) of
+        #{command := 'begin'} -> ok;
+        Answer -> failed(begin_failed, Answer)
+    end.
+
 -spec committed(pid(), Result) -> Result.
 committed(Holder, Value) ->
     case ran(Holder, ~"COMMIT", [], #{}) of
+        #{command := commit} -> Value;
         #{command := rollback} -> error(transaction_rolled_back);
-        _Committed -> Value
+        {error, {pgsql_error, _}} = Refused -> failed(commit_failed, Refused);
+        Unknown -> failed(commit_unknown, Unknown)
     end.
+
+%% The same shapes kura_driver_minato raises, so a transaction fails the same
+%% way whichever of the two opened it. A server error keeps only fields that
+%% cannot carry row values.
+-spec failed(atom(), term()) -> no_return().
+failed(Failure, {error, {pgsql_error, Fields}}) when is_map(Fields) ->
+    error(
+        {?MODULE,
+            {Failure,
+                {pgsql_error,
+                    maps:with([code, constraint, severity, severity_non_localised], Fields)}}}
+    );
+failed(Failure, {error, Reason}) ->
+    error({?MODULE, {Failure, Reason}});
+failed(Failure, #{command := Command}) ->
+    error({?MODULE, {Failure, {unexpected, Command}}}).
 
 %%----------------------------------------------------------------------
 %% Holding one connection for the length of a transaction
