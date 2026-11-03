@@ -117,7 +117,7 @@ with_leader_lock(Fun) ->
             case shigoto_repo:try_advisory_xact_lock(Pool, ?CRON_LOCK_ID) of
                 true -> Fun();
                 false -> ok;
-                {error, Reason} -> error({shigoto_cron, {lock_failed, Reason}})
+                {error, Reason} -> error({shigoto_cron, {lock_failed, shigoto_db:reduced(Reason)}})
             end
         end,
         #{pool => Pool}
@@ -133,9 +133,9 @@ schedule_due() ->
                 shigoto_config:cron_entries()
             );
         {{error, Reason}, _} ->
-            error({shigoto_cron, {read_failed, Reason}});
+            error({shigoto_cron, {read_failed, shigoto_db:reduced(Reason)}});
         {_, {error, Reason}} ->
-            error({shigoto_cron, {read_failed, Reason}})
+            error({shigoto_cron, {read_failed, shigoto_db:reduced(Reason)}})
     end.
 
 schedule_entry(Pool, Entry, LastRuns, Now) ->
@@ -175,11 +175,11 @@ insert(Name, Schedule, Worker, Args) ->
         )
     of
         {ok, _Inserted} -> ok;
-        {error, Reason} -> error({shigoto_cron, {insert_failed, Name, Reason}})
+        {error, Reason} -> error({shigoto_cron, {insert_failed, Name, shigoto_db:reduced(Reason)}})
     end.
 
 stored(ok) -> ok;
-stored({error, Reason}) -> error({shigoto_cron, {store_failed, Reason}}).
+stored({error, Reason}) -> error({shigoto_cron, {store_failed, shigoto_db:reduced(Reason)}}).
 
 worker_defaults(Worker) ->
     _ = code:ensure_loaded(Worker),

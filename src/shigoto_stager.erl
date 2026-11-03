@@ -83,7 +83,9 @@ with_leader_lock(Fun) ->
             false ->
                 ok;
             {error, Reason} ->
-                ?LOG_WARNING(#{msg => ~"shigoto_stager_lock_failed", reason => Reason}),
+                ?LOG_WARNING(#{
+                    msg => ~"shigoto_stager_lock_failed", reason => shigoto_db:reduced(Reason)
+                }),
                 ok
         end
     end).

@@ -67,6 +67,7 @@ opened through kura raises them the same way. A server error keeps only its
     query/4,
     transaction/2,
     in_transaction/1,
+    reduced/1,
     kura_available/0,
     start_pool/2,
     start_listener/2
@@ -138,6 +139,20 @@ kura holds.
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
     erlang:get({?HOLDER, Pool}).
+
+-doc """
+`Reason` with a server error cut down to the fields that cannot carry row values.
+
+A PostgreSQL error's `message` and `detail` can quote the failing row ("Failing
+row contains ..."), so a `{pgsql_error, Fields}` keeps only `code`,
+`constraint`, `severity` and `severity_non_localised`. Use it on any reason that
+is logged or raised. Other reasons are answered as they are.
+""".
+-spec reduced(term()) -> term().
+reduced({pgsql_error, Fields}) when is_map(Fields) ->
+    {pgsql_error, maps:with([code, constraint, severity, severity_non_localised], Fields)};
+reduced(Reason) ->
+    Reason.
 
 -doc """
 Start a pool from shigoto's configuration.
@@ -236,15 +251,8 @@ committed(Holder, Value) ->
 %% way whichever of the two opened it. A server error keeps only fields that
 %% cannot carry row values.
 -spec failed(atom(), term()) -> no_return().
-failed(Failure, {error, {pgsql_error, Fields}}) when is_map(Fields) ->
-    error(
-        {?MODULE,
-            {Failure,
-                {pgsql_error,
-                    maps:with([code, constraint, severity, severity_non_localised], Fields)}}}
-    );
 failed(Failure, {error, Reason}) ->
-    error({?MODULE, {Failure, Reason}});
+    error({?MODULE, {Failure, reduced(Reason)}});
 failed(Failure, #{command := Command}) ->
     error({?MODULE, {Failure, {unexpected, Command}}}).
 

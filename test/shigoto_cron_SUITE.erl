@@ -19,6 +19,7 @@
     cron_does_not_backfill_a_new_entry/1,
     cron_never_moves_the_last_run_back/1,
     cron_telemetry_fires_after_the_pass_commits/1,
+    cron_logs_no_row_values/1,
     stager_notifies_a_due_queue/1
 ]).
 
@@ -36,6 +37,7 @@ all() ->
         cron_does_not_backfill_a_new_entry,
         cron_never_moves_the_last_run_back,
         cron_telemetry_fires_after_the_pass_commits,
+        cron_logs_no_row_values,
         stager_notifies_a_due_queue
     ].
 
@@ -165,6 +167,29 @@ cron_telemetry_fires_after_the_pass_commits(_Config) ->
         telemetry:detach(Handler)
     end.
 
+cron_logs_no_row_values(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{~"secret" => ~"hunter2"}}]),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"ALTER TABLE shigoto_cron ADD CONSTRAINT shigoto_cron_probe CHECK (schedule <> '* * * * *')",
+        []
+    ),
+    ok = shigoto_log_probe:attach(),
+    try
+        ok = shigoto_cron:schedule_once(),
+        Report = receive_log(~"shigoto_cron_pass_failed"),
+        ?assertMatch(
+            #{reason := {shigoto_cron, {store_failed, {pgsql_error, #{code := ~"23514"}}}}}, Report
+        ),
+        Logged = iolist_to_binary(io_lib:format("~p", [Report])),
+        ?assertEqual(nomatch, binary:match(Logged, [~"Failing row", ~"hunter2"]))
+    after
+        shigoto_log_probe:detach(),
+        #{} = shigoto_db:query(
+            ?POOL, ~"ALTER TABLE shigoto_cron DROP CONSTRAINT shigoto_cron_probe", []
+        )
+    end.
+
 %%----------------------------------------------------------------------
 %% Stager
 %%----------------------------------------------------------------------
@@ -196,6 +221,12 @@ stager_notifies_a_due_queue(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+receive_log(Msg) ->
+    receive
+        {log, _Level, #{msg := Msg} = Report} -> Report
+    after 2000 -> ct:fail({no_log, Msg})
+    end.
 
 set_cron(Entries) ->
     application:set_env(shigoto, cron, Entries).
