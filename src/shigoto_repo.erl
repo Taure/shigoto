@@ -23,6 +23,7 @@ for safe multi-node job claiming.
     prune_archive/2,
     upsert_cron_entry/2,
     get_due_cron_entries/1,
+    try_advisory_xact_lock/2,
     update_progress/3,
     get_job/2,
     find_jobs/2,
@@ -512,16 +513,23 @@ archive_jobs(Pool, Days) ->
         end
     end).
 
--doc "Upsert a cron entry.".
+-doc """
+Upsert a cron entry, keyed by `name`.
+
+`last_scheduled_at`, when given, is the minute the entry was last scheduled for;
+an upsert without it keeps the stored one.
+""".
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.
 upsert_cron_entry(Pool, Entry) ->
     SQL =
         <<
-            "INSERT INTO shigoto_cron (name, worker, args, schedule, queue, priority, max_attempts)\n"
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)\n"
+            "INSERT INTO shigoto_cron\n"
+            "(name, worker, args, schedule, queue, priority, max_attempts, last_scheduled_at)\n"
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n"
             "ON CONFLICT (name) DO UPDATE SET\n"
             "worker = EXCLUDED.worker, args = EXCLUDED.args, schedule = EXCLUDED.schedule,\n"
-            "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts"
+            "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts,\n"
+            "last_scheduled_at = COALESCE(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)"
         >>,
     ArgsJson = encode_json(maps:get(args, Entry, #{})),
     case
@@ -532,19 +540,33 @@ upsert_cron_entry(Pool, Entry) ->
             maps:get(schedule, Entry),
             maps:get(queue, Entry, ~"default"),
             maps:get(priority, Entry, 0),
-            maps:get(max_attempts, Entry, 3)
+            maps:get(max_attempts, Entry, 3),
+            maps:get(last_scheduled_at, Entry, null)
         ])
     of
         #{command := insert} -> ok;
         {error, _} = Err -> Err
     end.
 
--doc "Get cron entries that are due for scheduling.".
+-doc "All stored cron entries, with the minute each was last scheduled for.".
 -spec get_due_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
 get_due_cron_entries(Pool) ->
     SQL = ~"SELECT * FROM shigoto_cron",
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+Take a transaction-scoped advisory lock without waiting.
+
+`true` when this transaction holds the lock, `false` when another one does. Call
+it inside `shigoto_db:transaction/2`: the lock is released when that ends.
+""".
+-spec try_advisory_xact_lock(atom(), integer()) -> boolean() | {error, term()}.
+try_advisory_xact_lock(Pool, Key) ->
+    case query(Pool, ~"SELECT pg_try_advisory_xact_lock($1) AS locked", [Key]) of
+        #{rows := [#{locked := Locked}]} -> Locked;
         {error, _} = Err -> Err
     end.
 

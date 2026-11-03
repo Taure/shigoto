@@ -77,13 +77,9 @@ safe_with_leader_lock(Fun) ->
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
     shigoto_db:transaction(Pool, fun() ->
-        case
-            shigoto_db:query(Pool, ~"SELECT pg_try_advisory_xact_lock($1)::text", [?STAGE_LOCK_ID])
-        of
-            #{rows := [{~"true"}]} ->
-                Fun();
-            _ ->
-                ok
+        case shigoto_repo:try_advisory_xact_lock(Pool, ?STAGE_LOCK_ID) of
+            true -> Fun();
+            _NotHeld -> ok
         end
     end).
 
