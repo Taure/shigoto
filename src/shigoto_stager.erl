@@ -78,8 +78,13 @@ with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
     shigoto_db:transaction(Pool, fun() ->
         case shigoto_repo:try_advisory_xact_lock(Pool, ?STAGE_LOCK_ID) of
-            true -> Fun();
-            _NotHeld -> ok
+            true ->
+                Fun();
+            false ->
+                ok;
+            {error, Reason} ->
+                ?LOG_WARNING(#{msg => ~"shigoto_stager_lock_failed", reason => Reason}),
+                ok
         end
     end).
 
