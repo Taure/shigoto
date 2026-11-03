@@ -130,7 +130,9 @@ until that time comes.
    must encode as JSON, and its worker's `queue/0`, `priority/0` and
    `max_attempts/0` must fit the jobs table (a binary, and int4 integers). An
    entry that fails is skipped every pass until it is fixed, and the other
-   entries are scheduled as usual. `[shigoto, cron, skipped]` telemetry fires
+   entries are scheduled as usual. So is an entry that is not a 4- or 5-tuple
+   or whose check crashes (a charlist schedule, or a reversed range such as
+   `5-3` or `9-3/2`): it is skipped with reason `malformed_entry`. `[shigoto, cron, skipped]` telemetry fires
    on every pass; the `shigoto_cron_entry_skipped` warning is logged once per
    entry and reason on each node
 7. A pass that fails is logged as `shigoto_cron_pass_failed` and retried on the

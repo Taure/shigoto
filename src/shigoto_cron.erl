@@ -202,6 +202,15 @@ schedulable() ->
     lists:filtermap(fun checked/1, shigoto_config:cron_entries()).
 
 checked(Entry) ->
+    try
+        entry_checked(Entry)
+    catch
+        _:_ ->
+            skipped(safe_name(Entry), safe_worker(Entry), malformed_entry),
+            false
+    end.
+
+entry_checked(Entry) ->
     {Name0, Schedule, Worker, Args} = normalize_entry(Entry),
     Name = entry_name(Name0),
     case check_entry(Schedule, Worker, Args) of
@@ -216,10 +225,27 @@ checked(Entry) ->
                 defaults => Defaults
             }};
         {error, Reason} ->
-            warn_skipped_once(Name, Worker, Reason),
-            shigoto_telemetry:cron_entry_skipped(Name, Worker, Reason),
+            skipped(Name, Worker, Reason),
             false
     end.
+
+skipped(Name, Worker, Reason) ->
+    warn_skipped_once(Name, Worker, Reason),
+    shigoto_telemetry:cron_entry_skipped(Name, Worker, Reason).
+
+safe_name(Entry) when is_tuple(Entry), tuple_size(Entry) >= 1 ->
+    case element(1, Entry) of
+        Name when is_binary(Name) -> Name;
+        Name when is_atom(Name) -> atom_to_binary(Name);
+        _ -> ~"unnamed"
+    end;
+safe_name(_Entry) ->
+    ~"unnamed".
+
+safe_worker(Entry) when is_tuple(Entry), tuple_size(Entry) >= 3, is_atom(element(3, Entry)) ->
+    element(3, Entry);
+safe_worker(_Entry) ->
+    undefined.
 
 %% Once per entry and reason on this node: a bad entry is skipped every minute.
 warn_skipped_once(Name, Worker, Reason) ->

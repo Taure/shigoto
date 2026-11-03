@@ -24,6 +24,7 @@
     cron_resets_a_last_run_far_ahead/1,
     cron_skips_a_bad_entry/1,
     cron_warns_once_per_skipped_entry/1,
+    cron_skips_a_malformed_entry/1,
     cron_skips_a_worker_whose_defaults_overflow/1,
     cron_reports_a_failed_pass/1,
     cron_pass_refuses_an_open_transaction/1,
@@ -53,6 +54,7 @@ all() ->
         cron_resets_a_last_run_far_ahead,
         cron_skips_a_bad_entry,
         cron_warns_once_per_skipped_entry,
+        cron_skips_a_malformed_entry,
         cron_skips_a_worker_whose_defaults_overflow,
         cron_reports_a_failed_pass,
         cron_pass_refuses_an_open_transaction,
@@ -334,6 +336,25 @@ cron_warns_once_per_skipped_entry(_Config) ->
         shigoto_log_probe:detach(),
         telemetry:detach(warn_once)
     end.
+
+cron_skips_a_malformed_entry(_Config) ->
+    Malformed = [
+        {~"reversed", ~"5-3 * * * *", shigoto_test_worker, #{}},
+        {~"reversed_step", ~"9-3/2 * * * *", shigoto_test_worker, #{}},
+        {~"charlist", "* * * * *", shigoto_test_worker, #{}},
+        {~"two_tuple", ~"* * * * *"}
+    ],
+    lists:foreach(
+        fun(Bad) ->
+            set_cron([{~"good", ~"* * * * *", shigoto_test_worker, #{}}, Bad]),
+            ?assertEqual(ok, shigoto_cron:schedule_once()),
+            ?assertMatch([#{worker := ~"shigoto_test_worker"}], jobs()),
+            ?assertMatch([#{name := ~"good"}], cron_rows()),
+            #{} = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
+            #{} = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_cron", [])
+        end,
+        Malformed
+    ).
 
 receive_all_skipped() ->
     receive
