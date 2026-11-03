@@ -129,6 +129,30 @@ until that time comes.
 6. A pass that fails is logged as `shigoto_cron_pass_failed` and retried on the
    next minute
 
+## Advisory locks
+
+shigoto takes three transaction-scoped advisory locks (`pg_advisory_xact_lock`
+and `pg_try_advisory_xact_lock`, single bigint key) on its database:
+
+| Key | Held by | For |
+|-----|---------|-----|
+| `839274628` | `shigoto_cron` | one cron pass at a time |
+| `839274629` | `shigoto_stager` | one staging pass at a time |
+| `839274630` | `shigoto_migration:up/1` | one migration at a time |
+
+Any session on the database can take these keys too, and a session holding the
+cron or stager key stops that work on every node. Do not use them for anything
+else. A node that finds the cron lock taken for 5 passes in a row while no node
+schedules logs `shigoto_cron_lock_held_elsewhere`; the stager logs
+`shigoto_stager_lock_held_elsewhere` after a minute of missed passes (at least
+10). Both emit `[shigoto, leader_lock, unavailable]`. Find the holder with:
+
+```sql
+SELECT pid, usename, application_name, state, xact_start
+FROM pg_locks JOIN pg_stat_activity USING (pid)
+WHERE locktype = 'advisory' AND objid IN (839274628, 839274629);
+```
+
 ## Timezone notes
 
 Named zones resolve against the operating system's IANA database

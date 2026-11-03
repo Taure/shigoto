@@ -60,6 +60,17 @@ logger for filtering); it is omitted from the tables below for brevity.
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
 
+## Leader Lock Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
+
+Emitted with the `shigoto_cron_lock_held_elsewhere` and
+`shigoto_stager_lock_held_elsewhere` warnings: `lock` (`cron` or `stager`) has
+been taken by something other than a shigoto pass for `consecutive_misses`
+passes in a row.
+
 ## Testing Events
 
 | Event | Measurements | Metadata |
@@ -94,6 +105,8 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     batch_completed/1,
     %% Cron events
     cron_scheduled/3,
+    %% Leader lock events
+    leader_lock_unavailable/2,
     %% Testing events
     testing_mode_armed/1
 ]).
@@ -242,6 +255,14 @@ batch_completed(Batch) ->
 %%----------------------------------------------------------------------
 %% Cron events
 %%----------------------------------------------------------------------
+
+-spec leader_lock_unavailable(cron | stager, pos_integer()) -> ok.
+leader_lock_unavailable(Lock, Misses) ->
+    telemetry:execute(
+        [shigoto, leader_lock, unavailable],
+        #{count => 1, consecutive_misses => Misses},
+        #{lock => Lock, domain => [shigoto]}
+    ).
 
 -spec cron_scheduled(atom() | binary(), module(), binary()) -> ok.
 cron_scheduled(Name, Worker, Schedule) ->

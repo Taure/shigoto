@@ -22,12 +22,16 @@
     cron_logs_no_row_values/1,
     cron_encrypts_entry_args/1,
     cron_resets_a_last_run_far_ahead/1,
+    cron_warns_when_its_lock_is_held_elsewhere/1,
+    cron_does_not_warn_while_a_peer_schedules/1,
+    stager_warns_when_its_lock_is_held_elsewhere/1,
     stager_notifies_a_due_queue/1
 ]).
 
 -define(POOL, shigoto_test_pool).
 -define(CHANNEL, ~"shigoto_jobs_insert").
 -define(CRON_LOCK_ID, 839274628).
+-define(STAGE_LOCK_ID, 839274629).
 
 all() ->
     [
@@ -42,6 +46,9 @@ all() ->
         cron_logs_no_row_values,
         cron_encrypts_entry_args,
         cron_resets_a_last_run_far_ahead,
+        cron_warns_when_its_lock_is_held_elsewhere,
+        cron_does_not_warn_while_a_peer_schedules,
+        stager_warns_when_its_lock_is_held_elsewhere,
         stager_notifies_a_due_queue
     ].
 
@@ -194,6 +201,63 @@ cron_logs_no_row_values(_Config) ->
         )
     end.
 
+cron_warns_when_its_lock_is_held_elsewhere(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    Holder = hold_lock(?CRON_LOCK_ID),
+    ok = shigoto_log_probe:attach(),
+    ok = attach_lock_telemetry(),
+    try
+        {noreply, #{misses := 4}} = shigoto_cron:handle_info(tick, #{misses => 3}),
+        refute_log(~"shigoto_cron_lock_held_elsewhere"),
+        {noreply, #{misses := 5}} = shigoto_cron:handle_info(tick, #{misses => 4}),
+        ?assertMatch(
+            #{consecutive_misses := 5}, receive_log(~"shigoto_cron_lock_held_elsewhere")
+        ),
+        receive
+            {lock_unavailable, #{consecutive_misses := 5}, #{lock := cron}} -> ok
+        after 2000 -> ct:fail(no_lock_telemetry)
+        end
+    after
+        telemetry:detach(lock_unavailable),
+        shigoto_log_probe:detach(),
+        Holder ! stop,
+        flush_ticks()
+    end.
+
+cron_does_not_warn_while_a_peer_schedules(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    ok = shigoto_repo:upsert_cron_entry(?POOL, #{
+        name => ~"every_minute",
+        worker => shigoto_test_worker,
+        schedule => ~"* * * * *",
+        last_scheduled_at => minutes_ago(1)
+    }),
+    Holder = hold_lock(?CRON_LOCK_ID),
+    try
+        ?assertEqual({noreply, #{misses => 0}}, shigoto_cron:handle_info(tick, #{misses => 4}))
+    after
+        Holder ! stop,
+        flush_ticks()
+    end.
+
+stager_warns_when_its_lock_is_held_elsewhere(_Config) ->
+    application:set_env(shigoto, stage_interval, 60000),
+    Holder = hold_lock(?STAGE_LOCK_ID),
+    ok = shigoto_log_probe:attach(),
+    try
+        {noreply, #{misses := 9}} = shigoto_stager:handle_info(stage, #{misses => 8}),
+        refute_log(~"shigoto_stager_lock_held_elsewhere"),
+        {noreply, #{misses := 10}} = shigoto_stager:handle_info(stage, #{misses => 9}),
+        ?assertMatch(
+            #{consecutive_misses := 10}, receive_log(~"shigoto_stager_lock_held_elsewhere")
+        )
+    after
+        shigoto_log_probe:detach(),
+        application:unset_env(shigoto, stage_interval),
+        Holder ! stop,
+        flush_ticks()
+    end.
+
 cron_resets_a_last_run_far_ahead(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
     ok = shigoto_repo:upsert_cron_entry(?POOL, #{
@@ -260,6 +324,46 @@ stager_notifies_a_due_queue(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+hold_lock(Lock) ->
+    Self = self(),
+    Holder = spawn_link(fun() ->
+        shigoto_db:transaction(?POOL, fun() ->
+            true = shigoto_repo:try_advisory_xact_lock(?POOL, Lock),
+            Self ! holding,
+            receive
+                stop -> ok
+            end
+        end)
+    end),
+    receive
+        holding -> Holder
+    after 5000 -> ct:fail(lock_not_taken)
+    end.
+
+attach_lock_telemetry() ->
+    Self = self(),
+    telemetry:attach(
+        lock_unavailable,
+        [shigoto, leader_lock, unavailable],
+        fun(_Event, Measurements, Metadata, _HandlerConfig) ->
+            Self ! {lock_unavailable, Measurements, Metadata}
+        end,
+        undefined
+    ).
+
+refute_log(Msg) ->
+    receive
+        {log, _Level, #{msg := Msg}} -> ct:fail({unexpected_log, Msg})
+    after 200 -> ok
+    end.
+
+flush_ticks() ->
+    receive
+        tick -> flush_ticks();
+        stage -> flush_ticks()
+    after 0 -> ok
+    end.
 
 receive_log(Msg) ->
     receive

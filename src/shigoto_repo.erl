@@ -25,6 +25,7 @@ for safe multi-node job claiming.
     get_due_cron_entries/1,
     try_advisory_xact_lock/2,
     current_minute/1,
+    cron_progressing/1,
     update_progress/3,
     get_job/2,
     find_jobs/2,
@@ -611,6 +612,28 @@ get_due_cron_entries(Pool) ->
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
+    end.
+
+-doc """
+Whether any cron entry has been scheduled up to the previous minute or later.
+
+A pass that finds the cron lock taken asks this: while a node runs passes, the
+previous minute's pass has stored that minute.
+""".
+-spec cron_progressing(atom()) -> {ok, boolean()} | {error, term()}.
+cron_progressing(Pool) ->
+    SQL =
+        ~"""
+        SELECT COALESCE(
+          max(last_scheduled_at) >= date_trunc('minute', now()) - interval '1 minute', false
+        ) AS progressing
+        FROM shigoto_cron
+        """,
+    case query(Pool, SQL, []) of
+        #{rows := [#{progressing := Progressing}]} when is_boolean(Progressing) ->
+            {ok, Progressing};
+        {error, _} = Err ->
+            Err
     end.
 
 -doc """

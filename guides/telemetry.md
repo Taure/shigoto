@@ -63,6 +63,18 @@ logger for filtering); it is omitted from the tables below for brevity.
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
 
+### Leader Lock Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
+
+Emitted with the `shigoto_cron_lock_held_elsewhere` and
+`shigoto_stager_lock_held_elsewhere` warnings, when `lock` (`cron` or
+`stager`) has been taken by something other than a shigoto pass for
+`consecutive_misses` passes in a row. See "Advisory locks" in the
+[Cron](cron.md) guide.
+
 ### Testing Events
 
 | Event | Measurements | Metadata |

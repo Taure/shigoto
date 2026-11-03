@@ -40,6 +40,8 @@ See `shigoto_config:cron_entries/0`.
 -define(TICK_OFFSET_MS, 1000).
 -define(CRON_LOCK_ID, 839274628).
 -define(CATCH_UP_MINUTES, 60).
+%% Passes in a row that found the lock taken while no node scheduled.
+-define(STUCK_PASSES, 5).
 
 -doc false.
 start_link() ->
@@ -53,12 +55,15 @@ the pool was not ready. Mainly for tests; the scheduler runs passes on its own.
 """.
 -spec schedule_once() -> ok | retry.
 schedule_once() ->
-    safe_with_leader_lock(fun schedule_due/0).
+    case safe_with_leader_lock(fun schedule_due/0) of
+        retry -> retry;
+        _Ran -> ok
+    end.
 
 -doc false.
 init([]) ->
     self() ! tick,
-    {ok, #{}}.
+    {ok, #{misses => 0}}.
 
 -doc false.
 handle_call(_Request, _From, State) ->
@@ -70,18 +75,44 @@ handle_cast(_Msg, State) ->
 
 -doc false.
 handle_info(tick, State) ->
-    _ =
-        case schedule_once() of
-            ok -> erlang:send_after(until_next_minute(), self(), tick);
-            retry -> erlang:send_after(?RETRY_INTERVAL, self(), tick)
-        end,
-    {noreply, State};
+    case safe_with_leader_lock(fun schedule_due/0) of
+        retry ->
+            _ = erlang:send_after(?RETRY_INTERVAL, self(), tick),
+            {noreply, State};
+        Outcome ->
+            _ = erlang:send_after(until_next_minute(), self(), tick),
+            {noreply, counted(Outcome, State)}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %%----------------------------------------------------------------------
 %% Internal
 %%----------------------------------------------------------------------
+
+%% A pass holds the lock for milliseconds and a dead holder's lock goes with its
+%% connection, so a lock taken minute after minute while nothing is scheduled is
+%% held by something that is not a shigoto pass.
+counted({missed, false}, #{misses := Misses0} = State) ->
+    Misses = Misses0 + 1,
+    case Misses >= ?STUCK_PASSES andalso (Misses - ?STUCK_PASSES) rem 60 =:= 0 of
+        true ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_cron_lock_held_elsewhere",
+                lock => ?CRON_LOCK_ID,
+                consecutive_misses => Misses,
+                action =>
+                    ~"no node has scheduled cron while this lock was taken; find the session holding it in pg_locks"
+            }),
+            shigoto_telemetry:leader_lock_unavailable(cron, Misses);
+        false ->
+            ok
+    end,
+    State#{misses := Misses};
+counted(failed, State) ->
+    State;
+counted(_HeldOrProgressing, State) ->
+    State#{misses := 0}.
 
 until_next_minute() ->
     NowMs = erlang:system_time(millisecond),
@@ -92,8 +123,7 @@ safe_with_leader_lock(Fun) ->
     %% reason to come back in a second. Anything else is logged and the next
     %% minute tries again, rather than crashing the scheduler every minute.
     try
-        with_leader_lock(Fun),
-        ok
+        with_leader_lock(Fun)
     catch
         exit:{noproc, _} ->
             not_ready();
@@ -103,7 +133,7 @@ safe_with_leader_lock(Fun) ->
             not_ready();
         Class:Reason ->
             ?LOG_WARNING(#{msg => ~"shigoto_cron_pass_failed", class => Class, reason => Reason}),
-            ok
+            failed
     end.
 
 not_ready() ->
@@ -115,13 +145,30 @@ with_leader_lock(Fun) ->
     shigoto:transaction(
         fun() ->
             case shigoto_repo:try_advisory_xact_lock(Pool, ?CRON_LOCK_ID) of
-                true -> Fun();
-                false -> ok;
-                {error, Reason} -> error({shigoto_cron, {lock_failed, shigoto_db:reduced(Reason)}})
+                true ->
+                    Fun(),
+                    held;
+                false ->
+                    {missed, progressing(Pool)};
+                {error, Reason} ->
+                    error({shigoto_cron, {lock_failed, shigoto_db:reduced(Reason)}})
             end
         end,
         #{pool => Pool}
     ).
+
+%% Whether a node scheduled the previous minute, so that a missed lock is a peer's
+%% pass rather than a lock nobody is using for cron.
+progressing(Pool) ->
+    case shigoto_config:cron_entries() of
+        [] ->
+            true;
+        _Entries ->
+            case shigoto_repo:cron_progressing(Pool) of
+                {ok, Progressing} -> Progressing;
+                {error, Reason} -> error({shigoto_cron, {read_failed, shigoto_db:reduced(Reason)}})
+            end
+    end.
 
 schedule_due() ->
     Pool = shigoto_config:pool(),
