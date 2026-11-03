@@ -94,7 +94,11 @@ ok = shigoto_migration:up(my_app_repo).
 ```
 
 `up/1` is idempotent and answers `{error, Reason}` for the first statement that
-fails.
+fails. Nodes that boot together migrate one at a time, and a schema that is
+already current is left alone without taking a table lock. When a statement has
+to wait more than 2 seconds for a table lock (a long query on a shigoto table),
+`up/1` rolls back and answers `{error, lock_timeout}` instead of stalling job
+claims behind it: retry it, or run migrations from one node at a quiet moment.
 
 ## Create a Worker
 

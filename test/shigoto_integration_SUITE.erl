@@ -19,6 +19,8 @@
     test_migration/1,
     test_migration_reports_failure/1,
     test_concurrent_migrations/1,
+    test_current_migration_does_not_block_claims/1,
+    test_migration_behind_a_reader_times_out/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -74,6 +76,8 @@ all() ->
         test_migration,
         test_migration_reports_failure,
         test_concurrent_migrations,
+        test_current_migration_does_not_block_claims,
+        test_migration_behind_a_reader_times_out,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -182,6 +186,65 @@ test_concurrent_migrations(_Config) ->
      || Pid <- Pids
     ],
     ?assertEqual([ok, ok, ok], Results).
+
+test_current_migration_does_not_block_claims(_Config) ->
+    ok = shigoto_migration:up(?POOL),
+    {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+    ct:pal("claim latency with a current schema and an archive reader: ~p ms", [ClaimMs]),
+    ?assertEqual(ok, Migration),
+    ?assert(ClaimMs < 3000).
+
+test_migration_behind_a_reader_times_out(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"ALTER TABLE shigoto_jobs_archive DROP COLUMN deps_results", []
+    ),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ct:pal("claim latency with a migration behind an archive reader: ~p ms", [ClaimMs]),
+        ?assertEqual({error, lock_timeout}, Migration),
+        ?assert(ClaimMs < 3000)
+    after
+        ok = shigoto_migration:up(?POOL)
+    end,
+    ?assertMatch(
+        #{rows := [_]},
+        shigoto_db:query(
+            ?POOL,
+            ~"SELECT 1 FROM information_schema.columns WHERE table_name = 'shigoto_jobs_archive' AND column_name = 'deps_results'",
+            []
+        )
+    ).
+
+%% Runs up/1 while another connection reads shigoto_jobs_archive, and times a
+%% claim made while the migration runs.
+migrate_behind_an_archive_reader() ->
+    {ok, _} = shigoto_repo:insert_job(?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}),
+    Self = self(),
+    Reader = spawn_link(fun() ->
+        shigoto_db:transaction(?POOL, fun() ->
+            #{} = shigoto_db:query(?POOL, ~"SELECT count(*) FROM shigoto_jobs_archive", []),
+            Self ! reading,
+            receive
+                stop -> ok
+            end
+        end)
+    end),
+    receive
+        reading -> ok
+    after 5000 -> ct:fail(reader_did_not_start)
+    end,
+    Migrator = spawn_link(fun() -> Self ! {migrated, shigoto_migration:up(?POOL)} end),
+    timer:sleep(300),
+    Started = erlang:monotonic_time(millisecond),
+    {ok, _} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ClaimMs = erlang:monotonic_time(millisecond) - Started,
+    Migration =
+        receive
+            {migrated, Result} -> Result
+        after 30000 -> ct:fail({migration_did_not_finish, Migrator})
+        end,
+    Reader ! stop,
+    {Migration, ClaimMs}.
 
 test_commit_refused_raises(_Config) ->
     #{} = shigoto_db:query(

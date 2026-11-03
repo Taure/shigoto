@@ -13,35 +13,69 @@ Migrations are idempotent and safe to run multiple times.
 -doc """
 Create or update the shigoto tables.
 
-Runs every statement in order, in one transaction that first takes an advisory
-lock, so nodes booting at the same time migrate one after the other rather than
-racing on `CREATE ... IF NOT EXISTS`. Stops at the first statement that fails,
-rolls back, and answers `{error, Reason}` with what the database answered. A
+Runs in one transaction that first takes an advisory lock, so nodes booting at
+the same time migrate one after the other rather than racing on
+`CREATE ... IF NOT EXISTS`. A schema that is already current is left alone: no
+DDL runs and no table lock is taken, so a running system is not blocked.
+
+Otherwise every statement runs in order, and each waits at most 2 seconds for a
+table lock (`lock_timeout`). DDL locks a table against every reader and writer
+until the transaction ends, so a statement stuck behind a long reader would
+otherwise stall job claims for as long. When the wait runs out, the migration
+rolls back and answers `{error, lock_timeout}`: retry it, or run migrations from
+one node at a quiet moment.
+
+Stops at the first statement that fails, rolls back, and answers
+`{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
 database that does not exist yet, or a role that may not create tables, is an
 error here rather than a node that boots with no tables.
 """.
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
     case shigoto_db:query(Pool, ~"SELECT 1", []) of
-        {error, Reason} -> {error, Reason};
+        {error, Reason} -> {error, shigoto_db:reduced(Reason)};
         #{} -> locked(Pool)
     end.
 
 locked(Pool) ->
     try
         shigoto_db:transaction(Pool, fun() ->
+            %% The advisory lock first: lock_timeout would also cut short the
+            %% wait for another node's migration.
             answered(shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)", [?LOCK_ID])),
-            answered(
-                run(
-                    Pool,
-                    v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
-                        v5_statements() ++ v6_statements()
-                )
-            )
+            answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '2s'", [])),
+            case current(Pool) of
+                true ->
+                    ok;
+                false ->
+                    answered(
+                        run(
+                            Pool,
+                            v1_statements() ++ v2_statements() ++ v3_statements() ++
+                                v4_statements() ++ v5_statements() ++ v6_statements()
+                        )
+                    )
+            end
         end)
     catch
-        throw:{?MODULE, Reason} -> {error, Reason};
+        throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
+        throw:{?MODULE, Reason} -> {error, shigoto_db:reduced(Reason)};
         error:{shigoto_db, Reason} -> {error, Reason}
+    end.
+
+%% Whether the last column the newest version adds is there. Bump this with
+%% every new version, to that version's last change.
+current(Pool) ->
+    SQL =
+        ~"""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'shigoto_jobs_archive'
+          AND column_name = 'deps_results'
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := Rows} -> Rows =/= [];
+        {error, Reason} -> throw({?MODULE, Reason})
     end.
 
 answered({error, Reason}) -> throw({?MODULE, Reason});
