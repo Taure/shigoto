@@ -38,6 +38,11 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, queue, poll]` | `count, claimed` | queue |
 | `[shigoto, queue, paused]` | `count` | queue |
 | `[shigoto, queue, resumed]` | `count` | queue |
+| `[shigoto, queue, start_failed]` | `count` | queue, reason |
+
+`start_failed` fires when `m:shigoto_migrator` starts the configured queues
+after a late migration and one of them fails to start (it is also logged as
+`shigoto_queue_start_failed`). The other queues still start.
 
 ## Resilience Events
 
@@ -113,6 +118,7 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     queue_poll/2,
     queue_paused/1,
     queue_resumed/1,
+    queue_start_failed/2,
     %% Resilience events
     resilience_rate_limited/2,
     resilience_circuit_open/1,
@@ -282,6 +288,14 @@ leader_lock_unavailable(Lock, Misses) ->
         [shigoto, leader_lock, unavailable],
         #{count => 1, consecutive_misses => Misses},
         #{lock => Lock, domain => [shigoto]}
+    ).
+
+-spec queue_start_failed(binary(), term()) -> ok.
+queue_start_failed(Queue, Reason) ->
+    telemetry:execute(
+        [shigoto, queue, start_failed],
+        #{count => 1},
+        #{queue => Queue, reason => Reason, domain => [shigoto]}
     ).
 
 -spec migration_pending(term()) -> ok.

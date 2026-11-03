@@ -88,19 +88,33 @@ its queues:
 - it logs `shigoto_migration_pending` at error level and emits
   `[shigoto, migration, pending]` telemetry;
 - it retries every 30 seconds, and starts the queues as soon as the migration
-  succeeds.
+  succeeds;
+- meanwhile `shigoto:add_queue/2` answers `{error, migration_pending}` and
+  `shigoto:health/0` answers `{error, #{reason => migration_pending}}`.
+
+An error a retry cannot fix (SQLSTATE class 42, such as
+`42501 insufficient_privilege`) skips the remaining boot attempts and goes
+straight to the background retry. Boot blocks the release while it migrates:
+about 45 seconds at worst with the database unreachable, plus any wait for
+another node's migration. On Kubernetes, cover that with a `startupProbe`.
 
 Jobs inserted while the queues wait (once the tables exist) run when the
 queues start. To migrate sooner, for example right after kura's migrator creates the
-database on a first boot, run it yourself:
+database on a first boot, run it yourself, then tell the waiting migrator to
+start the queues now rather than at its next 30 second tick:
 
 ```erlang
-ok = shigoto_migration:up(my_app_repo).
+ok = shigoto_migration:up(my_app_repo),
+ok = shigoto_migrator:retry_now().
 ```
 
 ```elixir
 :ok = :shigoto_migration.up(:my_app_repo)
+:ok = :shigoto_migrator.retry_now()
 ```
+
+`retry_now/0` answers `not_running` when no migration is pending (the queues
+are already running).
 
 `up/1` is idempotent and answers `{error, Reason}` for the first statement that
 fails. Nodes that boot together migrate one at a time, and a schema that is

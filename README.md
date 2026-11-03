@@ -83,12 +83,18 @@ Without kura, start a pool of its own and name it with `pool`:
 running and the database there. It tries 5 times; if the schema is still not
 current it starts without its queues, logs `shigoto_migration_pending`, retries
 every 30 seconds and starts the queues once the migration succeeds (see the
-getting-started guide). To migrate sooner, for instance right after kura's
-migrator has created the database, call it yourself:
+getting-started guide). Meanwhile `shigoto:add_queue/2` answers
+`{error, migration_pending}` and `shigoto:health/0` reports
+`reason => migration_pending`. To migrate sooner, for instance right after
+kura's migrator has created the database, call it yourself and start the queues
+at once:
 
 ```erlang
-ok = shigoto_migration:up(my_app_repo).
+ok = shigoto_migration:up(my_app_repo),
+ok = shigoto_migrator:retry_now().
 ```
+
+`retry_now/0` answers `not_running` when nothing is pending.
 
 Define a worker:
 

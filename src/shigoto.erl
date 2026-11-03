@@ -331,20 +331,27 @@ retry_by(Filters) ->
 retry_by(Pool, Filters) ->
     shigoto_repo:retry_by(Pool, Filters).
 
--doc "Add a queue at runtime without restart.".
+-doc """
+Add a queue at runtime without restart.
+
+Answers `{error, migration_pending}` while `m:shigoto_migrator` holds the queues
+back; the configured queues start once the migration succeeds.
+""".
 -spec add_queue(binary(), pos_integer()) -> {ok, pid()} | {error, term()}.
 add_queue(Queue, Concurrency) ->
-    ShutdownMs = shigoto_config:shutdown_timeout() + 1000,
-    ChildSpec = #{
-        id => {shigoto_queue, Queue},
-        start => {shigoto_queue, start_link, [Queue, Concurrency]},
-        type => worker,
-        shutdown => ShutdownMs
-    },
-    case supervisor:start_child(shigoto_queue_sup, ChildSpec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, _} = Err -> Err
+    case shigoto_migrator:pending() of
+        true ->
+            {error, migration_pending};
+        false ->
+            case
+                supervisor:start_child(
+                    shigoto_queue_sup, shigoto_queue_sup:queue_spec(Queue, Concurrency)
+                )
+            of
+                {ok, Pid} -> {ok, Pid};
+                {error, {already_started, Pid}} -> {ok, Pid};
+                {error, _} = Err -> Err
+            end
     end.
 
 -doc "Remove a queue at runtime. Waits for in-flight jobs to finish.".
@@ -356,10 +363,21 @@ remove_queue(Queue) ->
         {error, _} = Err -> Err
     end.
 
--doc "Health check. Returns ok with stats or error with details.".
+-doc """
+Health check. Returns ok with stats or error with details.
+
+While `m:shigoto_migrator` holds the queues back it answers
+`{error, #{status => unhealthy, reason => migration_pending, pool => Pool}}`.
+""".
 -spec health() -> {ok, map()} | {error, map()}.
 health() ->
     Pool = shigoto_config:pool(),
+    case shigoto_migrator:pending() of
+        true -> {error, #{status => unhealthy, reason => migration_pending, pool => Pool}};
+        false -> checked_health(Pool)
+    end.
+
+checked_health(Pool) ->
     try
         {ok, Counts} = shigoto_dashboard:job_counts(),
         {ok, Stale} = shigoto_dashboard:stale_jobs(),
