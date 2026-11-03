@@ -23,6 +23,7 @@
     cron_encrypts_entry_args/1,
     cron_resets_a_last_run_far_ahead/1,
     cron_skips_a_bad_entry/1,
+    cron_warns_once_per_skipped_entry/1,
     cron_skips_a_worker_whose_defaults_overflow/1,
     cron_reports_a_failed_pass/1,
     cron_pass_refuses_an_open_transaction/1,
@@ -51,6 +52,7 @@ all() ->
         cron_encrypts_entry_args,
         cron_resets_a_last_run_far_ahead,
         cron_skips_a_bad_entry,
+        cron_warns_once_per_skipped_entry,
         cron_skips_a_worker_whose_defaults_overflow,
         cron_reports_a_failed_pass,
         cron_pass_refuses_an_open_transaction,
@@ -308,6 +310,36 @@ cron_skips_a_bad_entry(_Config) ->
     end,
     ?assertMatch([#{worker := ~"shigoto_test_worker"}], jobs()),
     ?assertMatch([#{name := ~"good"}], cron_rows()).
+
+cron_warns_once_per_skipped_entry(_Config) ->
+    set_cron([{~"warn_once", ~"not a schedule", shigoto_test_worker, #{}}]),
+    Self = self(),
+    ok = telemetry:attach(
+        warn_once,
+        [shigoto, cron, skipped],
+        fun(_Event, _Measurements, Metadata, _HandlerConfig) -> Self ! {skipped, Metadata} end,
+        undefined
+    ),
+    ok = shigoto_log_probe:attach(),
+    try
+        ok = shigoto_cron:schedule_once(),
+        ok = shigoto_cron:schedule_once(),
+        ?assertMatch(#{name := ~"warn_once"}, receive_log(~"shigoto_cron_entry_skipped")),
+        receive
+            {log, _, #{msg := ~"shigoto_cron_entry_skipped"}} -> ct:fail(warned_twice)
+        after 500 -> ok
+        end,
+        ?assertEqual(2, length(receive_all_skipped()))
+    after
+        shigoto_log_probe:detach(),
+        telemetry:detach(warn_once)
+    end.
+
+receive_all_skipped() ->
+    receive
+        {skipped, #{name := ~"warn_once"} = Metadata} -> [Metadata | receive_all_skipped()]
+    after 0 -> []
+    end.
 
 cron_skips_a_worker_whose_defaults_overflow(_Config) ->
     set_cron([

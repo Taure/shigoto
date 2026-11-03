@@ -129,9 +129,10 @@ until that time comes.
 6. Before the pass, each entry is checked: its schedule must parse, its args
    must encode as JSON, and its worker's `queue/0`, `priority/0` and
    `max_attempts/0` must fit the jobs table (a binary, and int4 integers). An
-   entry that fails is skipped with a `shigoto_cron_entry_skipped` warning and
-   `[shigoto, cron, skipped]` telemetry, every pass until it is fixed, and the
-   other entries are scheduled as usual
+   entry that fails is skipped every pass until it is fixed, and the other
+   entries are scheduled as usual. `[shigoto, cron, skipped]` telemetry fires
+   on every pass; the `shigoto_cron_entry_skipped` warning is logged once per
+   entry and reason on each node
 7. A pass that fails is logged as `shigoto_cron_pass_failed` and retried on the
    next minute; `shigoto_cron:schedule_once/0` answers `{error, pass_failed}`
    for it

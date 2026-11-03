@@ -59,7 +59,7 @@ logged as `shigoto_cron_pass_failed`). Inside an open shigoto or kura transactio
 caller's transaction and hold the cron lock until it ends. Mainly for tests; the
 scheduler runs passes on its own.
 """.
--spec schedule_once() -> ok | retry | {error, in_transaction}.
+-spec schedule_once() -> ok | retry | {error, in_transaction | pass_failed}.
 schedule_once() ->
     case shigoto_db:transaction_open(shigoto_config:pool()) of
         true -> {error, in_transaction};
@@ -216,14 +216,25 @@ checked(Entry) ->
                 defaults => Defaults
             }};
         {error, Reason} ->
+            warn_skipped_once(Name, Worker, Reason),
+            shigoto_telemetry:cron_entry_skipped(Name, Worker, Reason),
+            false
+    end.
+
+%% Once per entry and reason on this node: a bad entry is skipped every minute.
+warn_skipped_once(Name, Worker, Reason) ->
+    Key = {?MODULE, skipped, Name, Reason},
+    case persistent_term:get(Key, false) of
+        true ->
+            ok;
+        false ->
+            persistent_term:put(Key, true),
             ?LOG_WARNING(#{
                 msg => ~"shigoto_cron_entry_skipped",
                 name => Name,
                 worker => Worker,
                 reason => Reason
-            }),
-            shigoto_telemetry:cron_entry_skipped(Name, Worker, Reason),
-            false
+            })
     end.
 
 check_entry(_Schedule, Worker, _Args) when not is_atom(Worker) ->

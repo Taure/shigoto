@@ -64,6 +64,8 @@ logger for filtering); it is omitted from the tables below for brevity.
 `skipped` fires each pass for an entry that cannot be scheduled: its schedule
 does not parse, its args do not encode as JSON, or its worker's `queue/0`,
 `priority/0` or `max_attempts/0` answers a value the jobs table cannot hold.
+The matching `shigoto_cron_entry_skipped` warning is logged only once per entry
+and reason on each node, so alert on this event rather than on the log.
 
 ## Leader Lock Events
 
