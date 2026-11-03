@@ -29,7 +29,8 @@ end
 shigoto runs on a [minato](https://hex.pm/packages/minato) pool. In an app on
 [kura](https://hex.pm/packages/kura), name the repo with `repo`: `kura_postgres`
 starts a minato pool named after the repo, and shigoto shares it and its
-transactions. Without kura, start a pool with `shigoto_db:start_pool/2` and name
+transactions. `repo` must equal that pool's name: the repo module, or the
+repo's `pool` key when kura's config sets one. Without kura, start a pool with `shigoto_db:start_pool/2` and name
 it with `pool`.
 
 ### Erlang (sys.config)
@@ -202,7 +203,9 @@ user creation failed" bugs.
 
 `shigoto:transaction/1` works the other way round: kura writes made inside it
 join the same transaction, and `job_inserted` telemetry for its jobs fires only
-after the commit.
+after the commit. Inside `Repo:transaction/1` that telemetry fires on insert,
+before the commit, so use `shigoto:transaction/1` as the outer boundary when
+telemetry has to be commit-accurate.
 
 ```erlang
 shigoto:transaction(fun() ->
@@ -212,9 +215,10 @@ shigoto:transaction(fun() ->
 end).
 ```
 
-With `{pool, Pool}` instead of `repo`, `shigoto:transaction/1` covers shigoto's
-own statements on that pool; a kura transaction on the same pool is still
-joined by jobs inserted inside it.
+Jobs inserted inside a kura transaction on a pool of the same name join it
+whether shigoto is configured with `repo` or `pool`. Only the other direction
+needs `repo`: with `{pool, Pool}`, `shigoto:transaction/1` covers shigoto's own
+statements on that pool.
 
 ## Testing with drain_queue
 

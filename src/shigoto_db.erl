@@ -24,16 +24,20 @@ ordinary code that calls `shigoto_repo` and cannot thread a connection through.
 
 An app on [kura](https://hex.pm/packages/kura) configures shigoto with
 `{repo, Repo}`, and shigoto then runs on the minato pool that `kura_postgres`
-started for the repo. The two share transactions on that pool, in both
+started for the repo. That pool is named after the repo unless the repo's kura
+config sets `pool`; `repo` must name the pool, so with a `pool` override set
+shigoto's `repo` to that name. The two share transactions on that pool, in both
 directions, without shigoto depending on kura:
 
-- A statement shigoto runs while the process is inside a kura transaction on the
-  same pool (`Repo:transaction/1`, or `kura_repo_worker:transaction/2`) runs on
-  that transaction's connection, so a job inserted there commits or rolls back
-  with the caller's writes.
+- A statement shigoto runs while the process is inside a kura transaction on a
+  pool of the same name (`Repo:transaction/1`, or
+  `kura_repo_worker:transaction/2`) runs on that transaction's connection, so a
+  job inserted there commits or rolls back with the caller's writes. This
+  holds whether shigoto is configured with `repo` or `pool`.
 - When the pool is the configured `repo` and `kura_postgres` is loaded,
   `transaction/2` opens the transaction through `kura_driver_minato`, so kura
-  writes made inside `shigoto:transaction/1` join it too.
+  writes made inside `shigoto:transaction/1` join it too. With `pool`, it opens
+  one of its own, which kura does not see.
 
 Either way a nested call joins the transaction already open. The one opened
 through kura behaves as kura's does: a statement in it that commits or rolls it

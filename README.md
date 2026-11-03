@@ -57,7 +57,8 @@ Add to your deps:
 ```
 
 Configure in `sys.config`. With kura, name the repo; shigoto runs on the
-minato pool `kura_postgres` starts for it:
+minato pool `kura_postgres` starts for it. `repo` must equal that pool's name:
+the repo module, or the repo's `pool` key when kura's config sets one.
 
 ```erlang
 {shigoto, [
@@ -150,8 +151,13 @@ end).
 
 A raise inside either rolls back both the rows and the jobs. Telemetry for jobs
 inserted inside `shigoto:transaction/1` fires after the commit; inside a kura
-transaction it fires on insert. With `{pool, Pool}`, `shigoto:transaction/1`
-covers shigoto's own statements on that pool.
+transaction it fires on insert, before the commit. Use `shigoto:transaction/1`
+as the outer boundary when telemetry has to be commit-accurate.
+
+Jobs inserted inside a kura transaction on a pool of the same name join it
+whether shigoto is configured with `repo` or `pool`. Only the other direction,
+kura writes joining `shigoto:transaction/1`, needs `repo`; with `{pool, Pool}`,
+`shigoto:transaction/1` covers shigoto's own statements on that pool.
 
 ## Job Lifecycle
 

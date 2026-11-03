@@ -67,8 +67,14 @@ shigoto:transaction(fun() ->
 end).
 ```
 
-With `{pool, Pool}`, `transaction/1` covers shigoto's own statements on that
-pool. See `m:shigoto_db` for how the two share a connection.
+`repo` must equal the name of the minato pool kura started for the repo: the
+repo module, or the repo's `pool` key when kura's config sets one. Jobs inserted
+inside a kura transaction on a pool of the same name join it whether shigoto is
+configured with `repo` or `pool`; only kura writes joining `transaction/1` need
+`repo`. `job_inserted` telemetry fires after the commit inside `transaction/1`,
+but on insert inside `Repo:transaction/1`, so use `transaction/1` as the outer
+boundary when telemetry has to be commit-accurate. See `m:shigoto_db` for how
+the two share a connection.
 
 ## Returned jobs
 
