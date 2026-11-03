@@ -23,6 +23,7 @@
     test_schema_version_covers_every_version/1,
     test_current_migration_does_not_block_claims/1,
     test_migration_behind_a_reader_times_out/1,
+    test_newer_schema_is_left_alone/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -82,6 +83,7 @@ all() ->
         test_schema_version_covers_every_version,
         test_current_migration_does_not_block_claims,
         test_migration_behind_a_reader_times_out,
+        test_newer_schema_is_left_alone,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -234,6 +236,26 @@ test_migration_behind_a_reader_times_out(_Config) ->
         #{rows := [#{version := ~"shigoto 6"}]},
         shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
+
+test_newer_schema_is_left_alone(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 999'", []),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ?assertEqual(ok, Migration),
+        ?assert(ClaimMs < 1000),
+        ?assertEqual(~"shigoto 999", schema_comment())
+    after
+        #{} = shigoto_db:query(
+            ?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'not a shigoto version'", []
+        )
+    end,
+    ok = shigoto_migration:up(?POOL),
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+schema_comment() ->
+    #{rows := [#{version := Version}]} =
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", []),
+    Version.
 
 %% Runs up/1 while another connection reads shigoto_jobs_archive, and times a
 %% claim made while the migration runs.

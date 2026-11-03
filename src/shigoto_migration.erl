@@ -20,8 +20,10 @@ Runs in one transaction that first takes an advisory lock, so nodes booting at
 the same time migrate one after the other rather than racing on
 `CREATE ... IF NOT EXISTS`. The last statement records the schema version as
 the comment on `shigoto_jobs` (`shigoto 6`), replacing any comment set there.
-A schema that already records the current version is left alone: no DDL runs
-and no table lock is taken, so a running system is not blocked.
+A schema that already records this version or a newer one (written by a newer
+shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
+taken, so a running system is not blocked. A comment that is not `shigoto <N>`
+counts as no version, and is overwritten.
 
 Otherwise every statement runs in order, and each waits at most 2 seconds for a
 table lock (`lock_timeout`). DDL locks a table against every reader and writer
@@ -95,10 +97,19 @@ current(Pool) ->
         WHERE c.relname = 'shigoto_jobs' AND n.nspname = current_schema()
         """,
     case shigoto_db:query(Pool, SQL, []) of
-        #{rows := [#{version := Version}]} -> Version =:= version_comment();
+        #{rows := [#{version := Version}]} -> recorded(Version) >= ?SCHEMA_VERSION;
         #{rows := []} -> false;
         {error, Reason} -> throw({?MODULE, Reason})
     end.
+
+recorded(<<"shigoto ", Number/binary>>) ->
+    try binary_to_integer(Number) of
+        Version -> Version
+    catch
+        error:badarg -> 0
+    end;
+recorded(_Comment) ->
+    0.
 
 answered({error, Reason}) -> throw({?MODULE, Reason});
 answered(_Ran) -> ok.
