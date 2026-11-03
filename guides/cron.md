@@ -115,7 +115,8 @@ earlier minute than the one already stored.
    that takes `pg_try_advisory_xact_lock`; a node that does not get the lock
    skips the pass, so one node schedules at a time
 2. Due entries insert a job into the worker's `queue/0` (or `default`), with the
-   worker's `priority/0` and `max_attempts/0`
+   worker's `priority/0` and `max_attempts/0`; the `shigoto_cron` row records
+   the same three values
 3. The job inserts and the new `last_scheduled_at` commit together, so a minute
    is never scheduled twice, even by two nodes
 4. Jobs also use a 60-second unique constraint (`[worker, args]`, states

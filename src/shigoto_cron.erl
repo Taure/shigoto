@@ -150,12 +150,11 @@ schedule_entry(Pool, Entry, LastRuns, Now) ->
                 false -> ok
             end,
             stored(
-                shigoto_repo:upsert_cron_entry(Pool, #{
+                shigoto_repo:upsert_cron_entry(Pool, (worker_defaults(Worker))#{
                     name => Name,
                     worker => Worker,
                     args => Args,
                     schedule => Schedule,
-                    queue => worker_queue(Worker),
                     last_scheduled_at => Now
                 })
             );
@@ -178,12 +177,12 @@ insert(Name, Schedule, Worker, Args) ->
 stored(ok) -> ok;
 stored({error, Reason}) -> error({shigoto_cron, {store_failed, Reason}}).
 
-worker_queue(Worker) ->
+worker_defaults(Worker) ->
     _ = code:ensure_loaded(Worker),
-    case erlang:function_exported(Worker, queue, 0) of
-        true -> Worker:queue();
-        false -> ~"default"
-    end.
+    #{
+        Key => Worker:Key()
+     || Key <- [queue, priority, max_attempts], erlang:function_exported(Worker, Key, 0)
+    }.
 
 entry_name(Name) when is_binary(Name) -> Name;
 entry_name(Name) when is_atom(Name) -> atom_to_binary(Name);

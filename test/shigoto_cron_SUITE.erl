@@ -79,7 +79,10 @@ cron_schedules_each_minute_once(_Config) ->
 cron_uses_the_worker_queue(_Config) ->
     set_cron([{~"configured", ~"* * * * *", shigoto_configured_worker, #{}}]),
     ok = shigoto_cron:schedule_once(),
-    ?assertMatch([#{queue := ~"priority_queue", priority := 5}], jobs()).
+    ?assertMatch([#{queue := ~"priority_queue", priority := 5}], jobs()),
+    ?assertMatch(
+        [#{queue := ~"priority_queue", priority := 5, max_attempts := 7}], cron_rows()
+    ).
 
 cron_skips_while_another_node_leads(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
