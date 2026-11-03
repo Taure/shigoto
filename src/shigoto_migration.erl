@@ -8,17 +8,29 @@ Migrations are idempotent and safe to run multiple times.
 
 -export([up/1, down/1]).
 
--doc "Create or update the shigoto_jobs and shigoto_cron tables.".
+-doc """
+Create or update the shigoto tables.
+
+Runs every statement in order and stops at the first one that fails, answering
+`{error, Reason}` with what the database answered. A database that does not
+exist yet, or a role that may not create tables, is an error here rather than a
+node that boots with no tables.
+""".
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
-    lists:foreach(
-        fun(SQL) ->
-            shigoto_db:query(Pool, SQL, [])
-        end,
+    run(
+        Pool,
         v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
             v5_statements() ++ v6_statements()
-    ),
-    ok.
+    ).
+
+run(_Pool, []) ->
+    ok;
+run(Pool, [SQL | Rest]) ->
+    case shigoto_db:query(Pool, SQL, []) of
+        {error, Reason} -> {error, Reason};
+        #{} -> run(Pool, Rest)
+    end.
 
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.

@@ -17,6 +17,7 @@
     test_retry_job/1,
     test_drain_queue/1,
     test_migration/1,
+    test_migration_reports_failure/1,
     test_prune_old_jobs/1,
     test_unique_prevents_duplicate/1,
     test_unique_different_args_allowed/1,
@@ -67,6 +68,7 @@
 all() ->
     [
         test_migration,
+        test_migration_reports_failure,
         test_insert_and_claim,
         test_job_execution_success,
         test_job_execution_failure,
@@ -145,6 +147,16 @@ test_migration(_Config) ->
     shigoto_migration:down(?POOL),
     ok = shigoto_migration:up(?POOL),
     %% Idempotent
+    ok = shigoto_migration:up(?POOL).
+
+test_migration_reports_failure(_Config) ->
+    shigoto_migration:down(?POOL),
+    #{} = shigoto_db:query(?POOL, ~"CREATE VIEW shigoto_jobs AS SELECT 1 AS id", []),
+    try
+        ?assertMatch({error, {pgsql_error, _}}, shigoto_migration:up(?POOL))
+    after
+        #{} = shigoto_db:query(?POOL, ~"DROP VIEW shigoto_jobs", [])
+    end,
     ok = shigoto_migration:up(?POOL).
 
 test_insert_and_claim(_Config) ->
