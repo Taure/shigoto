@@ -6,6 +6,8 @@ to create or update the jobs and cron tables.
 Migrations are idempotent and safe to run multiple times.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([up/1, down/1, schema_version/0]).
 
 -define(LOCK_ID, 839274630).
@@ -23,14 +25,23 @@ the comment on `shigoto_jobs` (`shigoto 6`), replacing any comment set there.
 A schema that already records this version or a newer one (written by a newer
 shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
 taken, so a running system is not blocked. A comment that is not `shigoto <N>`
-counts as no version, and is overwritten.
+(with `N` a positive number of at most 9 digits) counts as no version, and is
+overwritten. A schema with no comment at all that already has the newest
+version's columns (one migrated by shigoto 1.9.x) is also current: `up/1` logs
+`shigoto_schema_unstamped` once and answers `ok` without DDL, so a role that may
+only read and write rows can run it. Run `up/1` once as the table owner to
+record the version.
 
-Otherwise every statement runs in order, and each waits at most 2 seconds for a
-table lock (`lock_timeout`). DDL locks a table against every reader and writer
-until the transaction ends, so a statement stuck behind a long reader would
-otherwise stall job claims for as long. When the wait runs out, the migration
-rolls back and answers `{error, lock_timeout}`: retry it, or run migrations from
-one node at a quiet moment.
+Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
+`shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode with `NOWAIT`,
+then runs every statement in order, each waiting at most 2 seconds for a table
+lock (`lock_timeout`). DDL locks a table against every reader and writer until
+the transaction ends, so a migration that took one table and then waited on
+another would stall job claims for as long. When a table is in use, or the wait
+runs out, the migration rolls back and answers `{error, lock_timeout}`: retry
+it, or run migrations from one node at a quiet moment. On a busy system the
+`NOWAIT` lock can fail often; the boot retries and `m:shigoto_migrator` cover
+that.
 
 Stops at the first statement that fails, rolls back, and answers
 `{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
@@ -62,6 +73,7 @@ locked(Pool) ->
                 true ->
                     ok;
                 false ->
+                    lock_tables(Pool),
                     answered(
                         run(
                             Pool,
@@ -97,19 +109,91 @@ current(Pool) ->
         WHERE c.relname = 'shigoto_jobs' AND n.nspname = current_schema()
         """,
     case shigoto_db:query(Pool, SQL, []) of
-        #{rows := [#{version := Version}]} -> recorded(Version) >= ?SCHEMA_VERSION;
-        #{rows := []} -> false;
-        {error, Reason} -> throw({?MODULE, Reason})
+        #{rows := [#{version := Version}]} when is_binary(Version) ->
+            recorded(Version) >= ?SCHEMA_VERSION;
+        #{rows := [#{version := _Null}]} ->
+            unstamped(Pool);
+        #{rows := []} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
     end.
 
+%% A schema migrated before the version comment existed (1.9.x) has none. When
+%% it already has v6's last column it is current: a DML-only role could not
+%% record the version anyway, and would otherwise never get past boot.
+unstamped(Pool) ->
+    SQL =
+        ~"""
+        SELECT count(*) AS found
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'shigoto_jobs_archive' AND n.nspname = current_schema()
+          AND a.attname = 'deps_results' AND NOT a.attisdropped
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{found := 1}]} ->
+            warn_unstamped_once(Pool),
+            true;
+        #{rows := [#{found := _}]} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+warn_unstamped_once(Pool) ->
+    case persistent_term:get({?MODULE, unstamped_warned}, false) of
+        true ->
+            ok;
+        false ->
+            persistent_term:put({?MODULE, unstamped_warned}, true),
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_schema_unstamped",
+                pool => Pool,
+                action =>
+                    ~"run shigoto_migration:up/1 once as the table owner to record the version"
+            })
+    end.
+
+%% At most 9 digits: a longer number is not a version this code wrote.
 recorded(<<"shigoto ", Number/binary>>) ->
-    try binary_to_integer(Number) of
-        Version -> Version
-    catch
-        error:badarg -> 0
+    case re:run(Number, ~"^[1-9][0-9]{0,8}$", [{capture, none}]) of
+        match -> binary_to_integer(Number);
+        nomatch -> 0
     end;
 recorded(_Comment) ->
     0.
+
+%% Take every table lock the DDL needs at once, or none. Without NOWAIT the
+%% first ALTER holds shigoto_jobs ACCESS EXCLUSIVE while a later statement
+%% waits on another table, and every claim queues behind it. A fresh database
+%% has no tables to lock.
+lock_tables(Pool) ->
+    SQL =
+        ~"""
+        SELECT t AS name
+        FROM unnest(ARRAY['shigoto_jobs', 'shigoto_jobs_archive', 'shigoto_cron']) AS t
+        WHERE to_regclass(t) IS NOT NULL
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := Rows} ->
+            case [Name || #{name := Name} <- Rows, is_binary(Name)] of
+                [] -> ok;
+                Tables -> answered(shigoto_db:query(Pool, lock_statement(Tables), []))
+            end;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+-spec lock_statement([binary(), ...]) -> binary().
+lock_statement([First | Rest]) ->
+    iolist_to_binary([
+        ~"LOCK TABLE ",
+        First,
+        [[~", ", Table] || Table <- Rest],
+        ~" IN ACCESS EXCLUSIVE MODE NOWAIT"
+    ]).
 
 answered({error, Reason}) -> throw({?MODULE, Reason});
 answered(_Ran) -> ok.

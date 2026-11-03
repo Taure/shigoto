@@ -9,7 +9,9 @@
     queues_wait_for_the_migration/1,
     notifier_survives_while_queues_wait/1,
     a_queue_failing_on_the_late_path_is_logged/1,
-    boot_does_not_retry_a_refused_migration/1
+    boot_does_not_retry_a_refused_migration/1,
+    retries_asked_together_run_once/1,
+    an_unstamped_schema_boots_with_a_dml_role/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -20,7 +22,9 @@ all() ->
         queues_wait_for_the_migration,
         notifier_survives_while_queues_wait,
         a_queue_failing_on_the_late_path_is_logged,
-        boot_does_not_retry_a_refused_migration
+        boot_does_not_retry_a_refused_migration,
+        retries_asked_together_run_once,
+        an_unstamped_schema_boots_with_a_dml_role
     ].
 
 init_per_suite(Config) ->
@@ -48,7 +52,7 @@ end_per_testcase(_TestCase, _Config) ->
     ok = shigoto_migration:up(?POOL).
 
 queues_wait_for_the_migration(_Config) ->
-    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
     Reader = read_the_archive(),
     try
         {ok, _} = application:ensure_all_started(shigoto),
@@ -71,7 +75,7 @@ queues_wait_for_the_migration(_Config) ->
 
 notifier_survives_while_queues_wait(_Config) ->
     application:set_env(shigoto, notifier, connection()),
-    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
     Reader = read_the_archive(),
     {Sup, Notifier} =
         try
@@ -153,13 +157,101 @@ boot_does_not_retry_a_refused_migration(_Config) ->
             user => "shigoto_limited", password => "limited", pool_size => 1
         }
     ),
-    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
     ?assertMatch(
         {error, {pgsql_error, #{code := ~"42501"}}}, shigoto_migration:up(?LIMITED_POOL)
     ),
     Started = erlang:monotonic_time(millisecond),
     ?assertNot(shigoto_migrator:boot(?LIMITED_POOL)),
     ?assert(erlang:monotonic_time(millisecond) - Started < 1000).
+
+retries_asked_together_run_once(_Config) ->
+    ok = limited_pool(),
+    application:set_env(shigoto, pool, ?LIMITED_POOL),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+    Self = self(),
+    ok = telemetry:attach(
+        pending,
+        [shigoto, migration, pending],
+        fun(_Event, _Measurements, _Metadata, _HandlerConfig) -> Self ! migration_pending end,
+        undefined
+    ),
+    {ok, Migrator} = shigoto_migrator:start_link(),
+    try
+        ok = sys:suspend(Migrator),
+        [ok = shigoto_migrator:retry_now() || _ <- lists:seq(1, 50)],
+        ok = sys:resume(Migrator),
+        _ = sys:get_state(Migrator),
+        ?assertEqual(1, count_pending(0))
+    after
+        unlink(Migrator),
+        exit(Migrator, kill),
+        telemetry:detach(pending),
+        application:set_env(shigoto, pool, ?POOL)
+    end.
+
+an_unstamped_schema_boots_with_a_dml_role(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
+    _ = shigoto_db:query(?POOL, ~"DROP OWNED BY shigoto_dml", []),
+    _ = shigoto_db:query(?POOL, ~"DROP ROLE IF EXISTS shigoto_dml", []),
+    [
+        #{} = shigoto_db:query(?POOL, SQL, [])
+     || SQL <- [
+            ~"CREATE ROLE shigoto_dml LOGIN PASSWORD 'dml'",
+            ~"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO shigoto_dml",
+            ~"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO shigoto_dml"
+        ]
+    ],
+    {ok, _} = shigoto_db:start_pool(
+        shigoto_dml_pool, (connection())#{user => "shigoto_dml", password => "dml", pool_size => 2}
+    ),
+    application:set_env(shigoto, pool, shigoto_dml_pool),
+    ok = shigoto_log_probe:attach(),
+    try
+        ?assertEqual(ok, shigoto_migration:up(shigoto_dml_pool)),
+        receive
+            {log, warning, #{msg := ~"shigoto_schema_unstamped"} = Report} ->
+                ?assertMatch(#{action := _}, Report)
+        after 2000 -> ct:fail(no_unstamped_warning)
+        end,
+        {ok, _} = application:ensure_all_started(shigoto),
+        ?assertEqual(undefined, whereis(shigoto_migrator)),
+        ?assertMatch(
+            [{{shigoto_queue, ~"boot_probe"}, _, _, _}],
+            supervisor:which_children(shigoto_queue_sup)
+        )
+    after
+        shigoto_log_probe:detach(),
+        application:set_env(shigoto, pool, ?POOL)
+    end.
+
+count_pending(Count) ->
+    receive
+        migration_pending -> count_pending(Count + 1)
+    after 500 -> Count
+    end.
+
+limited_pool() ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'shigoto_limited') THEN
+            CREATE ROLE shigoto_limited LOGIN PASSWORD 'limited';
+          END IF;
+        END $$
+        """,
+        []
+    ),
+    case
+        shigoto_db:start_pool(
+            ?LIMITED_POOL,
+            (connection())#{user => "shigoto_limited", password => "limited", pool_size => 1}
+        )
+    of
+        {ok, _} -> ok;
+        {error, {already_started, _}} -> ok
+    end.
 
 connection() ->
     #{

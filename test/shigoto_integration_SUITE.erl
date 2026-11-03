@@ -24,6 +24,8 @@
     test_current_migration_does_not_block_claims/1,
     test_migration_behind_a_reader_times_out/1,
     test_newer_schema_is_left_alone/1,
+    test_huge_schema_comment_is_not_a_version/1,
+    test_migration_does_not_queue_behind_a_reader/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -84,6 +86,8 @@ all() ->
         test_current_migration_does_not_block_claims,
         test_migration_behind_a_reader_times_out,
         test_newer_schema_is_left_alone,
+        test_huge_schema_comment_is_not_a_version,
+        test_migration_does_not_queue_behind_a_reader,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -223,7 +227,7 @@ test_current_migration_does_not_block_claims(_Config) ->
     ?assert(ClaimMs < 1000).
 
 test_migration_behind_a_reader_times_out(_Config) ->
-    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
     try
         {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
         ct:pal("claim latency with a migration behind an archive reader: ~p ms", [ClaimMs]),
@@ -251,6 +255,28 @@ test_newer_schema_is_left_alone(_Config) ->
     end,
     ok = shigoto_migration:up(?POOL),
     ?assertEqual(~"shigoto 6", schema_comment()).
+
+test_huge_schema_comment_is_not_a_version(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"DO $$ BEGIN EXECUTE format('COMMENT ON TABLE shigoto_jobs IS %L', 'shigoto ' || repeat('9', 1000000)); END $$",
+        []
+    ),
+    ?assertEqual(ok, shigoto_migration:up(?POOL)),
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+%% A migration that cannot take its table locks at once gives up at once,
+%% rather than queueing an ACCESS EXCLUSIVE request that claims wait behind.
+test_migration_does_not_queue_behind_a_reader(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ct:pal("claim latency with a migration refused its table locks: ~p ms", [ClaimMs]),
+        ?assertEqual({error, lock_timeout}, Migration),
+        ?assert(ClaimMs < 500)
+    after
+        ok = shigoto_migration:up(?POOL)
+    end.
 
 schema_comment() ->
     #{rows := [#{version := Version}]} =
