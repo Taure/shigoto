@@ -43,7 +43,7 @@ docker compose up -d        # Postgres 16 on :5556 (db shigoto_test, pw root)
 rebar3 eunit                # shigoto_cron_parser_tests
 rebar3 ct                   # core / features / integration CT suites (needs DB)
 rebar3 dialyzer
-rebar3 lint                 # rebar3_lint (elvis)
+elp lint                    # ELP lints (~/.local/bin/elp)
 rebar3 hank                 # dead-code; ignores worker + middleware behaviours
 rebar3 fmt                  # erlfmt (write); CI runs fmt --check
 rebar3 xref
@@ -62,11 +62,11 @@ tables, trigger, and notify function. Edit the versioned statements in
 ## Pre-push checklist
 
 `fmt --check` -> `xref` -> `dialyzer` -> `elp lint` -> `hank` -> `eunit` ->
-`ct` (against Docker Postgres) -> `ex_doc`, all green. `rebar3 lint` does not
-work here: the `rebar3_lint` plugin is listed but there is no elvis config, so
-it fails before linting anything; use `elp lint`. CI (`Taure/erlang-ci` ci.yml
-`@v2.1.7`) runs ct, ex_doc, hank, audit, coverage, elp-lint, and dependency
-submission; `elp-eqwalize`, `sbom` and `sbom-scan` are disabled for this repo.
+`ct` (against Docker Postgres) -> `ex_doc`, all green. Lint with `elp lint`;
+there is no elvis config and no `rebar3_lint` plugin. CI (`Taure/erlang-ci`
+ci.yml `@v2.1.7`) runs ct, ex_doc, hank, coverage, elp-lint, dependency
+submission, and SBOM generation plus a Trivy scan of it (`rebar3_sbom`, the
+Taure fork); `audit` and `elp-eqwalize` are disabled for this repo.
 Every push to `main` runs release.yml.
 
 ## Conventions
