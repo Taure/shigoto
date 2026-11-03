@@ -20,6 +20,7 @@
     cron_never_moves_the_last_run_back/1,
     cron_telemetry_fires_after_the_pass_commits/1,
     cron_logs_no_row_values/1,
+    cron_encrypts_entry_args/1,
     stager_notifies_a_due_queue/1
 ]).
 
@@ -38,6 +39,7 @@ all() ->
         cron_never_moves_the_last_run_back,
         cron_telemetry_fires_after_the_pass_commits,
         cron_logs_no_row_values,
+        cron_encrypts_entry_args,
         stager_notifies_a_due_queue
     ].
 
@@ -188,6 +190,19 @@ cron_logs_no_row_values(_Config) ->
         #{} = shigoto_db:query(
             ?POOL, ~"ALTER TABLE shigoto_cron DROP CONSTRAINT shigoto_cron_probe", []
         )
+    end.
+
+cron_encrypts_entry_args(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{~"secret" => ~"hunter2"}}]),
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        ok = shigoto_cron:schedule_once(),
+        #{rows := [#{args := Stored}]} = shigoto_db:query(
+            ?POOL, ~"SELECT args::text AS args FROM shigoto_cron", []
+        ),
+        ?assertEqual(nomatch, binary:match(Stored, ~"hunter2"))
+    after
+        application:unset_env(shigoto, encryption_key)
     end.
 
 %%----------------------------------------------------------------------

@@ -532,6 +532,10 @@ Upsert a cron entry, keyed by `name`.
 `last_scheduled_at`, when given, is the minute the entry was last scheduled for.
 It only ever moves forward: an upsert without it, or with an earlier minute
 than the stored one, keeps the stored one.
+
+`args` is stored encrypted when an encryption key is configured, as job args
+are (`m:shigoto_crypto`). shigoto never reads the column back; the args a cron
+job runs with come from the configured entry.
 """.
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.
 upsert_cron_entry(Pool, Entry) ->
@@ -545,12 +549,12 @@ upsert_cron_entry(Pool, Entry) ->
             "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts,\n"
             "last_scheduled_at = GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)"
         >>,
-    ArgsJson = encode_json(maps:get(args, Entry, #{})),
+    EncArgs = shigoto_crypto:encrypt(encode_json(maps:get(args, Entry, #{}))),
     case
         query(Pool, SQL, [
             maps:get(name, Entry),
             atom_to_binary(maps:get(worker, Entry), utf8),
-            ArgsJson,
+            EncArgs,
             maps:get(schedule, Entry),
             maps:get(queue, Entry, ~"default"),
             maps:get(priority, Entry, 0),
