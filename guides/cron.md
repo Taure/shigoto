@@ -152,7 +152,8 @@ cron or stager key stops that work on every node. Do not use them for anything
 else. A node that finds the cron lock taken for 5 passes in a row while no node
 schedules logs `shigoto_cron_lock_held_elsewhere`; the stager logs
 `shigoto_stager_lock_held_elsewhere` after a minute of missed passes (at least
-10). Both emit `[shigoto, leader_lock, unavailable]`. Find the holder with:
+10). Each warning repeats hourly while the lock stays taken, and each emits
+`[shigoto, leader_lock, unavailable]`. Find the holder with:
 
 ```sql
 SELECT pid, usename, application_name, state, xact_start

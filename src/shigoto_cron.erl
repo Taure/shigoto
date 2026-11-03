@@ -42,6 +42,8 @@ See `shigoto_config:cron_entries/0`.
 -define(CATCH_UP_MINUTES, 60).
 %% Passes in a row that found the lock taken while no node scheduled.
 -define(STUCK_PASSES, 5).
+%% The warning repeats hourly while the lock stays taken, as the stager's does.
+-define(REPEAT_PASSES, 60).
 
 -doc false.
 start_link() ->
@@ -103,7 +105,7 @@ handle_info(_Info, State) ->
 %% held by something that is not a shigoto pass.
 counted({missed, false}, #{misses := Misses0} = State) ->
     Misses = Misses0 + 1,
-    case Misses >= ?STUCK_PASSES andalso (Misses - ?STUCK_PASSES) rem 60 =:= 0 of
+    case Misses >= ?STUCK_PASSES andalso (Misses - ?STUCK_PASSES) rem ?REPEAT_PASSES =:= 0 of
         true ->
             ?LOG_WARNING(#{
                 msg => ~"shigoto_cron_lock_held_elsewhere",

@@ -29,6 +29,8 @@ never crashes the supervision tree.
 %% minute on end. At least ten passes, and at least a minute of them.
 -define(STUCK_AFTER_MS, 60000).
 -define(MIN_STUCK_PASSES, 10).
+%% The warning repeats hourly while the lock stays taken, as cron's does.
+-define(REPEAT_AFTER_MS, 3600000).
 
 -doc false.
 start_link() ->
@@ -67,8 +69,9 @@ stage_once() ->
 
 counted(missed, #{misses := Misses0} = State) ->
     Misses = Misses0 + 1,
-    Threshold = stuck_passes(),
-    case Misses >= Threshold andalso (Misses - Threshold) rem Threshold =:= 0 of
+    Threshold = passes_in(?STUCK_AFTER_MS, ?MIN_STUCK_PASSES),
+    Repeat = passes_in(?REPEAT_AFTER_MS, 1),
+    case Misses >= Threshold andalso (Misses - Threshold) rem Repeat =:= 0 of
         true ->
             ?LOG_WARNING(#{
                 msg => ~"shigoto_stager_lock_held_elsewhere",
@@ -87,11 +90,12 @@ counted(retry, State) ->
 counted(held, State) ->
     State#{misses := 0}.
 
--spec stuck_passes() -> pos_integer().
-stuck_passes() ->
-    case ?STUCK_AFTER_MS div shigoto_config:stage_interval() of
-        Passes when Passes > ?MIN_STUCK_PASSES -> Passes;
-        _Fewer -> ?MIN_STUCK_PASSES
+%% How many passes `Ms` milliseconds of them come to, and at least `Min`.
+-spec passes_in(pos_integer(), pos_integer()) -> pos_integer().
+passes_in(Ms, Min) ->
+    case Ms div shigoto_config:stage_interval() of
+        Passes when Passes > Min -> Passes;
+        _Fewer -> Min
     end.
 
 safe_with_leader_lock(Fun) ->
