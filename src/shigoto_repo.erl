@@ -301,13 +301,20 @@ cancel_by(Pool, Filters) ->
         {error, _} = Err -> Err
     end.
 
--doc "Snooze a job — reschedule for later without counting as a failure.".
+-doc """
+Snooze a job: reschedule it for later without counting it as a failure.
+
+Claiming counts an attempt, so a snooze raises `max_attempts` by one to give
+that attempt back. `attempt` keeps counting runs, and a job that snoozes is
+never discarded for it.
+""".
 -spec snooze_job(atom(), integer(), pos_integer()) -> ok | {error, term()}.
 snooze_job(Pool, JobId, Seconds) ->
     SQL =
         <<
             "UPDATE shigoto_jobs SET state = 'available',\n"
-            "scheduled_at = now() + make_interval(secs => $2)\n"
+            "scheduled_at = now() + make_interval(secs => $2),\n"
+            "max_attempts = max_attempts + 1\n"
             "WHERE id = $1 AND state = 'executing'"
         >>,
     case query(Pool, SQL, [JobId, Seconds]) of
