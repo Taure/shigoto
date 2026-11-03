@@ -120,19 +120,23 @@ insert_all(Pool, JobParamsList, Opts) ->
             Err
     end.
 
--doc "Claim up to N available jobs from a queue using FOR UPDATE SKIP LOCKED.".
+-doc """
+Claim up to `Limit` available jobs from a queue using `FOR UPDATE SKIP LOCKED`.
+
+Never answers more than `Limit` jobs. The locking select runs once, as an
+uncorrelated `ARRAY(...)` subquery, because `WHERE id IN (SELECT ... LIMIT ...
+FOR UPDATE SKIP LOCKED)` lets PostgreSQL plan a semi join that rescans the
+subquery for every outer row, and each rescan locks and returns more rows.
+""".
 -spec claim_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 claim_jobs(Pool, Queue, Limit) ->
-    %% Jobs with unresolved dependencies (depends_on != '{}') are skipped.
-    %% Fair partitioned claiming is handled by interleaving partition keys
-    %% via a subquery with ROW_NUMBER, wrapped in an outer FOR UPDATE SKIP LOCKED.
     SQL =
         <<
             "UPDATE shigoto_jobs SET\n"
             "state = 'executing',\n"
             "attempted_at = now(),\n"
             "attempt = attempt + 1\n"
-            "WHERE id IN (\n"
+            "WHERE id = ANY(ARRAY(\n"
             "  SELECT id FROM shigoto_jobs\n"
             "  WHERE queue = $1\n"
             "  AND state = 'available'\n"
@@ -141,7 +145,7 @@ claim_jobs(Pool, Queue, Limit) ->
             "  ORDER BY priority DESC, scheduled_at ASC\n"
             "  LIMIT $2\n"
             "  FOR UPDATE SKIP LOCKED\n"
-            ") RETURNING *"
+            ")) RETURNING *"
         >>,
     case query(Pool, SQL, [Queue, Limit]) of
         #{rows := Rows} ->

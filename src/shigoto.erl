@@ -250,7 +250,7 @@ retry(JobId) ->
 retry(Pool, JobId) ->
     shigoto_repo:retry_job(Pool, JobId).
 
--doc "Drain a queue synchronously. Useful for testing.".
+-doc "Drain a queue synchronously: claim and run its due jobs until none are left. Useful for testing.".
 -spec drain_queue(binary()) -> ok.
 drain_queue(Queue) ->
     drain_queue(Queue, #{}).
@@ -413,9 +413,15 @@ drain_loop(Pool, Queue, Timeout) ->
     case shigoto_repo:claim_jobs(Pool, Queue, 1) of
         {ok, []} ->
             ok;
-        {ok, [Job]} ->
-            _ = shigoto_executor:execute_sync(Job, Pool, Timeout),
+        {ok, Jobs} ->
+            executed(Pool, Jobs, Timeout),
             drain_loop(Pool, Queue, Timeout);
         {error, _} ->
             ok
     end.
+
+executed(_Pool, [], _Timeout) ->
+    ok;
+executed(Pool, [Job | Jobs], Timeout) ->
+    _ = shigoto_executor:execute_sync(Job, Pool, Timeout),
+    executed(Pool, Jobs, Timeout).

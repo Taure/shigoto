@@ -40,6 +40,7 @@
     test_claim_respects_priority/1,
     test_claim_respects_scheduled_at/1,
     test_snooze_preserves_attempt_count/1,
+    test_claim_never_exceeds_limit/1,
     test_max_attempts_discards/1,
     test_concurrent_claim_no_double_execute/1,
     test_cancel_by_no_match/1,
@@ -73,6 +74,7 @@ all() ->
         test_claim_respects_priority,
         test_claim_respects_scheduled_at,
         test_snooze_preserves_attempt_count,
+        test_claim_never_exceeds_limit,
         test_max_attempts_discards,
         test_concurrent_claim_no_double_execute,
         test_cancel_by_no_match,
@@ -483,6 +485,25 @@ test_snooze_preserves_attempt_count(_Config) ->
     {ok, Snoozed} = shigoto_repo:get_job(?POOL, JobId),
     ?assertEqual(1, maps:get(attempt, Snoozed)),
     ?assertEqual(<<"available">>, maps:get(state, Snoozed)).
+
+test_claim_never_exceeds_limit(_Config) ->
+    Queue = ~"claim_limit",
+    Insert = fun() ->
+        {ok, _} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => Queue}, #{}
+        )
+    end,
+    Insert(),
+    #{} = shigoto_db:query(?POOL, ~"ANALYZE shigoto_jobs", []),
+    Insert(),
+    Insert(),
+    %% Stale statistics and no Materialize make PostgreSQL plan a nested loop
+    %% semi join that rescans the claim's subquery once per outer row.
+    {ok, Claimed} = shigoto_db:transaction(?POOL, fun() ->
+        #{} = shigoto_db:query(?POOL, ~"SET LOCAL enable_material = off", []),
+        shigoto_repo:claim_jobs(?POOL, Queue, 1)
+    end),
+    ?assertEqual(1, length(Claimed)).
 
 test_max_attempts_discards(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
