@@ -712,7 +712,7 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
         end,
         lists:sort(Keys)
     ),
-    iolist_to_binary(lists:join(~":", Parts)).
+    shigoto_crypto:unique_key(iolist_to_binary(lists:join(~":", Parts))).
 
 find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
     StatesClause = states_in_clause(States),

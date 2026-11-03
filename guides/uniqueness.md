@@ -26,7 +26,9 @@ Any keys you omit fall back to `?DEFAULT_UNIQUE` in `shigoto_repo`:
 - **keys** - which fields form the identity of the job. Supported: `worker`,
   `args`, `queue`. The key is built by `build_unique_key/4`: the selected fields
   are sorted, `args` is JSON-encoded, and the parts are joined with `:` into the
-  job's `unique_key` column.
+  job's `unique_key` column. With an encryption key configured the stored key
+  is an HMAC-SHA256 of that string instead, so it carries no arg values (see
+  the [Encryption](encryption.md) guide).
 - **states** - a new insert only conflicts with an existing job whose `state` is
   in this list. The default covers in-flight work (`available`, `executing`,
   `retryable`) but **not** terminal states, so a `completed`, `discarded`, or

@@ -26,6 +26,7 @@
     test_batch_with_callback/1,
     test_get_job/1,
     test_encryption_roundtrip/1,
+    test_encrypted_unique_key_hides_args/1,
     test_heartbeat_stale_threshold/1,
     test_depends_on_blocks_claiming/1,
     test_depends_on_resolved_on_complete/1,
@@ -54,6 +55,7 @@ all() ->
         test_batch_with_callback,
         test_get_job,
         test_encryption_roundtrip,
+        test_encrypted_unique_key_hides_args,
         test_heartbeat_stale_threshold,
         test_depends_on_blocks_claiming,
         test_depends_on_resolved_on_complete,
@@ -348,6 +350,23 @@ test_get_job(_Config) ->
 %%----------------------------------------------------------------------
 %% Encryption test
 %%----------------------------------------------------------------------
+
+test_encrypted_unique_key_hides_args(_Config) ->
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        Unique = #{keys => [worker, args], states => [available, executing]},
+        Params = #{worker => shigoto_test_worker, args => #{~"secret" => ~"hunter2"}},
+        {ok, #{id := Id, unique_key := UniqueKey}} =
+            shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        ?assert(is_binary(UniqueKey)),
+        ?assertEqual(nomatch, binary:match(UniqueKey, [~"hunter2", ~"secret"])),
+        ?assertMatch(
+            {ok, {conflict, #{id := Id}}},
+            shigoto_repo:insert_job(?POOL, Params, #{unique => Unique})
+        )
+    after
+        application:unset_env(shigoto, encryption_key)
+    end.
 
 test_encryption_roundtrip(_Config) ->
     %% Set encryption key

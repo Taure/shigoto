@@ -58,8 +58,14 @@ key on the next write.
 
 ## What's Encrypted
 
-- Job `args` — the arguments map passed to workers
-- The `meta` field is **not** encrypted (it's used for internal tracking)
+- Job `args` and `meta`
+- Cron entry `args` in the `shigoto_cron` table
+- A unique job's `unique_key` is not encrypted but replaced by a keyed hash
+  (HMAC-SHA256, keyed by a key derived from the current encryption key), so it
+  carries no arg values. Turning encryption on, or rotating to a new current
+  key, changes the key every new job gets: a job inserted before the change and
+  one inserted after it with the same args are not deduplicated against each
+  other.
 
 ## Without Encryption
 
