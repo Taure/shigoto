@@ -4,6 +4,8 @@ All SQL operations for Shigoto jobs. Uses `FOR UPDATE SKIP LOCKED`
 for safe multi-node job claiming.
 """.
 
+-deprecated([{get_due_cron_entries, 1, "use get_cron_entries/1"}]).
+
 -export([
     insert_job/3,
     insert_all/3,
@@ -22,6 +24,7 @@ for safe multi-node job claiming.
     prune_jobs/2,
     prune_archive/2,
     upsert_cron_entry/2,
+    get_cron_entries/1,
     get_due_cron_entries/1,
     try_advisory_xact_lock/2,
     current_minute/1,
@@ -606,13 +609,18 @@ upsert_cron_entry(Pool, Entry) ->
     end.
 
 -doc "All stored cron entries, with the minute each was last scheduled for.".
--spec get_due_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
-get_due_cron_entries(Pool) ->
+-spec get_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
+get_cron_entries(Pool) ->
     SQL = ~"SELECT * FROM shigoto_cron",
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
     end.
+
+-doc "Deprecated name of `get_cron_entries/1`; it answers every entry, not the due ones.".
+-spec get_due_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
+get_due_cron_entries(Pool) ->
+    get_cron_entries(Pool).
 
 -doc """
 Whether any cron entry has been scheduled up to the previous minute or later.
