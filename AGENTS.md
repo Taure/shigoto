@@ -52,7 +52,10 @@ rebar3 ex_doc               # fix every new warning
 
 Migrations are not hand-written. `shigoto_migration:up/Pool` runs the versioned,
 idempotent statement sets (`v1..v6`) against a minato pool and answers
-`{error, Reason}` for the first one that fails; `down/1` drops the
+`{error, Reason}` for the first one that fails. A new version is a new
+`vN_statements/0` plus a bump of `?SCHEMA_VERSION`, which `up/1` records as the
+comment on `shigoto_jobs` and checks to skip a current schema (a CT case fails
+when the two disagree); `down/1` drops the
 tables, trigger, and notify function. Edit the versioned statements in
 `shigoto_migration.erl`, never scatter DDL elsewhere.
 

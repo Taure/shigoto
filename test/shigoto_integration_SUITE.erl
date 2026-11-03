@@ -20,6 +20,7 @@
     test_migration_reports_failure/1,
     test_concurrent_migrations/1,
     test_migration_refuses_an_open_transaction/1,
+    test_schema_version_covers_every_version/1,
     test_current_migration_does_not_block_claims/1,
     test_migration_behind_a_reader_times_out/1,
     test_commit_refused_raises/1,
@@ -78,6 +79,7 @@ all() ->
         test_migration_reports_failure,
         test_concurrent_migrations,
         test_migration_refuses_an_open_transaction,
+        test_schema_version_covers_every_version,
         test_current_migration_does_not_block_claims,
         test_migration_behind_a_reader_times_out,
         test_commit_refused_raises,
@@ -195,6 +197,24 @@ test_migration_refuses_an_open_transaction(_Config) ->
         shigoto_db:transaction(?POOL, fun() -> shigoto_migration:up(?POOL) end)
     ).
 
+test_schema_version_covers_every_version(_Config) ->
+    Versions = [
+        binary_to_integer(Version)
+     || {Function, 0} <- shigoto_migration:module_info(functions),
+        {match, [Version]} <- [
+            re:run(atom_to_binary(Function), ~"^v([0-9]+)_statements$", [
+                {capture, all_but_first, binary}
+            ])
+        ]
+    ],
+    ?assertEqual(lists:max(Versions), shigoto_migration:schema_version()),
+    ok = shigoto_migration:up(?POOL),
+    Expected = iolist_to_binary([~"shigoto ", integer_to_binary(shigoto_migration:schema_version())]),
+    ?assertMatch(
+        #{rows := [#{version := Expected}]},
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
+    ).
+
 test_current_migration_does_not_block_claims(_Config) ->
     ok = shigoto_migration:up(?POOL),
     {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
@@ -203,9 +223,7 @@ test_current_migration_does_not_block_claims(_Config) ->
     ?assert(ClaimMs < 3000).
 
 test_migration_behind_a_reader_times_out(_Config) ->
-    #{} = shigoto_db:query(
-        ?POOL, ~"ALTER TABLE shigoto_jobs_archive DROP COLUMN deps_results", []
-    ),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),
     try
         {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
         ct:pal("claim latency with a migration behind an archive reader: ~p ms", [ClaimMs]),
@@ -215,12 +233,8 @@ test_migration_behind_a_reader_times_out(_Config) ->
         ok = shigoto_migration:up(?POOL)
     end,
     ?assertMatch(
-        #{rows := [_]},
-        shigoto_db:query(
-            ?POOL,
-            ~"SELECT 1 FROM information_schema.columns WHERE table_name = 'shigoto_jobs_archive' AND column_name = 'deps_results'",
-            []
-        )
+        #{rows := [#{version := ~"shigoto 6"}]},
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
 
 %% Runs up/1 while another connection reads shigoto_jobs_archive, and times a

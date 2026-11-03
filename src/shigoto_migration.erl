@@ -6,17 +6,22 @@ to create or update the jobs and cron tables.
 Migrations are idempotent and safe to run multiple times.
 """.
 
--export([up/1, down/1]).
+-export([up/1, down/1, schema_version/0]).
 
 -define(LOCK_ID, 839274630).
+%% The newest vN_statements/0. A CT case fails when a version is added without
+%% raising this.
+-define(SCHEMA_VERSION, 6).
 
 -doc """
 Create or update the shigoto tables.
 
 Runs in one transaction that first takes an advisory lock, so nodes booting at
 the same time migrate one after the other rather than racing on
-`CREATE ... IF NOT EXISTS`. A schema that is already current is left alone: no
-DDL runs and no table lock is taken, so a running system is not blocked.
+`CREATE ... IF NOT EXISTS`. The last statement records the schema version as
+the comment on `shigoto_jobs` (`shigoto 6`), replacing any comment set there.
+A schema that already records the current version is left alone: no DDL runs
+and no table lock is taken, so a running system is not blocked.
 
 Otherwise every statement runs in order, and each waits at most 2 seconds for a
 table lock (`lock_timeout`). DDL locks a table against every reader and writer
@@ -59,7 +64,8 @@ locked(Pool) ->
                         run(
                             Pool,
                             v1_statements() ++ v2_statements() ++ v3_statements() ++
-                                v4_statements() ++ v5_statements() ++ v6_statements()
+                                v4_statements() ++ v5_statements() ++ v6_statements() ++
+                                [version_statement()]
                         )
                     )
             end
@@ -70,18 +76,27 @@ locked(Pool) ->
         error:{shigoto_db, Reason} -> {error, Reason}
     end.
 
-%% Whether the last column the newest version adds is there. Bump this with
-%% every new version, to that version's last change.
+-doc false.
+-spec schema_version() -> pos_integer().
+schema_version() ->
+    ?SCHEMA_VERSION.
+
+version_statement() ->
+    <<"COMMENT ON TABLE shigoto_jobs IS '", (version_comment())/binary, "'">>.
+
+version_comment() ->
+    <<"shigoto ", (integer_to_binary(?SCHEMA_VERSION))/binary>>.
+
 current(Pool) ->
     SQL =
         ~"""
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'shigoto_jobs_archive'
-          AND column_name = 'deps_results'
+        SELECT obj_description(c.oid, 'pg_class') AS version
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'shigoto_jobs' AND n.nspname = current_schema()
         """,
     case shigoto_db:query(Pool, SQL, []) of
-        #{rows := Rows} -> Rows =/= [];
+        #{rows := [#{version := Version}]} -> Version =:= version_comment();
+        #{rows := []} -> false;
         {error, Reason} -> throw({?MODULE, Reason})
     end.
 
