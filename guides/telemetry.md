@@ -41,6 +41,12 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, queue, poll]` | `count, claimed` | queue |
 | `[shigoto, queue, paused]` | `count` | queue |
 | `[shigoto, queue, resumed]` | `count` | queue |
+| `[shigoto, queue, start_failed]` | `count` | queue, reason |
+
+`start_failed` fires when `shigoto_migrator` starts the configured queues after
+a late migration and one of them fails to start. It comes with a
+`shigoto_queue_start_failed` error log; the other queues still start. On a
+normal boot a bad queue config fails the application start instead.
 
 ### Resilience Events
 
@@ -64,8 +70,12 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
 | `[shigoto, cron, skipped]` | `count` | name, worker, reason |
 
-`skipped` fires each pass for an entry that cannot be scheduled, along with a
-`shigoto_cron_entry_skipped` warning (see the [Cron](cron.md) guide).
+`skipped` fires on every pass for an entry that cannot be scheduled: its
+schedule does not parse, its args do not encode as JSON, its worker's defaults
+do not fit the jobs table, or the entry is malformed (`malformed_entry`). The
+matching `shigoto_cron_entry_skipped` warning is logged only once per entry and
+reason on each node, so alert on this event rather than on the log (see the
+[Cron](cron.md) guide).
 
 ### Leader Lock Events
 
@@ -78,6 +88,18 @@ Emitted with the `shigoto_cron_lock_held_elsewhere` and
 `stager`) has been taken by something other than a shigoto pass for
 `consecutive_misses` passes in a row. See "Advisory locks" in the
 [Cron](cron.md) guide.
+
+### Migration Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, migration, pending]` | `count` | reason |
+
+Emitted with the `shigoto_migration_pending` error when boot could not bring the
+schema up to date and the queues are held back, and again on each failed
+background retry (every 30 seconds, or on `shigoto_migrator:retry_now/0`).
+While it keeps firing no job is processed on that node; alert on it. See "Run
+the Migration" in the [Getting Started](getting-started.md) guide.
 
 ### Testing Events
 
