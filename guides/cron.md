@@ -126,8 +126,15 @@ until that time comes.
 4. Jobs also use a 60-second unique constraint (`[worker, args]`, states
    `available` and `executing`), so a run still waiting is not queued again
 5. Cron jobs follow the same retry, backoff, and pruning rules as regular jobs
-6. A pass that fails is logged as `shigoto_cron_pass_failed` and retried on the
-   next minute
+6. Before the pass, each entry is checked: its schedule must parse, its args
+   must encode as JSON, and its worker's `queue/0`, `priority/0` and
+   `max_attempts/0` must fit the jobs table (a binary, and int4 integers). An
+   entry that fails is skipped with a `shigoto_cron_entry_skipped` warning and
+   `[shigoto, cron, skipped]` telemetry, every pass until it is fixed, and the
+   other entries are scheduled as usual
+7. A pass that fails is logged as `shigoto_cron_pass_failed` and retried on the
+   next minute; `shigoto_cron:schedule_once/0` answers `{error, pass_failed}`
+   for it
 
 ## Advisory locks
 

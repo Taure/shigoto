@@ -62,6 +62,10 @@ logger for filtering); it is omitted from the tables below for brevity.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
+| `[shigoto, cron, skipped]` | `count` | name, worker, reason |
+
+`skipped` fires each pass for an entry that cannot be scheduled, along with a
+`shigoto_cron_entry_skipped` warning (see the [Cron](cron.md) guide).
 
 ### Leader Lock Events
 

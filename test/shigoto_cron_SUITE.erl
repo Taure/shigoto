@@ -22,6 +22,9 @@
     cron_logs_no_row_values/1,
     cron_encrypts_entry_args/1,
     cron_resets_a_last_run_far_ahead/1,
+    cron_skips_a_bad_entry/1,
+    cron_skips_a_worker_whose_defaults_overflow/1,
+    cron_reports_a_failed_pass/1,
     cron_pass_refuses_an_open_transaction/1,
     cron_warns_when_its_lock_is_held_elsewhere/1,
     cron_does_not_warn_while_a_peer_schedules/1,
@@ -47,6 +50,9 @@ all() ->
         cron_logs_no_row_values,
         cron_encrypts_entry_args,
         cron_resets_a_last_run_far_ahead,
+        cron_skips_a_bad_entry,
+        cron_skips_a_worker_whose_defaults_overflow,
+        cron_reports_a_failed_pass,
         cron_pass_refuses_an_open_transaction,
         cron_warns_when_its_lock_is_held_elsewhere,
         cron_does_not_warn_while_a_peer_schedules,
@@ -189,10 +195,15 @@ cron_logs_no_row_values(_Config) ->
     ),
     ok = shigoto_log_probe:attach(),
     try
-        ok = shigoto_cron:schedule_once(),
+        {error, pass_failed} = shigoto_cron:schedule_once(),
         Report = receive_log(~"shigoto_cron_pass_failed"),
         ?assertMatch(
-            #{reason := {shigoto_cron, {store_failed, {pgsql_error, #{code := ~"23514"}}}}}, Report
+            #{
+                reason :=
+                    {shigoto_cron,
+                        {store_failed, ~"every_minute", {pgsql_error, #{code := ~"23514"}}}}
+            },
+            Report
         ),
         Logged = iolist_to_binary(io_lib:format("~p", [Report])),
         ?assertEqual(nomatch, binary:match(Logged, [~"Failing row", ~"hunter2"]))
@@ -266,6 +277,60 @@ cron_pass_refuses_an_open_transaction(_Config) ->
         {error, in_transaction}, shigoto:transaction(fun shigoto_cron:schedule_once/0)
     ),
     ?assertEqual([], jobs()).
+
+cron_skips_a_bad_entry(_Config) ->
+    set_cron([
+        {~"good", ~"* * * * *", shigoto_test_worker, #{~"n" => 1}},
+        {~"bad", ~"* * * * *", shigoto_test_worker, #{~"at" => {2026, 1, 1}}}
+    ]),
+    ok = shigoto_log_probe:attach(),
+    try
+        ok = shigoto_cron:schedule_once(),
+        ?assertMatch(
+            #{name := ~"bad", reason := invalid_args}, receive_log(~"shigoto_cron_entry_skipped")
+        )
+    after
+        shigoto_log_probe:detach()
+    end,
+    ?assertMatch([#{worker := ~"shigoto_test_worker"}], jobs()),
+    ?assertMatch([#{name := ~"good"}], cron_rows()).
+
+cron_skips_a_worker_whose_defaults_overflow(_Config) ->
+    set_cron([
+        {~"good", ~"* * * * *", shigoto_test_worker, #{}},
+        {~"overflow", ~"* * * * *", shigoto_overflow_worker, #{}}
+    ]),
+    Self = self(),
+    ok = telemetry:attach(
+        skipped,
+        [shigoto, cron, skipped],
+        fun(_Event, _Measurements, Metadata, _HandlerConfig) -> Self ! {skipped, Metadata} end,
+        undefined
+    ),
+    try
+        ok = shigoto_cron:schedule_once(),
+        receive
+            {skipped, Metadata} ->
+                ?assertMatch(
+                    #{name := ~"overflow", reason := {invalid_worker_defaults, [max_attempts]}},
+                    Metadata
+                )
+        after 2000 -> ct:fail(no_skipped_telemetry)
+        end
+    after
+        telemetry:detach(skipped)
+    end,
+    ?assertMatch([#{worker := ~"shigoto_test_worker"}], jobs()),
+    ?assertMatch([#{name := ~"good"}], cron_rows()).
+
+cron_reports_a_failed_pass(_Config) ->
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    #{} = shigoto_db:query(?POOL, ~"ALTER TABLE shigoto_cron RENAME TO shigoto_cron_away", []),
+    try
+        ?assertEqual({error, pass_failed}, shigoto_cron:schedule_once())
+    after
+        #{} = shigoto_db:query(?POOL, ~"ALTER TABLE shigoto_cron_away RENAME TO shigoto_cron", [])
+    end.
 
 cron_resets_a_last_run_far_ahead(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),

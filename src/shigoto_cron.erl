@@ -50,8 +50,9 @@ start_link() ->
 -doc """
 Run one scheduling pass now, in the calling process.
 
-Answers `ok` when the pass ran or another node held the lock, and `retry` when
-the pool was not ready. Inside an open shigoto or kura transaction it answers
+Answers `ok` when the pass ran or another node held the lock, `retry` when the
+pool was not ready, and `{error, pass_failed}` when the pass failed (it is
+logged as `shigoto_cron_pass_failed`). Inside an open shigoto or kura transaction it answers
 `{error, in_transaction}` without running, since the pass would join the
 caller's transaction and hold the cron lock until it ends. Mainly for tests; the
 scheduler runs passes on its own.
@@ -59,14 +60,13 @@ scheduler runs passes on its own.
 -spec schedule_once() -> ok | retry | {error, in_transaction}.
 schedule_once() ->
     case shigoto_db:transaction_open(shigoto_config:pool()) of
-        true ->
-            {error, in_transaction};
-        false ->
-            case safe_with_leader_lock(fun schedule_due/0) of
-                retry -> retry;
-                _Ran -> ok
-            end
+        true -> {error, in_transaction};
+        false -> answer(pass())
     end.
+
+answer(retry) -> retry;
+answer(failed) -> {error, pass_failed};
+answer(_Ran) -> ok.
 
 -doc false.
 init([]) ->
@@ -83,7 +83,7 @@ handle_cast(_Msg, State) ->
 
 -doc false.
 handle_info(tick, State) ->
-    case safe_with_leader_lock(fun schedule_due/0) of
+    case pass() of
         retry ->
             _ = erlang:send_after(?RETRY_INTERVAL, self(), tick),
             {noreply, State};
@@ -126,12 +126,13 @@ until_next_minute() ->
     NowMs = erlang:system_time(millisecond),
     60000 - (NowMs rem 60000) + ?TICK_OFFSET_MS.
 
-safe_with_leader_lock(Fun) ->
+pass() ->
     %% A pool that is not up yet, or is up and cannot reach the database, is a
     %% reason to come back in a second. Anything else is logged and the next
     %% minute tries again, rather than crashing the scheduler every minute.
     try
-        with_leader_lock(Fun)
+        Entries = schedulable(),
+        with_leader_lock(fun() -> schedule_due(Entries) end)
     catch
         exit:{noproc, _} ->
             not_ready();
@@ -140,9 +141,23 @@ safe_with_leader_lock(Fun) ->
         error:{shigoto_db, checkout_timeout} ->
             not_ready();
         Class:Reason ->
-            ?LOG_WARNING(#{msg => ~"shigoto_cron_pass_failed", class => Class, reason => Reason}),
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_cron_pass_failed", class => Class, reason => loggable(Reason)
+            }),
             failed
     end.
+
+%% shigoto's own failures are built to be logged. Anything else may carry an
+%% entry's args, so only its tag is.
+loggable({shigoto_cron, _} = Reason) ->
+    Reason;
+loggable({shigoto_db, _} = Reason) ->
+    Reason;
+loggable(Reason) when is_atom(Reason) -> Reason;
+loggable(Reason) when is_tuple(Reason), tuple_size(Reason) > 0, is_atom(element(1, Reason)) ->
+    element(1, Reason);
+loggable(_Reason) ->
+    other.
 
 not_ready() ->
     ?LOG_DEBUG(#{msg => ~"shigoto_cron_pool_not_ready"}, #{domain => [shigoto]}),
@@ -178,15 +193,64 @@ progressing(Pool) ->
             end
     end.
 
-schedule_due() ->
+%% The configured entries that can be scheduled. Checked before the pass's
+%% transaction, so that one bad entry is skipped rather than rolling back the
+%% pass for every entry, every minute.
+schedulable() ->
+    lists:filtermap(fun checked/1, shigoto_config:cron_entries()).
+
+checked(Entry) ->
+    {Name0, Schedule, Worker, Args} = normalize_entry(Entry),
+    Name = entry_name(Name0),
+    case check_entry(Schedule, Worker, Args) of
+        {ok, Expr, Defaults} ->
+            {true, #{
+                name => Name,
+                schedule => Schedule,
+                expr => Expr,
+                worker => Worker,
+                args => Args,
+                timezone => entry_timezone(Entry),
+                defaults => Defaults
+            }};
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_cron_entry_skipped",
+                name => Name,
+                worker => Worker,
+                reason => Reason
+            }),
+            shigoto_telemetry:cron_entry_skipped(Name, Worker, Reason),
+            false
+    end.
+
+check_entry(_Schedule, Worker, _Args) when not is_atom(Worker) ->
+    {error, invalid_worker};
+check_entry(Schedule, Worker, Args) ->
+    case {shigoto_cron_parser:parse(Schedule), encodable(Args)} of
+        {{error, Reason}, _} -> {error, {invalid_schedule, Reason}};
+        {_, false} -> {error, invalid_args};
+        {{ok, Expr}, true} -> with_defaults(Expr, worker_defaults(Worker))
+    end.
+
+with_defaults(Expr, {ok, Defaults}) -> {ok, Expr, Defaults};
+with_defaults(_Expr, {error, _} = Invalid) -> Invalid.
+
+encodable(Args) when is_map(Args) ->
+    try json:encode(Args) of
+        _Encoded -> true
+    catch
+        _:_ -> false
+    end;
+encodable(_Args) ->
+    false.
+
+schedule_due(Entries) ->
     Pool = shigoto_config:pool(),
     case {shigoto_repo:current_minute(Pool), shigoto_repo:get_due_cron_entries(Pool)} of
         {{ok, Now}, {ok, Stored}} ->
             LastRuns = #{N => L || #{name := N, last_scheduled_at := L} <- Stored},
-            lists:foreach(
-                fun(Entry) -> schedule_entry(Pool, Entry, LastRuns, Now) end,
-                shigoto_config:cron_entries()
-            );
+            lists:foreach(fun(Entry) -> schedule_entry(Pool, Entry, LastRuns, Now) end, Entries);
         {{error, Reason}, _} ->
             error({shigoto_cron, {read_failed, shigoto_db:reduced(Reason)}});
         {_, {error, Reason}} ->
@@ -194,34 +258,32 @@ schedule_due() ->
     end.
 
 schedule_entry(Pool, Entry, LastRuns, Now) ->
-    {Name0, Schedule, Worker, Args} = normalize_entry(Entry),
-    Name = entry_name(Name0),
-    case shigoto_cron_parser:parse(Schedule) of
-        {ok, Expr} ->
-            Tz = entry_timezone(Entry),
-            LastRun = maps:get(Name, LastRuns, null),
-            warn_if_ahead(Name, LastRun, Now),
-            Minutes = due_minutes(LastRun, Now),
-            case
-                lists:any(
-                    fun(M) -> shigoto_cron_parser:matches(Expr, to_timezone(M, Tz)) end, Minutes
-                )
-            of
-                true -> insert(Name, Schedule, Worker, Args);
-                false -> ok
-            end,
-            stored(
-                shigoto_repo:upsert_cron_entry(Pool, (worker_defaults(Worker))#{
-                    name => Name,
-                    worker => Worker,
-                    args => Args,
-                    schedule => Schedule,
-                    last_scheduled_at => Now
-                })
-            );
-        {error, Reason} ->
-            ?LOG_WARNING(#{msg => ~"shigoto_cron_invalid_schedule", name => Name, reason => Reason})
-    end.
+    #{
+        name := Name,
+        schedule := Schedule,
+        expr := Expr,
+        worker := Worker,
+        args := Args,
+        timezone := Tz,
+        defaults := Defaults
+    } = Entry,
+    LastRun = maps:get(Name, LastRuns, null),
+    warn_if_ahead(Name, LastRun, Now),
+    Minutes = due_minutes(LastRun, Now),
+    case lists:any(fun(M) -> shigoto_cron_parser:matches(Expr, to_timezone(M, Tz)) end, Minutes) of
+        true -> insert(Name, Schedule, Worker, Args);
+        false -> ok
+    end,
+    stored(
+        Name,
+        shigoto_repo:upsert_cron_entry(Pool, Defaults#{
+            name => Name,
+            worker => Worker,
+            args => Args,
+            schedule => Schedule,
+            last_scheduled_at => Now
+        })
+    ).
 
 %% Stored by a node whose clock ran ahead. Up to an hour ahead the entry waits
 %% for that minute; further ahead the upsert puts it back to now.
@@ -247,15 +309,33 @@ insert(Name, Schedule, Worker, Args) ->
         {error, Reason} -> error({shigoto_cron, {insert_failed, Name, shigoto_db:reduced(Reason)}})
     end.
 
-stored(ok) -> ok;
-stored({error, Reason}) -> error({shigoto_cron, {store_failed, shigoto_db:reduced(Reason)}}).
+stored(_Name, ok) ->
+    ok;
+stored(Name, {error, Reason}) ->
+    error({shigoto_cron, {store_failed, Name, shigoto_db:reduced(Reason)}}).
 
 worker_defaults(Worker) ->
     _ = code:ensure_loaded(Worker),
-    #{
-        Key => Worker:Key()
-     || Key <- [queue, priority, max_attempts], erlang:function_exported(Worker, Key, 0)
-    }.
+    try
+        #{
+            Key => Worker:Key()
+         || Key <- [queue, priority, max_attempts], erlang:function_exported(Worker, Key, 0)
+        }
+    of
+        Defaults ->
+            case [Key || Key := Value <- Defaults, not valid_default(Key, Value)] of
+                [] -> {ok, Defaults};
+                Invalid -> {error, {invalid_worker_defaults, Invalid}}
+            end
+    catch
+        _:_ -> {error, worker_defaults_failed}
+    end.
+
+%% priority and max_attempts are int4 columns.
+valid_default(queue, Queue) ->
+    is_binary(Queue);
+valid_default(_Column, Value) ->
+    is_integer(Value) andalso Value >= -2147483648 andalso Value =< 2147483647.
 
 entry_name(Name) when is_binary(Name) -> Name;
 entry_name(Name) when is_atom(Name) -> atom_to_binary(Name);

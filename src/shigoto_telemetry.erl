@@ -59,6 +59,11 @@ logger for filtering); it is omitted from the tables below for brevity.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
+| `[shigoto, cron, skipped]` | `count` | name, worker, reason |
+
+`skipped` fires each pass for an entry that cannot be scheduled: its schedule
+does not parse, its args do not encode as JSON, or its worker's `queue/0`,
+`priority/0` or `max_attempts/0` answers a value the jobs table cannot hold.
 
 ## Leader Lock Events
 
@@ -105,6 +110,7 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     batch_completed/1,
     %% Cron events
     cron_scheduled/3,
+    cron_entry_skipped/3,
     %% Leader lock events
     leader_lock_unavailable/2,
     %% Testing events
@@ -262,6 +268,14 @@ leader_lock_unavailable(Lock, Misses) ->
         [shigoto, leader_lock, unavailable],
         #{count => 1, consecutive_misses => Misses},
         #{lock => Lock, domain => [shigoto]}
+    ).
+
+-spec cron_entry_skipped(binary(), term(), term()) -> ok.
+cron_entry_skipped(Name, Worker, Reason) ->
+    telemetry:execute(
+        [shigoto, cron, skipped],
+        #{count => 1},
+        #{name => Name, worker => Worker, reason => Reason, domain => [shigoto]}
     ).
 
 -spec cron_scheduled(atom() | binary(), module(), binary()) -> ok.
