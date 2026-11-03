@@ -75,6 +75,10 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
+    [
+        persistent_term:erase(Key)
+     || {{shigoto_cron, skipped, _, _} = Key, _} <- persistent_term:get()
+    ],
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
