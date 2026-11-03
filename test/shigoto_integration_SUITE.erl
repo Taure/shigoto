@@ -18,6 +18,7 @@
     test_drain_queue/1,
     test_migration/1,
     test_migration_reports_failure/1,
+    test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
     test_unique_prevents_duplicate/1,
     test_unique_different_args_allowed/1,
@@ -69,6 +70,7 @@ all() ->
     [
         test_migration,
         test_migration_reports_failure,
+        test_worker_inherits_logger_metadata,
         test_insert_and_claim,
         test_job_execution_success,
         test_job_execution_failure,
@@ -158,6 +160,30 @@ test_migration_reports_failure(_Config) ->
         #{} = shigoto_db:query(?POOL, ~"DROP VIEW shigoto_jobs", [])
     end,
     ok = shigoto_migration:up(?POOL).
+
+test_worker_inherits_logger_metadata(_Config) ->
+    register(shigoto_metadata_probe, self()),
+    try
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL,
+            #{
+                worker => shigoto_test_worker,
+                args => #{~"action" => ~"report_metadata", ~"to" => ~"shigoto_metadata_probe"}
+            },
+            #{}
+        ),
+        {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+        ok = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+        receive
+            {logger_metadata, Metadata} ->
+                ?assertMatch(
+                    #{shigoto_job_id := JobId, shigoto_worker := shigoto_test_worker}, Metadata
+                )
+        after 2000 -> ct:fail(no_metadata_reported)
+        end
+    after
+        unregister(shigoto_metadata_probe)
+    end.
 
 test_insert_and_claim(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
