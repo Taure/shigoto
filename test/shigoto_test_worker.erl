@@ -12,7 +12,7 @@ perform(#{<<"action">> := <<"crash">>}) ->
 perform(#{<<"action">> := <<"slow">>}) ->
     timer:sleep(10000),
     ok;
-perform(#{<<"action">> := <<"report_metadata">>, <<"to">> := To}) ->
+perform(#{~"action" := ~"report_metadata", ~"to" := To}) ->
     binary_to_existing_atom(To) ! {logger_metadata, logger:get_process_metadata()},
     ok;
 perform(_Args) ->

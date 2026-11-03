@@ -220,7 +220,7 @@ test_current_migration_does_not_block_claims(_Config) ->
     {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
     ct:pal("claim latency with a current schema and an archive reader: ~p ms", [ClaimMs]),
     ?assertEqual(ok, Migration),
-    ?assert(ClaimMs < 3000).
+    ?assert(ClaimMs < 1000).
 
 test_migration_behind_a_reader_times_out(_Config) ->
     #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS NULL", []),

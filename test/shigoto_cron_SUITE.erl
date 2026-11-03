@@ -94,10 +94,15 @@ cron_inserts_a_due_entry(_Config) ->
 
 cron_schedules_each_minute_once(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
-    ok = shigoto_cron:schedule_once(),
-    #{} = shigoto_db:query(?POOL, ~"UPDATE shigoto_jobs SET state = 'completed'", []),
-    ok = shigoto_cron:schedule_once(),
-    ?assertEqual(1, length(jobs())).
+    in_one_minute(
+        fun() ->
+            ok = shigoto_cron:schedule_once(),
+            #{} = shigoto_db:query(?POOL, ~"UPDATE shigoto_jobs SET state = 'completed'", []),
+            ok = shigoto_cron:schedule_once(),
+            length(jobs())
+        end,
+        fun(Count) -> ?assertEqual(1, Count) end
+    ).
 
 cron_uses_the_worker_queue(_Config) ->
     set_cron([{~"configured", ~"* * * * *", shigoto_configured_worker, #{}}]),
@@ -239,15 +244,24 @@ cron_warns_when_its_lock_is_held_elsewhere(_Config) ->
 
 cron_does_not_warn_while_a_peer_schedules(_Config) ->
     set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
-    ok = shigoto_repo:upsert_cron_entry(?POOL, #{
-        name => ~"every_minute",
-        worker => shigoto_test_worker,
-        schedule => ~"* * * * *",
-        last_scheduled_at => minutes_ago(1)
-    }),
     Holder = hold_lock(?CRON_LOCK_ID),
     try
-        ?assertEqual({noreply, #{misses => 0}}, shigoto_cron:handle_info(tick, #{misses => 4}))
+        in_one_minute(
+            fun() ->
+                {ok, Now} = shigoto_repo:current_minute(?POOL),
+                Previous = calendar:gregorian_seconds_to_datetime(
+                    calendar:datetime_to_gregorian_seconds(Now) - 60
+                ),
+                ok = shigoto_repo:upsert_cron_entry(?POOL, #{
+                    name => ~"every_minute",
+                    worker => shigoto_test_worker,
+                    schedule => ~"* * * * *",
+                    last_scheduled_at => Previous
+                }),
+                shigoto_cron:handle_info(tick, #{misses => 4})
+            end,
+            fun(Answer) -> ?assertEqual({noreply, #{misses => 0}}, Answer) end
+        )
     after
         Holder ! stop,
         flush_ticks()
@@ -398,6 +412,25 @@ stager_notifies_a_due_queue(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+%% Runs Observe within one database minute, starting over (at most three
+%% times) when the minute turns while it runs, then checks what it saw.
+in_one_minute(Observe, Check) ->
+    in_one_minute(Observe, Check, 3).
+
+in_one_minute(_Observe, _Check, 0) ->
+    {skip, minute_kept_turning};
+in_one_minute(Observe, Check, Tries) ->
+    {ok, Before} = shigoto_repo:current_minute(?POOL),
+    Seen = Observe(),
+    case shigoto_repo:current_minute(?POOL) of
+        {ok, Before} ->
+            Check(Seen);
+        {ok, _Turned} ->
+            #{} = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
+            #{} = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_cron", []),
+            in_one_minute(Observe, Check, Tries - 1)
+    end.
 
 hold_lock(Lock) ->
     Self = self(),
