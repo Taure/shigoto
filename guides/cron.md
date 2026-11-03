@@ -104,6 +104,11 @@ minutes match the schedule. So a tick that runs late, a restart, or downtime of
 up to an hour still schedules the missed run, once. An entry seen for the first
 time starts from the current minute and is not backfilled.
 
+The current minute is read from PostgreSQL (`date_trunc('minute', now())`), not
+from the node, so nodes whose clocks disagree still agree on the minute. The
+stored `last_scheduled_at` only ever moves forward: a pass never sets it to an
+earlier minute than the one already stored.
+
 ## How It Works
 
 1. `shigoto_cron` runs a pass at the start of every minute, in a transaction

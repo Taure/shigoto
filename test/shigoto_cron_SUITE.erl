@@ -17,6 +17,7 @@
     cron_skips_while_another_node_leads/1,
     cron_catches_up_a_missed_minute/1,
     cron_does_not_backfill_a_new_entry/1,
+    cron_never_moves_the_last_run_back/1,
     stager_notifies_a_due_queue/1
 ]).
 
@@ -32,6 +33,7 @@ all() ->
         cron_skips_while_another_node_leads,
         cron_catches_up_a_missed_minute,
         cron_does_not_backfill_a_new_entry,
+        cron_never_moves_the_last_run_back,
         stager_notifies_a_due_queue
     ].
 
@@ -121,6 +123,20 @@ cron_does_not_backfill_a_new_entry(_Config) ->
     ok = shigoto_cron:schedule_once(),
     ?assertEqual([], jobs()),
     ?assertMatch([#{name := ~"new"}], cron_rows()).
+
+cron_never_moves_the_last_run_back(_Config) ->
+    %% A leader whose clock ran ahead stored a later minute than this one.
+    Ahead = minutes_ago(-10),
+    set_cron([{~"every_minute", ~"* * * * *", shigoto_test_worker, #{}}]),
+    ok = shigoto_repo:upsert_cron_entry(?POOL, #{
+        name => ~"every_minute",
+        worker => shigoto_test_worker,
+        schedule => ~"* * * * *",
+        last_scheduled_at => Ahead
+    }),
+    ok = shigoto_cron:schedule_once(),
+    ?assertEqual([], jobs()),
+    ?assertMatch([#{last_scheduled_at := Ahead}], cron_rows()).
 
 %%----------------------------------------------------------------------
 %% Stager

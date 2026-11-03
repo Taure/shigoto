@@ -7,7 +7,9 @@ One node schedules at a time: each pass runs in a transaction that first takes
 `pg_try_advisory_xact_lock`, and a node that does not get it skips the pass.
 The minute an entry was last scheduled for is stored in `shigoto_cron`, in the
 same transaction as the jobs it inserted, so a pass only schedules minutes after
-it. Two nodes, or a restart within the minute, never schedule the same minute
+it. The current minute is PostgreSQL's, not the node's, and the stored minute
+only moves forward, so a node whose clock is off cannot make a minute due
+again. Two nodes, or a restart within the minute, never schedule the same minute
 twice, and a tick that runs late still schedules the minute it missed.
 
 After downtime, an entry with a minute due in the last 60 is scheduled once on
@@ -119,15 +121,16 @@ with_leader_lock(Fun) ->
 
 schedule_due() ->
     Pool = shigoto_config:pool(),
-    Now = minute(calendar:universal_time()),
-    case shigoto_repo:get_due_cron_entries(Pool) of
-        {ok, Stored} ->
+    case {shigoto_repo:current_minute(Pool), shigoto_repo:get_due_cron_entries(Pool)} of
+        {{ok, Now}, {ok, Stored}} ->
             LastRuns = #{N => L || #{name := N, last_scheduled_at := L} <- Stored},
             lists:foreach(
                 fun(Entry) -> schedule_entry(Pool, Entry, LastRuns, Now) end,
                 shigoto_config:cron_entries()
             );
-        {error, Reason} ->
+        {{error, Reason}, _} ->
+            error({shigoto_cron, {read_failed, Reason}});
+        {_, {error, Reason}} ->
             error({shigoto_cron, {read_failed, Reason}})
     end.
 

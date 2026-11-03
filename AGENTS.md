@@ -119,7 +119,9 @@ shigoto_sup (one_for_one)
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
   `pg_try_advisory_xact_lock`, so one node schedules at a time, and stores each
   entry's `last_scheduled_at` in `shigoto_cron` in the same transaction, so a
-  minute is scheduled once; it catches up on the last hour after downtime.
+  minute is scheduled once; it catches up on the last hour after downtime. The
+  minute comes from PostgreSQL's clock and the stored minute only moves forward
+  (`GREATEST` in the upsert), so node clock skew cannot reschedule a minute.
 - **Stale rescue.** Heartbeats + a per-queue `rescue` tick re-queue zombie jobs
   whose owner died (threshold `heartbeat_interval * 2`).
 - **Resilience** (via seki): per-worker rate limit, circuit breaker, local +

@@ -24,6 +24,7 @@ for safe multi-node job claiming.
     upsert_cron_entry/2,
     get_due_cron_entries/1,
     try_advisory_xact_lock/2,
+    current_minute/1,
     update_progress/3,
     get_job/2,
     find_jobs/2,
@@ -528,8 +529,9 @@ archive_jobs(Pool, Days) ->
 -doc """
 Upsert a cron entry, keyed by `name`.
 
-`last_scheduled_at`, when given, is the minute the entry was last scheduled for;
-an upsert without it keeps the stored one.
+`last_scheduled_at`, when given, is the minute the entry was last scheduled for.
+It only ever moves forward: an upsert without it, or with an earlier minute
+than the stored one, keeps the stored one.
 """.
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.
 upsert_cron_entry(Pool, Entry) ->
@@ -541,7 +543,7 @@ upsert_cron_entry(Pool, Entry) ->
             "ON CONFLICT (name) DO UPDATE SET\n"
             "worker = EXCLUDED.worker, args = EXCLUDED.args, schedule = EXCLUDED.schedule,\n"
             "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts,\n"
-            "last_scheduled_at = COALESCE(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)"
+            "last_scheduled_at = GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)"
         >>,
     ArgsJson = encode_json(maps:get(args, Entry, #{})),
     case
@@ -566,6 +568,19 @@ get_due_cron_entries(Pool) ->
     SQL = ~"SELECT * FROM shigoto_cron",
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+The database's current minute, as a UTC datetime.
+
+Inside a transaction this is the minute the transaction started in, so every
+node that asks agrees, whatever its own clock says.
+""".
+-spec current_minute(atom()) -> {ok, calendar:datetime()} | {error, term()}.
+current_minute(Pool) ->
+    case query(Pool, ~"SELECT date_trunc('minute', now()) AS minute", []) of
+        #{rows := [#{minute := Minute}]} -> {ok, Minute};
         {error, _} = Err -> Err
     end.
 
