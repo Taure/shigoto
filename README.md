@@ -1,13 +1,13 @@
 # Shigoto 仕事
 
-PostgreSQL-backed background job processing for Erlang.
+PostgreSQL-backed background job processing for Erlang. If you know [Oban](https://github.com/oban-bg/oban) from Elixir, shigoto fills the same role on a plain Erlang/OTP stack.
 
 Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR UPDATE SKIP LOCKED` for safe multi-node operation. No Redis or external broker needed — if you have PostgreSQL, you have a job queue.
 
 ## Features
 
 ### Core
-- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [pgo](https://github.com/erleans/pgo). Transactional enqueue using the same pool as your application.
+- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [minato](https://github.com/Taure/minato). Transactional enqueue using the same pool as your application.
 - **Multi-node safe** — `FOR UPDATE SKIP LOCKED` ensures each job is claimed by exactly one node. No coordination required.
 - **Priority queues** — Higher priority jobs are claimed first. Multiple queues with independent concurrency limits.
 - **Dynamic queues** — Add and remove queues at runtime without restart.
@@ -147,7 +147,7 @@ All optional except `perform/1`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `pool` | *required* | pgo pool name |
+| `pool` | *required* | minato pool name |
 | `queues` | `[{<<"default">>, 10}]` | Queue names and concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling |
 | `cron` | `[]` | `{Name, Schedule, Worker, Args}` tuples |
