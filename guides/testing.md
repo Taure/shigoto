@@ -68,7 +68,10 @@ Call `shigoto_testing:reset/0` in `init_per_testcase` to clear the buffer.
 `manual` capture is per-process — it sees enqueues made by the calling process,
 not by other processes it spawns. For cross-process expectations, use a real test
 pool: outside `manual` mode the assertions query the pool via `find_jobs`, so the
-same assertions work against a live database.
+same assertions work against a live database. With an encryption key
+configured, an `args` filter there raises
+`{shigoto_testing_query_failed, args_filter_unsupported_with_encryption}`,
+since the stored args are ciphertext.
 
 Note: `batch`, `depends_on`, and `unique` are no-ops under `inline`/`manual`
 (shigoto logs a warning). Exercise those against a real pool with `drain_queue/1`.
@@ -119,8 +122,7 @@ A typical CT suite for shigoto tests:
 all() -> [test_email_job].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(pgo),
-    {ok, _} = pgo:start_pool(?POOL, #{
+    {ok, _} = shigoto_db:start_pool(?POOL, #{
         host => "localhost",
         port => 5432,
         database => "my_app_test",
@@ -139,7 +141,7 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    pgo:query(<<"DELETE FROM shigoto_jobs">>, [], #{pool => ?POOL}),
+    _ = shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),
     ok.
 
 test_email_job(_Config) ->
@@ -150,6 +152,9 @@ test_email_job(_Config) ->
     ?assertEqual(<<"available">>, maps:get(state, Job)),
     ok = shigoto:drain_queue(<<"default">>).
 ```
+
+In an app on kura, start the repo instead and set `{repo, my_app_repo}`;
+shigoto then runs on the repo's pool.
 
 ## Testing Workers Directly
 

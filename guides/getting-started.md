@@ -8,7 +8,7 @@ Add `shigoto` to your `rebar.config` dependencies:
 
 ```erlang
 {deps, [
-    {shigoto, {git, "https://github.com/Taure/shigoto.git", {branch, "main"}}}
+    {shigoto, "~> 1.10"}
 ]}.
 ```
 
@@ -19,18 +19,25 @@ Add `shigoto` to your `mix.exs`:
 ```elixir
 defp deps do
   [
-    {:shigoto, github: "Taure/shigoto", branch: "main"}
+    {:shigoto, "~> 1.10"}
   ]
 end
 ```
 
 ## Configuration
 
+shigoto runs on a [minato](https://hex.pm/packages/minato) pool. In an app on
+[kura](https://hex.pm/packages/kura), name the repo with `repo`: `kura_postgres`
+starts a minato pool named after the repo, and shigoto shares it and its
+transactions. `repo` must equal that pool's name: the repo module, or the
+repo's `pool` key when kura's config sets one. Without kura, start a pool with `shigoto_db:start_pool/2` and name
+it with `pool`.
+
 ### Erlang (sys.config)
 
 ```erlang
 {shigoto, [
-    {pool, my_app_db},
+    {repo, my_app_repo},
     {queues, [{<<"default">>, 10}, {<<"mailers">>, 5}]},
     {poll_interval, 5000},
     {prune_after_days, 14},
@@ -43,7 +50,7 @@ end
 
 ```elixir
 config :shigoto,
-  pool: :my_app_db,
+  repo: :my_app_repo,
   queues: [{"default", 10}, {"mailers", 5}],
   poll_interval: 5000,
   prune_after_days: 14,
@@ -55,7 +62,8 @@ config :shigoto,
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `pool` | *required* | Your pgo pool name |
+| `repo` | none | kura repo whose minato pool shigoto shares; read before `pool` |
+| `pool` | none | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are archived |
@@ -71,15 +79,58 @@ config :shigoto,
 
 ## Run the Migration
 
-Create the necessary tables:
+The shigoto application creates or updates its tables when it starts. It tries
+up to 5 times, 1 to 5 seconds apart. If the schema is still not current (the
+database does not exist yet, the pool cannot reach it, or the migration could
+not get its table locks within 500 ms), the application starts without its
+queues:
+
+- it logs `shigoto_migration_pending` at error level and emits
+  `[shigoto, migration, pending]` telemetry;
+- it retries every 30 seconds, and starts the queues as soon as the migration
+  succeeds;
+- meanwhile `shigoto:add_queue/2` answers `{error, migration_pending}` and
+  `shigoto:health/0` answers `{error, #{reason => migration_pending}}`.
+
+An error a retry cannot fix (SQLSTATE class 42, such as
+`42501 insufficient_privilege`) skips the remaining boot attempts and goes
+straight to the background retry. Boot blocks the release while it migrates:
+about 45 seconds at worst with the database unreachable, plus any wait for
+another node's migration. On Kubernetes, cover that with a `startupProbe`.
+
+Jobs inserted while the queues wait (once the tables exist) run when the
+queues start. To migrate sooner, for example right after kura's migrator creates the
+database on a first boot, run it yourself, then tell the waiting migrator to
+start the queues now rather than at its next 30 second tick:
 
 ```erlang
-shigoto_migration:up(my_app_db).
+ok = shigoto_migration:up(my_app_repo),
+_ = shigoto_migrator:retry_now().
 ```
 
 ```elixir
-:shigoto_migration.up(:my_app_db)
+:ok = :shigoto_migration.up(:my_app_repo)
+_ = :shigoto_migrator.retry_now()
 ```
+
+`retry_now/0` answers `not_running` when no migration is pending (the queues
+are already running).
+
+`up/1` is idempotent and answers `{error, Reason}` for the first statement that
+fails. Nodes that boot together migrate one at a time, and a schema that is
+already current is left alone without taking a table lock. Otherwise `up/1`
+locks the existing shigoto tables all at once, waiting at most 500 ms; claims and
+inserts wait behind it for no longer than that, and steady short writes do not
+keep it out. When a long transaction holds a table past 500 ms (a slow query on
+a shigoto table), `up/1` rolls back and answers `{error, lock_timeout}` instead
+of stalling job claims behind it. Retry it, or run migrations from one node at
+a quiet moment.
+
+Upgrading from shigoto 1.9.x, whose schema carries no version comment: when the
+tables already have the newest columns, `up/1` treats the schema as current,
+logs `shigoto_schema_unstamped` once and runs no DDL, so an application role
+that may only read and write rows still boots with its queues. Run
+`shigoto_migration:up/1` once as the table owner to record the version.
 
 ## Create a Worker
 
@@ -168,13 +219,17 @@ shigoto:insert_all([
 
 ## Transactional Enqueue
 
-If shigoto uses the same pgo pool as your application, job inserts participate in
-your database transactions. The job is only enqueued if the transaction commits:
+With `{repo, Repo}`, a job inserted inside the repo's transaction is part of
+it, and commits or rolls back with your writes:
 
 ```erlang
-pgo:transaction(fun() ->
-    pgo:query(~"INSERT INTO users (name, email) VALUES ($1, $2)", [Name, Email]),
-    shigoto:insert(#{worker => welcome_email_worker, args => #{<<"email">> => Email}})
+my_app_repo:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{
+        worker => welcome_email_worker,
+        args => #{<<"user_id">> => maps:get(id, User)}
+    }),
+    User
 end).
 ```
 
@@ -182,12 +237,24 @@ If the transaction rolls back (e.g. a unique constraint violation on the user),
 the job is never inserted. No "user created but email lost" or "email sent but
 user creation failed" bugs.
 
-This works with Kura too — just configure shigoto to use the same pool:
+`shigoto:transaction/1` works the other way round: kura writes made inside it
+join the same transaction, and `job_inserted` telemetry for its jobs fires only
+after the commit. Inside `Repo:transaction/1` that telemetry fires on insert,
+before the commit, so use `shigoto:transaction/1` as the outer boundary when
+telemetry has to be commit-accurate.
 
 ```erlang
-{pgo, [{pools, [{default, #{...}}]}]},
-{shigoto, [{pool, default}]}
+shigoto:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    User
+end).
 ```
+
+Jobs inserted inside a kura transaction on a pool of the same name join it
+whether shigoto is configured with `repo` or `pool`. Only the other direction
+needs `repo`: with `{pool, Pool}`, `shigoto:transaction/1` covers shigoto's own
+statements on that pool.
 
 ## Testing with drain_queue
 

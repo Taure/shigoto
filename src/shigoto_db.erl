@@ -20,22 +20,69 @@ commits or rolls back. Statements the function runs find that connection here
 rather than being handed it, because a job queue's transaction functions are
 ordinary code that calls `shigoto_repo` and cannot thread a connection through.
 
+## Sharing a transaction with kura
+
+An app on [kura](https://hex.pm/packages/kura) configures shigoto with
+`{repo, Repo}`, and shigoto then runs on the minato pool that `kura_postgres`
+started for the repo. That pool is named after the repo unless the repo's kura
+config sets `pool`; `repo` must name the pool, so with a `pool` override set
+shigoto's `repo` to that name. The two share transactions on that pool, in both
+directions, without shigoto depending on kura:
+
+- A statement shigoto runs while the process is inside a kura transaction on a
+  pool of the same name (`Repo:transaction/1`, or
+  `kura_repo_worker:transaction/2`) runs on that transaction's connection, so a
+  job inserted there commits or rolls back with the caller's writes. This
+  holds whether shigoto is configured with `repo` or `pool`.
+- When the pool is the configured `repo` and `kura_postgres` is loaded,
+  `transaction/2` opens the transaction through `kura_driver_minato`, so kura
+  writes made inside `shigoto:transaction/1` join it too. With `pool`, it opens
+  one of its own, which kura does not see.
+
+Either way a nested call joins the transaction already open. The one opened
+through kura behaves as kura's does: a statement in it that commits or rolls it
+back raises, and nothing meant for it runs outside it. Whether kura_postgres is
+there is decided once (`kura_available/0`).
+
+## When a transaction does not commit
+
 A `COMMIT` the server answers with `ROLLBACK` raises `transaction_rolled_back`.
 PostgreSQL does that when the transaction had already failed, and a job queue
 that reads it as success has marked jobs done that were never written - which is
 the same job running twice on the next poll.
+
+A `COMMIT` the server refuses raises `{shigoto_db, {commit_failed, Reason}}`, and
+one that gets no answer (a timeout, a lost connection) raises
+`{shigoto_db, {commit_unknown, Reason}}`: whether it committed is not known. A
+`BEGIN` that fails raises `{shigoto_db, {begin_failed, Reason}}` before the
+function runs. These are the shapes kura_driver_minato uses, and a transaction
+opened through kura raises them the same way. A server error keeps only its
+`code`, `constraint` and severity, since its message can carry row values.
 """.
+
+-include_lib("kernel/include/logger.hrl").
 
 -export([
     query/3,
     query/4,
     transaction/2,
     in_transaction/1,
+    transaction_open/1,
+    reduced/1,
+    kura_available/0,
     start_pool/2,
     start_listener/2
 ]).
 
 -define(HOLDER, {?MODULE, holder}).
+-define(KURA_DRIVER, kura_driver_minato).
+-define(KURA_POOL, kura_pool_minato).
+-define(KURA_CALLS, [
+    {?KURA_DRIVER, query, 5},
+    {?KURA_DRIVER, transaction, 4},
+    {?KURA_POOL, transaction_conn, 1}
+]).
+-define(KURA_AVAILABLE, {?MODULE, kura_available}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
 
@@ -61,9 +108,13 @@ options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
-    case in_transaction(Pool) of
-        undefined -> answered(minato:query(Pool, SQL, Params, decoding(Opts)));
-        Holder -> ran(Holder, SQL, Params, decoding(Opts))
+    case {in_transaction(Pool), kura_transaction(Pool)} of
+        {undefined, undefined} ->
+            answered(minato:query(Pool, SQL, Params, decoding(Opts)));
+        {undefined, _Kura} ->
+            kura(?KURA_DRIVER, query, [?KURA_POOL, Pool, SQL, Params, decoding(Opts)]);
+        {Holder, _} ->
+            ran(Holder, SQL, Params, decoding(Opts))
     end.
 
 -doc """
@@ -75,15 +126,39 @@ know whether it is nested.
 """.
 -spec transaction(atom(), fun(() -> Result)) -> Result.
 transaction(Pool, Fun) ->
-    case in_transaction(Pool) of
-        undefined -> opened(Pool, Fun);
-        _Holder -> Fun()
+    case {in_transaction(Pool), kura_transaction(Pool)} of
+        {undefined, undefined} -> begun(Pool, Fun);
+        _Open -> Fun()
     end.
 
--doc "The connection holding this process's transaction on `Pool`, or `undefined`.".
+-doc """
+The connection holding this process's transaction on `Pool`, or `undefined`.
+
+Only a transaction `transaction/2` opened on its own; see the moduledoc for one
+kura holds.
+""".
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
     erlang:get({?HOLDER, Pool}).
+
+-doc false.
+-spec transaction_open(atom()) -> boolean().
+transaction_open(Pool) ->
+    in_transaction(Pool) =/= undefined orelse kura_transaction(Pool) =/= undefined.
+
+-doc """
+`Reason` with a server error cut down to the fields that cannot carry row values.
+
+A PostgreSQL error's `message` and `detail` can quote the failing row ("Failing
+row contains ..."), so a `{pgsql_error, Fields}` keeps only `code`,
+`constraint`, `severity` and `severity_non_localised`. Use it on any reason that
+is logged or raised. Other reasons are answered as they are.
+""".
+-spec reduced(term()) -> term().
+reduced({pgsql_error, Fields}) when is_map(Fields) ->
+    {pgsql_error, maps:with([code, constraint, severity, severity_non_localised], Fields)};
+reduced(Reason) ->
+    Reason.
 
 -doc """
 Start a pool from shigoto's configuration.
@@ -123,12 +198,35 @@ start_listener(Name, Config) ->
 %% Transactions
 %%----------------------------------------------------------------------
 
+-spec begun(atom(), fun(() -> Result)) -> Result.
+begun(Pool, Fun) ->
+    case kura_repo(Pool) of
+        true -> kura_opened(Pool, Fun);
+        false -> opened(Pool, Fun)
+    end.
+
+-spec kura_opened(atom(), fun(() -> Result)) -> Result.
+kura_opened(Pool, Fun) ->
+    try
+        kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}])
+    catch
+        error:{kura_driver_minato, {no_connection, checkout_timeout}} ->
+            error({?MODULE, checkout_timeout});
+        error:{kura_driver_minato, {Failure, Reason}} when
+            Failure =:= no_connection;
+            Failure =:= begin_failed;
+            Failure =:= commit_failed;
+            Failure =:= commit_unknown
+        ->
+            error({?MODULE, {Failure, Reason}})
+    end.
+
 -spec opened(atom(), fun(() -> Result)) -> Result.
 opened(Pool, Fun) ->
     Holder = holder(Pool),
     _ = erlang:put({?HOLDER, Pool}, Holder),
     try
-        _ = ran(Holder, ~"BEGIN", [], #{}),
+        ok = begun_on(Holder),
         committed(Holder, Fun())
     catch
         Class:Reason:Stacktrace ->
@@ -139,12 +237,30 @@ opened(Pool, Fun) ->
         release(Holder)
     end.
 
+-spec begun_on(pid()) -> ok.
+begun_on(Holder) ->
+    case ran(Holder, ~"BEGIN", [], #{}) of
+        #{command := 'begin'} -> ok;
+        Answer -> failed(begin_failed, Answer)
+    end.
+
 -spec committed(pid(), Result) -> Result.
 committed(Holder, Value) ->
     case ran(Holder, ~"COMMIT", [], #{}) of
+        #{command := commit} -> Value;
         #{command := rollback} -> error(transaction_rolled_back);
-        _Committed -> Value
+        {error, {pgsql_error, _}} = Refused -> failed(commit_failed, Refused);
+        Unknown -> failed(commit_unknown, Unknown)
     end.
+
+%% The same shapes kura_driver_minato raises, so a transaction fails the same
+%% way whichever of the two opened it. A server error keeps only fields that
+%% cannot carry row values.
+-spec failed(atom(), term()) -> no_return().
+failed(Failure, {error, Reason}) ->
+    error({?MODULE, {Failure, reduced(Reason)}});
+failed(Failure, #{command := Command}) ->
+    error({?MODULE, {Failure, {unexpected, Command}}}).
 
 %%----------------------------------------------------------------------
 %% Holding one connection for the length of a transaction
@@ -223,6 +339,64 @@ release(Holder) ->
             ok
     after ?CALL_TIMEOUT -> ok
     end.
+
+%%----------------------------------------------------------------------
+%% kura, when it is there
+%%----------------------------------------------------------------------
+
+-spec kura_transaction(atom()) -> pid() | undefined.
+kura_transaction(Pool) ->
+    case kura_available() of
+        true -> kura(?KURA_POOL, transaction_conn, [Pool]);
+        false -> undefined
+    end.
+
+-doc """
+Whether kura_postgres is there to share transactions with, decided once.
+
+Checks that `kura_driver_minato` and `kura_pool_minato` load and export what
+shigoto calls, and keeps the answer. A kura_postgres that loads but lacks one of
+them is logged as a warning rather than quietly not shared with. The shigoto
+application calls this at start; anything else gets the kept answer.
+""".
+-spec kura_available() -> boolean().
+kura_available() ->
+    case persistent_term:get(?KURA_AVAILABLE, undefined) of
+        undefined ->
+            Available = kura_checked(),
+            persistent_term:put(?KURA_AVAILABLE, Available),
+            Available;
+        Available when is_boolean(Available) ->
+            Available
+    end.
+
+-spec kura_checked() -> boolean().
+kura_checked() ->
+    Loaded = [M || M <- [?KURA_DRIVER, ?KURA_POOL], code:ensure_loaded(M) =:= {module, M}],
+    Missing = [MFA || {M, F, A} = MFA <- ?KURA_CALLS, not erlang:function_exported(M, F, A)],
+    case {Loaded, Missing} of
+        {[], _} ->
+            false;
+        {_, []} ->
+            true;
+        {_, _} ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_kura_transactions_unavailable",
+                missing => Missing,
+                action =>
+                    ~"shigoto will not share transactions with kura; upgrade kura_postgres"
+            }),
+            false
+    end.
+
+%% Called by name so that kura_postgres stays an optional runtime dependency.
+-spec kura(module(), atom(), [term()]) -> dynamic().
+kura(Module, Function, Args) ->
+    erlang:apply(Module, Function, Args).
+
+-spec kura_repo(atom()) -> boolean().
+kura_repo(Pool) ->
+    application:get_env(shigoto, repo) =:= {ok, Pool} andalso kura_available().
 
 %%----------------------------------------------------------------------
 %% Shapes

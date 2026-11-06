@@ -6,19 +6,206 @@ to create or update the jobs and cron tables.
 Migrations are idempotent and safe to run multiple times.
 """.
 
--export([up/1, down/1]).
+-include_lib("kernel/include/logger.hrl").
 
--doc "Create or update the shigoto_jobs and shigoto_cron tables.".
+-export([up/1, down/1, schema_version/0]).
+
+-define(LOCK_ID, 839274630).
+%% The newest vN_statements/0. A CT case fails when a version is added without
+%% raising this.
+-define(SCHEMA_VERSION, 6).
+
+-doc """
+Create or update the shigoto tables.
+
+Runs in one transaction that first takes an advisory lock, so nodes booting at
+the same time migrate one after the other rather than racing on
+`CREATE ... IF NOT EXISTS`. The last statement records the schema version as
+the comment on `shigoto_jobs` (`shigoto 6`), replacing any comment set there.
+A schema that already records this version or a newer one (written by a newer
+shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
+taken, so a running system is not blocked. A comment that is not `shigoto <N>`
+(with `N` a positive number of at most 9 digits) counts as no version, and is
+overwritten. A schema with no comment at all that already has the newest
+version's columns (one migrated by shigoto 1.9.x) is also current: `up/1` logs
+`shigoto_schema_unstamped` once and answers `ok` without DDL, so a role that may
+only read and write rows can run it. Run `up/1` once as the table owner to
+record the version.
+
+Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
+`shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
+statement, then runs every statement in order. Every lock wait is bounded at
+500 ms (`lock_timeout`). A queued ACCESS EXCLUSIVE request makes new claims and
+inserts wait behind it, so the bound is also the longest a migration stalls
+them; short transactions that keep writing to the tables finish within it, and
+the migration gets its locks. Taking every table at once means it never holds
+one table while it waits on another. When a long transaction (a slow reader, an
+open batch) keeps a table past the bound, the migration rolls back and answers
+`{error, lock_timeout}`: retry it, or run migrations from one node at a quiet
+moment. The boot retries and `m:shigoto_migrator` retry it for you.
+
+Stops at the first statement that fails, rolls back, and answers
+`{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
+database that does not exist yet, or a role that may not create tables, is an
+error here rather than a node that boots with no tables. Called inside an open
+shigoto or kura transaction it answers `{error, in_transaction}` and does
+nothing, since the lock and the DDL would join the caller's transaction.
+""".
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
-    lists:foreach(
-        fun(SQL) ->
-            shigoto_db:query(Pool, SQL, [])
-        end,
-        v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
-            v5_statements() ++ v6_statements()
-    ),
-    ok.
+    case shigoto_db:transaction_open(Pool) of
+        true ->
+            {error, in_transaction};
+        false ->
+            case shigoto_db:query(Pool, ~"SELECT 1", []) of
+                {error, Reason} -> {error, shigoto_db:reduced(Reason)};
+                #{} -> locked(Pool)
+            end
+    end.
+
+locked(Pool) ->
+    try
+        shigoto_db:transaction(Pool, fun() ->
+            %% The advisory lock first: lock_timeout would also cut short the
+            %% wait for another node's migration.
+            answered(shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)", [?LOCK_ID])),
+            answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '500ms'", [])),
+            case current(Pool) of
+                true ->
+                    ok;
+                false ->
+                    lock_tables(Pool),
+                    answered(
+                        run(
+                            Pool,
+                            v1_statements() ++ v2_statements() ++ v3_statements() ++
+                                v4_statements() ++ v5_statements() ++ v6_statements() ++
+                                [version_statement()]
+                        )
+                    )
+            end
+        end)
+    catch
+        throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
+        throw:{?MODULE, Reason} -> {error, shigoto_db:reduced(Reason)};
+        error:{shigoto_db, Reason} -> {error, Reason}
+    end.
+
+-doc false.
+-spec schema_version() -> pos_integer().
+schema_version() ->
+    ?SCHEMA_VERSION.
+
+version_statement() ->
+    iolist_to_binary([
+        ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto ", integer_to_binary(?SCHEMA_VERSION), ~"'"
+    ]).
+
+current(Pool) ->
+    SQL =
+        ~"""
+        SELECT obj_description(c.oid, 'pg_class') AS version
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'shigoto_jobs' AND n.nspname = current_schema()
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{version := Version}]} when is_binary(Version) ->
+            recorded(Version) >= ?SCHEMA_VERSION;
+        #{rows := [#{version := _Null}]} ->
+            unstamped(Pool);
+        #{rows := []} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% A schema migrated before the version comment existed (1.9.x) has none. When
+%% it already has v6's last column it is current: a DML-only role could not
+%% record the version anyway, and would otherwise never get past boot.
+unstamped(Pool) ->
+    SQL =
+        ~"""
+        SELECT count(*) AS found
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'shigoto_jobs_archive' AND n.nspname = current_schema()
+          AND a.attname = 'deps_results' AND NOT a.attisdropped
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{found := 1}]} ->
+            warn_unstamped_once(Pool),
+            true;
+        #{rows := [#{found := _}]} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+warn_unstamped_once(Pool) ->
+    case persistent_term:get({?MODULE, unstamped_warned}, false) of
+        true ->
+            ok;
+        false ->
+            persistent_term:put({?MODULE, unstamped_warned}, true),
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_schema_unstamped",
+                pool => Pool,
+                action =>
+                    ~"run shigoto_migration:up/1 once as the table owner to record the version"
+            })
+    end.
+
+%% At most 9 digits: a longer number is not a version this code wrote.
+recorded(<<"shigoto ", Number/binary>>) ->
+    case re:run(Number, ~"^[1-9][0-9]{0,8}$", [dollar_endonly, {capture, none}]) of
+        match -> binary_to_integer(Number);
+        nomatch -> 0
+    end;
+recorded(_Comment) ->
+    0.
+
+%% Take every table lock the DDL needs in one statement, so the first ALTER
+%% never holds shigoto_jobs while a later one waits on another table with every
+%% claim queued behind it. Waiting (bounded by lock_timeout) rather than NOWAIT:
+%% NOWAIT fails whenever any short write transaction is open, which under steady
+%% writes is nearly always. A fresh database has no tables to lock.
+lock_tables(Pool) ->
+    SQL =
+        ~"""
+        SELECT t AS name
+        FROM unnest(ARRAY['shigoto_jobs', 'shigoto_jobs_archive', 'shigoto_cron']) AS t
+        WHERE to_regclass(t) IS NOT NULL
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := Rows} ->
+            case [Name || #{name := Name} <- Rows, is_binary(Name)] of
+                [] -> ok;
+                Tables -> answered(shigoto_db:query(Pool, lock_statement(Tables), []))
+            end;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+-spec lock_statement([binary(), ...]) -> binary().
+lock_statement([First | Rest]) ->
+    iolist_to_binary([
+        ~"LOCK TABLE ",
+        First,
+        [[~", ", Table] || Table <- Rest],
+        ~" IN ACCESS EXCLUSIVE MODE"
+    ]).
+
+answered({error, Reason}) -> throw({?MODULE, Reason});
+answered(_Ran) -> ok.
+
+run(_Pool, []) ->
+    ok;
+run(Pool, [SQL | Rest]) ->
+    case shigoto_db:query(Pool, SQL, []) of
+        {error, Reason} -> {error, Reason};
+        #{} -> run(Pool, Rest)
+    end.
 
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.

@@ -23,6 +23,7 @@
     test_retry_by_tags/1,
     test_retry_by_empty_filter/1,
     test_retry_by_only_retries_terminal/1,
+    test_retry_by_state/1,
     %% Dynamic queues
     test_add_queue/1,
     test_add_queue_idempotent/1,
@@ -40,6 +41,8 @@
     test_claim_respects_priority/1,
     test_claim_respects_scheduled_at/1,
     test_snooze_preserves_attempt_count/1,
+    test_snooze_does_not_use_up_attempts/1,
+    test_claim_never_exceeds_limit/1,
     test_max_attempts_discards/1,
     test_concurrent_claim_no_double_execute/1,
     test_cancel_by_no_match/1,
@@ -61,6 +64,7 @@ all() ->
         test_retry_by_tags,
         test_retry_by_empty_filter,
         test_retry_by_only_retries_terminal,
+        test_retry_by_state,
         test_add_queue,
         test_add_queue_idempotent,
         test_remove_queue,
@@ -73,6 +77,8 @@ all() ->
         test_claim_respects_priority,
         test_claim_respects_scheduled_at,
         test_snooze_preserves_attempt_count,
+        test_snooze_does_not_use_up_attempts,
+        test_claim_never_exceeds_limit,
         test_max_attempts_discards,
         test_concurrent_claim_no_double_execute,
         test_cancel_by_no_match,
@@ -289,6 +295,20 @@ test_retry_by_only_retries_terminal(_Config) ->
     %% Job is available, not terminal — retry_by should not touch it
     {ok, 0} = shigoto_repo:retry_by(?POOL, #{worker => shigoto_test_worker}).
 
+test_retry_by_state(_Config) ->
+    {ok, #{id := A}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, #{id := B}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    ok = shigoto_repo:discard_job(?POOL, A),
+    ok = shigoto_repo:cancel_job(?POOL, B),
+    ?assertEqual({ok, 1}, shigoto:retry_by(?POOL, #{state => ~"discarded"})),
+    ?assertMatch({ok, #{state := ~"available"}}, shigoto_repo:get_job(?POOL, A)),
+    ?assertMatch({ok, #{state := ~"cancelled"}}, shigoto_repo:get_job(?POOL, B)),
+    ?assertEqual({ok, 1}, shigoto:retry_by(?POOL, #{state => [cancelled]})).
+
 %%----------------------------------------------------------------------
 %% Dynamic queues
 %%----------------------------------------------------------------------
@@ -484,6 +504,40 @@ test_snooze_preserves_attempt_count(_Config) ->
     ?assertEqual(1, maps:get(attempt, Snoozed)),
     ?assertEqual(<<"available">>, maps:get(state, Snoozed)).
 
+test_snooze_does_not_use_up_attempts(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_test_worker, args => #{~"action" => ~"fail"}, max_attempts => 2},
+        #{}
+    ),
+    {ok, [_First]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:snooze_job(?POOL, JobId, 60),
+    make_due(JobId),
+    {ok, [Second]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    {error, _} = shigoto_executor:execute_sync(Second, ?POOL, 5000),
+    ?assertMatch(
+        {ok, #{state := ~"retryable", attempt := 2}}, shigoto_repo:get_job(?POOL, JobId)
+    ).
+
+test_claim_never_exceeds_limit(_Config) ->
+    Queue = ~"claim_limit",
+    Insert = fun() ->
+        {ok, _} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => Queue}, #{}
+        )
+    end,
+    Insert(),
+    #{} = shigoto_db:query(?POOL, ~"ANALYZE shigoto_jobs", []),
+    Insert(),
+    Insert(),
+    %% Stale statistics and no Materialize make PostgreSQL plan a nested loop
+    %% semi join that rescans the claim's subquery once per outer row.
+    {ok, Claimed} = shigoto_db:transaction(?POOL, fun() ->
+        #{} = shigoto_db:query(?POOL, ~"SET LOCAL enable_material = off", []),
+        shigoto_repo:claim_jobs(?POOL, Queue, 1)
+    end),
+    ?assertEqual(1, length(Claimed)).
+
 test_max_attempts_discards(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
         ?POOL,
@@ -555,6 +609,12 @@ test_debounce_resets_scheduled_at(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+make_due(JobId) ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET scheduled_at = now() WHERE id = $1", [JobId]
+    ),
+    ok.
 
 cleanup() ->
     shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),

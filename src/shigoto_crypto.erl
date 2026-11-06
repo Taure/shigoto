@@ -28,9 +28,10 @@ Old jobs are re-encrypted with the current key when claimed and re-inserted
 it have been processed.
 """.
 
--export([encrypt/1, decrypt/1, is_enabled/0]).
+-export([encrypt/1, decrypt/1, is_enabled/0, unique_key/1]).
 
 -define(AAD, <<"shigoto">>).
+-define(UNIQUE_KEY_CONTEXT, ~"shigoto unique_key").
 
 -doc "Encrypt a binary with the current key. Returns the original binary if not configured.".
 -spec encrypt(binary()) -> binary().
@@ -52,6 +53,23 @@ decrypt(MaybeEncrypted) ->
                 <<"enc:", _/binary>> -> try_decrypt(Keys, Unwrapped, MaybeEncrypted);
                 _ -> MaybeEncrypted
             end
+    end.
+
+-doc """
+The `unique_key` stored for a unique job, built from `Material`.
+
+With an encryption key configured this is a hex HMAC-SHA256 of `Material`, so
+the key carries no arg values; its HMAC key is derived from the current
+encryption key for this use alone. Without one it is `Material` as it is.
+""".
+-spec unique_key(binary()) -> binary().
+unique_key(Material) ->
+    case current_key() of
+        undefined ->
+            Material;
+        Key ->
+            HashKey = crypto:mac(hmac, sha256, Key, ?UNIQUE_KEY_CONTEXT),
+            binary:encode_hex(crypto:mac(hmac, sha256, HashKey, Material))
     end.
 
 -doc "Check if encryption is configured.".

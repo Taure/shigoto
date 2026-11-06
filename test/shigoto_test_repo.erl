@@ -1,12 +1,12 @@
 -module(shigoto_test_repo).
 
--export([start/0]).
+-export([start/0, port/0]).
 
 start() ->
     case
         shigoto_db:start_pool(shigoto_test_pool, #{
             host => "localhost",
-            port => 5556,
+            port => port(),
             database => "shigoto_test",
             user => "postgres",
             password => "root",
@@ -18,3 +18,6 @@ start() ->
     end,
     application:set_env(shigoto, pool, shigoto_test_pool),
     ok.
+
+port() ->
+    list_to_integer(os:getenv("SHIGOTO_TEST_DB_PORT", "5556")).

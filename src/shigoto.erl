@@ -50,14 +50,15 @@ shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
 
 ## Transactional Enqueue
 
-Enqueue jobs atomically with your own database writes. Jobs inserted inside
-`transaction/1` commit together with the surrounding work, and are dropped if it
-rolls back — so a job is never orphaned by a failed transaction, nor lost after a
-successful one.
+Enqueue jobs atomically with your own database writes. With `{repo, Repo}`
+configured, shigoto runs on the kura repo's minato pool and shares its
+transactions: a job inserted inside `Repo:transaction/1` commits or rolls back
+with it, and kura writes inside `transaction/1` join shigoto's transaction. So a
+job is never orphaned by a failed transaction, nor lost after a successful one.
 
 ```erlang
 shigoto:transaction(fun() ->
-    {ok, User} = my_app:create_user(Params),
+    {ok, User} = my_app_repo:insert(UserChangeset),
     {ok, _Job} = shigoto:insert(#{
         worker => welcome_email_worker,
         args => #{~"user_id" => maps:get(id, User)}
@@ -65,6 +66,22 @@ shigoto:transaction(fun() ->
     User
 end).
 ```
+
+`repo` must equal the name of the minato pool kura started for the repo: the
+repo module, or the repo's `pool` key when kura's config sets one. Jobs inserted
+inside a kura transaction on a pool of the same name join it whether shigoto is
+configured with `repo` or `pool`; only kura writes joining `transaction/1` need
+`repo`. `job_inserted` telemetry fires after the commit inside `transaction/1`,
+but on insert inside `Repo:transaction/1`, so use `transaction/1` as the outer
+boundary when telemetry has to be commit-accurate. See `m:shigoto_db` for how
+the two share a connection.
+
+## Returned jobs
+
+Jobs returned by `insert/1,2`, `insert_all/1,2` and `get_job/1` are the stored
+row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
+`deps_results`) are JSON text binaries; decode them with `json:decode/1`.
+`perform/1` always gets `args` decoded.
 """.
 
 -define(TXN_KEY, '$shigoto_txn').
@@ -230,12 +247,12 @@ cancel(Pool, JobId) ->
     end,
     Result.
 
--doc "Cancel jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args.".
+-doc "Cancel available or retryable jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Filters) ->
     cancel_by(txn_pool(), Filters).
 
--doc "Cancel jobs matching a pattern. Filters: worker, queue, tags, args.".
+-doc "Cancel available or retryable jobs matching a pattern. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Pool, Filters) ->
     shigoto_repo:cancel_by(Pool, Filters).
@@ -250,7 +267,7 @@ retry(JobId) ->
 retry(Pool, JobId) ->
     shigoto_repo:retry_job(Pool, JobId).
 
--doc "Drain a queue synchronously. Useful for testing.".
+-doc "Drain a queue synchronously: claim and run its due jobs until none are left. Useful for testing.".
 -spec drain_queue(binary()) -> ok.
 drain_queue(Queue) ->
     drain_queue(Queue, #{}).
@@ -299,35 +316,42 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
     shigoto_telemetry:job_progress(#{id => JobId, worker => unknown, queue => unknown}, Progress),
     Result.
 
--doc "Get a job by ID.".
+-doc "Get a job by ID. JSONB columns come back as JSON text; see the moduledoc.".
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).
 
--doc "Retry all jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags.".
+-doc "Retry discarded or cancelled jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Filters) ->
     retry_by(txn_pool(), Filters).
 
--doc "Retry all jobs matching a filter. Filters: worker, queue, state, tags.".
+-doc "Retry discarded or cancelled jobs matching a filter. Filters: worker, queue, state (`discarded`, `cancelled` or a list), tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Pool, Filters) ->
     shigoto_repo:retry_by(Pool, Filters).
 
--doc "Add a queue at runtime without restart.".
+-doc """
+Add a queue at runtime without restart.
+
+Answers `{error, migration_pending}` while `m:shigoto_migrator` holds the queues
+back; the configured queues start once the migration succeeds.
+""".
 -spec add_queue(binary(), pos_integer()) -> {ok, pid()} | {error, term()}.
 add_queue(Queue, Concurrency) ->
-    ShutdownMs = shigoto_config:shutdown_timeout() + 1000,
-    ChildSpec = #{
-        id => {shigoto_queue, Queue},
-        start => {shigoto_queue, start_link, [Queue, Concurrency]},
-        type => worker,
-        shutdown => ShutdownMs
-    },
-    case supervisor:start_child(shigoto_queue_sup, ChildSpec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, _} = Err -> Err
+    case shigoto_migrator:pending() of
+        true ->
+            {error, migration_pending};
+        false ->
+            case
+                supervisor:start_child(
+                    shigoto_queue_sup, shigoto_queue_sup:queue_spec(Queue, Concurrency)
+                )
+            of
+                {ok, Pid} -> {ok, Pid};
+                {error, {already_started, Pid}} -> {ok, Pid};
+                {error, _} = Err -> Err
+            end
     end.
 
 -doc "Remove a queue at runtime. Waits for in-flight jobs to finish.".
@@ -339,10 +363,21 @@ remove_queue(Queue) ->
         {error, _} = Err -> Err
     end.
 
--doc "Health check. Returns ok with stats or error with details.".
+-doc """
+Health check. Returns ok with stats or error with details.
+
+While `m:shigoto_migrator` holds the queues back it answers
+`{error, #{status => unhealthy, reason => migration_pending, pool => Pool}}`.
+""".
 -spec health() -> {ok, map()} | {error, map()}.
 health() ->
     Pool = shigoto_config:pool(),
+    case shigoto_migrator:pending() of
+        true -> {error, #{status => unhealthy, reason => migration_pending, pool => Pool}};
+        false -> checked_health(Pool)
+    end.
+
+checked_health(Pool) ->
     try
         {ok, Counts} = shigoto_dashboard:job_counts(),
         {ok, Stale} = shigoto_dashboard:stale_jobs(),
@@ -413,9 +448,15 @@ drain_loop(Pool, Queue, Timeout) ->
     case shigoto_repo:claim_jobs(Pool, Queue, 1) of
         {ok, []} ->
             ok;
-        {ok, [Job]} ->
-            _ = shigoto_executor:execute_sync(Job, Pool, Timeout),
+        {ok, Jobs} ->
+            executed(Pool, Jobs, Timeout),
             drain_loop(Pool, Queue, Timeout);
         {error, _} ->
             ok
     end.
+
+executed(_Pool, [], _Timeout) ->
+    ok;
+executed(Pool, [Job | Jobs], Timeout) ->
+    _ = shigoto_executor:execute_sync(Job, Pool, Timeout),
+    executed(Pool, Jobs, Timeout).

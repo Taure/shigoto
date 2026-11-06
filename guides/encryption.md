@@ -58,8 +58,23 @@ key on the next write.
 
 ## What's Encrypted
 
-- Job `args` — the arguments map passed to workers
-- The `meta` field is **not** encrypted (it's used for internal tracking)
+- Job `args` and `meta`
+- Cron entry `args` in the `shigoto_cron` table
+- A unique job's `unique_key` is not encrypted but replaced by a keyed hash
+  (HMAC-SHA256, keyed by a key derived from the current encryption key), so it
+  carries no arg values. Turning encryption on, or rotating to a new current
+  key, changes the key every new job gets: a job inserted before the change and
+  one inserted after it with the same args are not deduplicated against each
+  other.
+
+## Filtering on args
+
+Stored args are ciphertext, so PostgreSQL cannot match them. With an encryption
+key configured, an `args` filter on `shigoto:cancel_by/1,2`,
+`shigoto:retry_by/1,2` or `shigoto_repo:find_jobs/2` (and so the DB-backed
+`shigoto_testing` assertions) answers
+`{error, args_filter_unsupported_with_encryption}` rather than matching
+nothing. Filter on `worker`, `queue`, `tags` or `state` instead.
 
 ## Without Encryption
 

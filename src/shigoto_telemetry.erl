@@ -38,6 +38,11 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, queue, poll]` | `count, claimed` | queue |
 | `[shigoto, queue, paused]` | `count` | queue |
 | `[shigoto, queue, resumed]` | `count` | queue |
+| `[shigoto, queue, start_failed]` | `count` | queue, reason |
+
+`start_failed` fires when `m:shigoto_migrator` starts the configured queues
+after a late migration and one of them fails to start (it is also logged as
+`shigoto_queue_start_failed`). The other queues still start.
 
 ## Resilience Events
 
@@ -59,6 +64,34 @@ logger for filtering); it is omitted from the tables below for brevity.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
+| `[shigoto, cron, skipped]` | `count` | name, worker, reason |
+
+`skipped` fires each pass for an entry that cannot be scheduled: its schedule
+does not parse, its args do not encode as JSON, or its worker's `queue/0`,
+`priority/0` or `max_attempts/0` answers a value the jobs table cannot hold.
+The matching `shigoto_cron_entry_skipped` warning is logged only once per entry
+and reason on each node, so alert on this event rather than on the log.
+
+## Leader Lock Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
+
+Emitted with the `shigoto_cron_lock_held_elsewhere` and
+`shigoto_stager_lock_held_elsewhere` warnings: `lock` (`cron` or `stager`) has
+been taken by something other than a shigoto pass for `consecutive_misses`
+passes in a row.
+
+## Migration Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, migration, pending]` | `count` | reason |
+
+Emitted with the `shigoto_migration_pending` error, when boot could not bring
+the schema up to date and the queues are held back (see `m:shigoto_migrator`),
+and on each failed background retry.
 
 ## Testing Events
 
@@ -85,6 +118,7 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     queue_poll/2,
     queue_paused/1,
     queue_resumed/1,
+    queue_start_failed/2,
     %% Resilience events
     resilience_rate_limited/2,
     resilience_circuit_open/1,
@@ -94,6 +128,11 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     batch_completed/1,
     %% Cron events
     cron_scheduled/3,
+    cron_entry_skipped/3,
+    %% Leader lock events
+    leader_lock_unavailable/2,
+    %% Migration events
+    migration_pending/1,
     %% Testing events
     testing_mode_armed/1
 ]).
@@ -242,6 +281,36 @@ batch_completed(Batch) ->
 %%----------------------------------------------------------------------
 %% Cron events
 %%----------------------------------------------------------------------
+
+-spec leader_lock_unavailable(cron | stager, pos_integer()) -> ok.
+leader_lock_unavailable(Lock, Misses) ->
+    telemetry:execute(
+        [shigoto, leader_lock, unavailable],
+        #{count => 1, consecutive_misses => Misses},
+        #{lock => Lock, domain => [shigoto]}
+    ).
+
+-spec queue_start_failed(binary(), term()) -> ok.
+queue_start_failed(Queue, Reason) ->
+    telemetry:execute(
+        [shigoto, queue, start_failed],
+        #{count => 1},
+        #{queue => Queue, reason => Reason, domain => [shigoto]}
+    ).
+
+-spec migration_pending(term()) -> ok.
+migration_pending(Reason) ->
+    telemetry:execute(
+        [shigoto, migration, pending], #{count => 1}, #{reason => Reason, domain => [shigoto]}
+    ).
+
+-spec cron_entry_skipped(binary(), term(), term()) -> ok.
+cron_entry_skipped(Name, Worker, Reason) ->
+    telemetry:execute(
+        [shigoto, cron, skipped],
+        #{count => 1},
+        #{name => Name, worker => Worker, reason => Reason, domain => [shigoto]}
+    ).
 
 -spec cron_scheduled(atom() | binary(), module(), binary()) -> ok.
 cron_scheduled(Name, Worker, Schedule) ->

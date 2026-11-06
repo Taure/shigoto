@@ -26,6 +26,9 @@
     test_batch_with_callback/1,
     test_get_job/1,
     test_encryption_roundtrip/1,
+    test_encrypted_unique_key_hides_args/1,
+    test_encrypted_unique_key_is_keyed/1,
+    test_encrypted_args_filter_is_refused/1,
     test_heartbeat_stale_threshold/1,
     test_depends_on_blocks_claiming/1,
     test_depends_on_resolved_on_complete/1,
@@ -54,6 +57,9 @@ all() ->
         test_batch_with_callback,
         test_get_job,
         test_encryption_roundtrip,
+        test_encrypted_unique_key_hides_args,
+        test_encrypted_unique_key_is_keyed,
+        test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
         test_depends_on_blocks_claiming,
         test_depends_on_resolved_on_complete,
@@ -348,6 +354,61 @@ test_get_job(_Config) ->
 %%----------------------------------------------------------------------
 %% Encryption test
 %%----------------------------------------------------------------------
+
+test_encrypted_unique_key_hides_args(_Config) ->
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        Unique = #{keys => [worker, args], states => [available, executing]},
+        Params = #{worker => shigoto_test_worker, args => #{~"secret" => ~"hunter2"}},
+        {ok, #{id := Id, unique_key := UniqueKey}} =
+            shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        ?assert(is_binary(UniqueKey)),
+        ?assertEqual(nomatch, binary:match(UniqueKey, [~"hunter2", ~"secret"])),
+        ?assertMatch(
+            {ok, {conflict, #{id := Id}}},
+            shigoto_repo:insert_job(?POOL, Params, #{unique => Unique})
+        )
+    after
+        application:unset_env(shigoto, encryption_key)
+    end.
+
+test_encrypted_unique_key_is_keyed(_Config) ->
+    Unique = #{keys => [worker, args], states => [available, executing]},
+    Params = #{worker => shigoto_test_worker, args => #{~"user_id" => 5}},
+    KeyFor = fun(EncKey) ->
+        application:set_env(shigoto, encryption_key, EncKey),
+        {ok, #{unique_key := K}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        #{} = shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
+        K
+    end,
+    try
+        K1 = KeyFor(crypto:strong_rand_bytes(32)),
+        K2 = KeyFor(crypto:strong_rand_bytes(32)),
+        ?assertNotEqual(K1, K2),
+        Material = iolist_to_binary([~"{\"user_id\":5}", ~":", ~"shigoto_test_worker"]),
+        ?assertNotEqual(binary:encode_hex(crypto:hash(sha256, Material)), K1)
+    after
+        application:unset_env(shigoto, encryption_key)
+    end.
+
+test_encrypted_args_filter_is_refused(_Config) ->
+    application:set_env(shigoto, encryption_key, crypto:strong_rand_bytes(32)),
+    try
+        Args = #{~"user_id" => 5},
+        {ok, _} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => Args}, #{}
+        ),
+        Refused = {error, args_filter_unsupported_with_encryption},
+        ?assertEqual(Refused, shigoto_repo:find_jobs(?POOL, #{args => Args})),
+        ?assertEqual(Refused, shigoto:cancel_by(?POOL, #{args => Args})),
+        ?assertEqual(Refused, shigoto:retry_by(?POOL, #{args => Args})),
+        ?assertMatch(
+            {ok, [_]}, shigoto_repo:find_jobs(?POOL, #{worker => shigoto_test_worker})
+        ),
+        ?assertEqual({ok, 1}, shigoto:cancel_by(?POOL, #{worker => shigoto_test_worker}))
+    after
+        application:unset_env(shigoto, encryption_key)
+    end.
 
 test_encryption_roundtrip(_Config) ->
     %% Set encryption key

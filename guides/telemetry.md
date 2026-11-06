@@ -41,6 +41,12 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, queue, poll]` | `count, claimed` | queue |
 | `[shigoto, queue, paused]` | `count` | queue |
 | `[shigoto, queue, resumed]` | `count` | queue |
+| `[shigoto, queue, start_failed]` | `count` | queue, reason |
+
+`start_failed` fires when `shigoto_migrator` starts the configured queues after
+a late migration and one of them fails to start. It comes with a
+`shigoto_queue_start_failed` error log; the other queues still start. On a
+normal boot a bad queue config fails the application start instead.
 
 ### Resilience Events
 
@@ -62,6 +68,38 @@ logger for filtering); it is omitted from the tables below for brevity.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[shigoto, cron, scheduled]` | `count` | name, worker, schedule |
+| `[shigoto, cron, skipped]` | `count` | name, worker, reason |
+
+`skipped` fires on every pass for an entry that cannot be scheduled: its
+schedule does not parse, its args do not encode as JSON, its worker's defaults
+do not fit the jobs table, or the entry is malformed (`malformed_entry`). The
+matching `shigoto_cron_entry_skipped` warning is logged only once per entry and
+reason on each node, so alert on this event rather than on the log (see the
+[Cron](cron.md) guide).
+
+### Leader Lock Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
+
+Emitted with the `shigoto_cron_lock_held_elsewhere` and
+`shigoto_stager_lock_held_elsewhere` warnings, when `lock` (`cron` or
+`stager`) has been taken by something other than a shigoto pass for
+`consecutive_misses` passes in a row. See "Advisory locks" in the
+[Cron](cron.md) guide.
+
+### Migration Events
+
+| Event | Measurements | Metadata |
+|-------|-------------|----------|
+| `[shigoto, migration, pending]` | `count` | reason |
+
+Emitted with the `shigoto_migration_pending` error when boot could not bring the
+schema up to date and the queues are held back, and again on each failed
+background retry (every 30 seconds, or on `shigoto_migrator:retry_now/0`).
+While it keeps firing no job is processed on that node; alert on it. See "Run
+the Migration" in the [Getting Started](getting-started.md) guide.
 
 ### Testing Events
 
@@ -156,3 +194,26 @@ def metrics do
   ]
 end
 ```
+
+## Seeing shigoto's own logs
+
+Alongside each event, shigoto logs the job lifecycle (`job inserted`,
+`job completed`, `job failed`, `job discarded`, ...) with `domain => [shigoto]`
+in the metadata. OTP's `default` handler only passes events with no domain or
+an `[otp, ...]` one, so out of the box these logs are dropped, failures
+included. Let the shigoto domain through to see them:
+
+```erlang
+ok = logger:add_handler_filter(
+    default, shigoto, {fun logger_filters:domain/2, {log, sub, [shigoto]}}
+).
+```
+
+or in `sys.config`, as a filter on the handler that should show them. The
+completed and inserted lines are at `info`, so the primary level must allow
+`info` as well. Common Test redirects logging and shows these lines whatever
+the filters, so a test run is not a reliable check.
+
+While a job runs, its process carries `shigoto_job_id`, `shigoto_worker`,
+`shigoto_queue` and `shigoto_attempt` in its logger metadata, so log lines a
+worker writes from `perform/1` can be correlated with the job.

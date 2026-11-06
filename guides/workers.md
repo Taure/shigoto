@@ -181,6 +181,11 @@ perform(#{<<"api_key">> := Key}) ->
     end.
 ```
 
+Claiming a job counts an attempt, so a snooze raises the job's `max_attempts` by
+one to give it back: a job that snoozes is never discarded for it. `attempt`
+keeps counting runs, snoozed ones included, and is what the default backoff
+uses.
+
 ## Unique Jobs
 
 Prevent duplicate jobs via the `unique/0` callback or per-insert options:

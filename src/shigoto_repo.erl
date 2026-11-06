@@ -23,6 +23,9 @@ for safe multi-node job claiming.
     prune_archive/2,
     upsert_cron_entry/2,
     get_due_cron_entries/1,
+    try_advisory_xact_lock/2,
+    current_minute/1,
+    cron_progressing/1,
     update_progress/3,
     get_job/2,
     find_jobs/2,
@@ -120,19 +123,23 @@ insert_all(Pool, JobParamsList, Opts) ->
             Err
     end.
 
--doc "Claim up to N available jobs from a queue using FOR UPDATE SKIP LOCKED.".
+-doc """
+Claim up to `Limit` available jobs from a queue using `FOR UPDATE SKIP LOCKED`.
+
+Never answers more than `Limit` jobs. The locking select runs once, as an
+uncorrelated `ARRAY(...)` subquery, because `WHERE id IN (SELECT ... LIMIT ...
+FOR UPDATE SKIP LOCKED)` lets PostgreSQL plan a semi join that rescans the
+subquery for every outer row, and each rescan locks and returns more rows.
+""".
 -spec claim_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 claim_jobs(Pool, Queue, Limit) ->
-    %% Jobs with unresolved dependencies (depends_on != '{}') are skipped.
-    %% Fair partitioned claiming is handled by interleaving partition keys
-    %% via a subquery with ROW_NUMBER, wrapped in an outer FOR UPDATE SKIP LOCKED.
     SQL =
         <<
             "UPDATE shigoto_jobs SET\n"
             "state = 'executing',\n"
             "attempted_at = now(),\n"
             "attempt = attempt + 1\n"
-            "WHERE id IN (\n"
+            "WHERE id = ANY(ARRAY(\n"
             "  SELECT id FROM shigoto_jobs\n"
             "  WHERE queue = $1\n"
             "  AND state = 'available'\n"
@@ -141,7 +148,7 @@ claim_jobs(Pool, Queue, Limit) ->
             "  ORDER BY priority DESC, scheduled_at ASC\n"
             "  LIMIT $2\n"
             "  FOR UPDATE SKIP LOCKED\n"
-            ") RETURNING *"
+            ")) RETURNING *"
         >>,
     case query(Pool, SQL, [Queue, Limit]) of
         #{rows := Rows} ->
@@ -273,9 +280,22 @@ cancel_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc "Cancel jobs matching a pattern. Supports worker, queue, tags filters.".
+-doc """
+Cancel available or retryable jobs matching a pattern. Filters: `worker`,
+`queue`, `tags`, `args`, `state`.
+
+With an encryption key configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
+""".
 -spec cancel_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 cancel_by(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> cancel_matching(Pool, Filters)
+    end.
+
+cancel_matching(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
     WhereSQL =
         case WhereClauses of
@@ -296,13 +316,20 @@ cancel_by(Pool, Filters) ->
         {error, _} = Err -> Err
     end.
 
--doc "Snooze a job — reschedule for later without counting as a failure.".
+-doc """
+Snooze a job: reschedule it for later without counting it as a failure.
+
+Claiming counts an attempt, so a snooze raises `max_attempts` by one to give
+that attempt back. `attempt` keeps counting runs, and a job that snoozes is
+never discarded for it.
+""".
 -spec snooze_job(atom(), integer(), pos_integer()) -> ok | {error, term()}.
 snooze_job(Pool, JobId, Seconds) ->
     SQL =
         <<
             "UPDATE shigoto_jobs SET state = 'available',\n"
-            "scheduled_at = now() + make_interval(secs => $2)\n"
+            "scheduled_at = now() + make_interval(secs => $2),\n"
+            "max_attempts = max_attempts + 1\n"
             "WHERE id = $1 AND state = 'executing'"
         >>,
     case query(Pool, SQL, [JobId, Seconds]) of
@@ -323,9 +350,24 @@ retry_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc "Retry all jobs matching a filter. Supports worker, queue, state, tags.".
+-doc """
+Retry all discarded or cancelled jobs matching a filter.
+
+Filters: `worker`, `queue`, `tags`, `args`, and `state` (`discarded` or
+`cancelled`, or a list of them) to retry only one of the two.
+
+With an encryption key configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
+""".
 -spec retry_by(atom(), map()) -> {ok, non_neg_integer()} | {error, term()}.
 retry_by(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> retry_matching(Pool, Filters)
+    end.
+
+retry_matching(Pool, Filters) ->
     {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
     WhereSQL =
         case WhereClauses of
@@ -441,10 +483,19 @@ DB-backed enqueue assertions.
 
 Filters: `worker`, `queue`, `args` (jsonb containment), `tags` (array
 containment), and `state` (a state binary or a list of them). An empty filter
-returns all jobs. Args are decrypted so callers can match on plaintext.
+returns all jobs. Returned args are decrypted. With an encryption key
+configured an `args` filter answers
+`{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
+so it would match nothing.
 """.
 -spec find_jobs(atom(), map()) -> {ok, [map()]} | {error, term()}.
-find_jobs(Pool, Filters0) ->
+find_jobs(Pool, Filters) ->
+    case args_filter_refused(Filters) of
+        {error, _} = Refused -> Refused;
+        ok -> find_matching(Pool, Filters)
+    end.
+
+find_matching(Pool, Filters0) ->
     {StateClauses, StateParams, NextIdx} = state_filter_clause(
         maps:get(state, Filters0, undefined), 1
     ),
@@ -508,39 +559,106 @@ archive_jobs(Pool, Days) ->
         end
     end).
 
--doc "Upsert a cron entry.".
+-doc """
+Upsert a cron entry, keyed by `name`.
+
+`last_scheduled_at`, when given, is the minute the entry was last scheduled for.
+It only ever moves forward: an upsert without it, or with an earlier minute
+than the stored one, keeps the stored one. A stored minute more than 60 minutes
+ahead of the database clock is replaced, so a minute stored by a node whose
+clock was far ahead does not stop the entry until that time comes.
+
+`args` is stored encrypted when an encryption key is configured, as job args
+are (`m:shigoto_crypto`). shigoto never reads the column back; the args a cron
+job runs with come from the configured entry.
+""".
 -spec upsert_cron_entry(atom(), map()) -> ok | {error, term()}.
 upsert_cron_entry(Pool, Entry) ->
     SQL =
         <<
-            "INSERT INTO shigoto_cron (name, worker, args, schedule, queue, priority, max_attempts)\n"
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)\n"
+            "INSERT INTO shigoto_cron\n"
+            "(name, worker, args, schedule, queue, priority, max_attempts, last_scheduled_at)\n"
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n"
             "ON CONFLICT (name) DO UPDATE SET\n"
             "worker = EXCLUDED.worker, args = EXCLUDED.args, schedule = EXCLUDED.schedule,\n"
-            "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts"
+            "queue = EXCLUDED.queue, priority = EXCLUDED.priority, max_attempts = EXCLUDED.max_attempts,\n"
+            "last_scheduled_at = CASE\n"
+            "  WHEN shigoto_cron.last_scheduled_at > now() + interval '60 minutes'\n"
+            "  THEN EXCLUDED.last_scheduled_at\n"
+            "  ELSE GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)\n"
+            "END"
         >>,
-    ArgsJson = encode_json(maps:get(args, Entry, #{})),
+    EncArgs = shigoto_crypto:encrypt(encode_json(maps:get(args, Entry, #{}))),
     case
         query(Pool, SQL, [
             maps:get(name, Entry),
             atom_to_binary(maps:get(worker, Entry), utf8),
-            ArgsJson,
+            EncArgs,
             maps:get(schedule, Entry),
             maps:get(queue, Entry, ~"default"),
             maps:get(priority, Entry, 0),
-            maps:get(max_attempts, Entry, 3)
+            maps:get(max_attempts, Entry, 3),
+            maps:get(last_scheduled_at, Entry, null)
         ])
     of
         #{command := insert} -> ok;
         {error, _} = Err -> Err
     end.
 
--doc "Get cron entries that are due for scheduling.".
+-doc "All stored cron entries, with the minute each was last scheduled for.".
 -spec get_due_cron_entries(atom()) -> {ok, [map()]} | {error, term()}.
 get_due_cron_entries(Pool) ->
     SQL = ~"SELECT * FROM shigoto_cron",
     case query(Pool, SQL, []) of
         #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+Whether any cron entry has been scheduled up to the previous minute or later.
+
+A pass that finds the cron lock taken asks this: while a node runs passes, the
+previous minute's pass has stored that minute.
+""".
+-spec cron_progressing(atom()) -> {ok, boolean()} | {error, term()}.
+cron_progressing(Pool) ->
+    SQL =
+        ~"""
+        SELECT COALESCE(
+          max(last_scheduled_at) >= date_trunc('minute', now()) - interval '1 minute', false
+        ) AS progressing
+        FROM shigoto_cron
+        """,
+    case query(Pool, SQL, []) of
+        #{rows := [#{progressing := Progressing}]} when is_boolean(Progressing) ->
+            {ok, Progressing};
+        {error, _} = Err ->
+            Err
+    end.
+
+-doc """
+The database's current minute, as a UTC datetime.
+
+Inside a transaction this is the minute the transaction started in, so every
+node that asks agrees, whatever its own clock says.
+""".
+-spec current_minute(atom()) -> {ok, calendar:datetime()} | {error, term()}.
+current_minute(Pool) ->
+    case query(Pool, ~"SELECT date_trunc('minute', now()) AS minute", []) of
+        #{rows := [#{minute := Minute}]} -> {ok, Minute};
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+Take a transaction-scoped advisory lock without waiting.
+
+`true` when this transaction holds the lock, `false` when another one does. Call
+it inside `shigoto_db:transaction/2`: the lock is released when that ends.
+""".
+-spec try_advisory_xact_lock(atom(), integer()) -> boolean() | {error, term()}.
+try_advisory_xact_lock(Pool, Key) ->
+    case query(Pool, ~"SELECT pg_try_advisory_xact_lock($1) AS locked", [Key]) of
+        #{rows := [#{locked := Locked}]} -> Locked;
         {error, _} = Err -> Err
     end.
 
@@ -655,7 +773,7 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
         end,
         lists:sort(Keys)
     ),
-    iolist_to_binary(lists:join(~":", Parts)).
+    shigoto_crypto:unique_key(iolist_to_binary(lists:join(~":", Parts))).
 
 find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
     StatesClause = states_in_clause(States),
@@ -801,6 +919,14 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
 %% Internal: filters for cancel_by
 %%----------------------------------------------------------------------
 
+args_filter_refused(#{args := _}) ->
+    case shigoto_crypto:is_enabled() of
+        true -> {error, args_filter_unsupported_with_encryption};
+        false -> ok
+    end;
+args_filter_refused(_Filters) ->
+    ok.
+
 build_filter_clauses(Filters, StartIdx) ->
     maps:fold(
         fun(Key, Value, {Clauses, Params, Idx}) ->
@@ -827,7 +953,16 @@ filter_clause(tags, Tags, Idx) when is_list(Tags) ->
     {<<"tags @> $", IBin/binary>>, [encode_pg_array(Tags)], Idx + 1};
 filter_clause(args, ArgsMatch, Idx) when is_map(ArgsMatch) ->
     IBin = integer_to_binary(Idx),
-    {<<"args @> $", IBin/binary, "::jsonb">>, [encode_json(ArgsMatch)], Idx + 1}.
+    {<<"args @> $", IBin/binary, "::jsonb">>, [encode_json(ArgsMatch)], Idx + 1};
+filter_clause(state, State, Idx) ->
+    IBin = integer_to_binary(Idx),
+    {<<"state = ANY($", IBin/binary, ")">>, [state_names(State)], Idx + 1}.
+
+state_names(States) when is_list(States) -> [state_name(S) || S <- States];
+state_names(State) -> [state_name(State)].
+
+state_name(State) when is_atom(State) -> atom_to_binary(State);
+state_name(State) when is_binary(State) -> State.
 
 %%----------------------------------------------------------------------
 %% Internal: structured errors

@@ -329,7 +329,9 @@ resolve_args(_) ->
 
 apply_with_timeout(Module, Function, Args, Timeout) ->
     Self = self(),
+    Metadata = logger:get_process_metadata(),
     {Pid, Ref} = spawn_monitor(fun() ->
+        inherit_logger_metadata(Metadata),
         Result = apply(Module, Function, Args),
         Self ! {self(), Result}
     end),
@@ -371,6 +373,9 @@ set_logger_metadata(Job, Worker) ->
         shigoto_queue => maps:get(queue, Job, undefined),
         shigoto_attempt => maps:get(attempt, Job, 0)
     }).
+
+inherit_logger_metadata(undefined) -> ok;
+inherit_logger_metadata(Metadata) -> logger:set_process_metadata(Metadata).
 
 clear_logger_metadata() ->
     logger:update_process_metadata(#{

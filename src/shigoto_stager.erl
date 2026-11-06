@@ -24,6 +24,13 @@ never crashes the supervision tree.
 
 -define(STAGE_LOCK_ID, 839274629).
 -define(CHANNEL, ~"shigoto_jobs_insert").
+%% A peer holds the lock for one pass, a few milliseconds of each interval, and
+%% its ticks drift against ours, so a follower misses now and then but not for a
+%% minute on end. At least ten passes, and at least a minute of them.
+-define(STUCK_AFTER_MS, 60000).
+-define(MIN_STUCK_PASSES, 10).
+%% The warning repeats hourly while the lock stays taken, as cron's does.
+-define(REPEAT_AFTER_MS, 3600000).
 
 -doc false.
 start_link() ->
@@ -32,7 +39,7 @@ start_link() ->
 -doc false.
 init([]) ->
     erlang:send_after(shigoto_config:stage_interval(), self(), stage),
-    {ok, #{}}.
+    {ok, #{misses => 0}}.
 
 -doc false.
 handle_call(_Request, _From, State) ->
@@ -44,13 +51,9 @@ handle_cast(_Msg, State) ->
 
 -doc false.
 handle_info(stage, State) ->
-    _ =
-        case safe_with_leader_lock(fun stage/0) of
-            ok -> ok;
-            retry -> ok
-        end,
+    Outcome = safe_with_leader_lock(fun stage/0),
     erlang:send_after(shigoto_config:stage_interval(), self(), stage),
-    {noreply, State};
+    {noreply, counted(Outcome, State)};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -64,10 +67,40 @@ stage_once() ->
 %% Internal
 %%----------------------------------------------------------------------
 
+counted(missed, #{misses := Misses0} = State) ->
+    Misses = Misses0 + 1,
+    Threshold = passes_in(?STUCK_AFTER_MS, ?MIN_STUCK_PASSES),
+    Repeat = passes_in(?REPEAT_AFTER_MS, 1),
+    case Misses >= Threshold andalso (Misses - Threshold) rem Repeat =:= 0 of
+        true ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_stager_lock_held_elsewhere",
+                lock => ?STAGE_LOCK_ID,
+                consecutive_misses => Misses,
+                action =>
+                    ~"staging is not running on any node while this lock is taken; find the session holding it in pg_locks"
+            }),
+            shigoto_telemetry:leader_lock_unavailable(stager, Misses);
+        false ->
+            ok
+    end,
+    State#{misses := Misses};
+counted(retry, State) ->
+    State;
+counted(held, State) ->
+    State#{misses := 0}.
+
+%% How many passes `Ms` milliseconds of them come to, and at least `Min`.
+-spec passes_in(pos_integer(), pos_integer()) -> pos_integer().
+passes_in(Ms, Min) ->
+    case Ms div shigoto_config:stage_interval() of
+        Passes when Passes > Min -> Passes;
+        _Fewer -> Min
+    end.
+
 safe_with_leader_lock(Fun) ->
     try
-        with_leader_lock(Fun),
-        ok
+        with_leader_lock(Fun)
     catch
         Class:Reason ->
             ?LOG_DEBUG(#{event => stager_tick_failed, class => Class, reason => Reason}),
@@ -77,13 +110,17 @@ safe_with_leader_lock(Fun) ->
 with_leader_lock(Fun) ->
     Pool = shigoto_config:pool(),
     shigoto_db:transaction(Pool, fun() ->
-        case
-            shigoto_db:query(Pool, ~"SELECT pg_try_advisory_xact_lock($1)::text", [?STAGE_LOCK_ID])
-        of
-            #{rows := [{~"true"}]} ->
-                Fun();
-            _ ->
-                ok
+        case shigoto_repo:try_advisory_xact_lock(Pool, ?STAGE_LOCK_ID) of
+            true ->
+                Fun(),
+                held;
+            false ->
+                missed;
+            {error, Reason} ->
+                ?LOG_WARNING(#{
+                    msg => ~"shigoto_stager_lock_failed", reason => shigoto_db:reduced(Reason)
+                }),
+                retry
         end
     end).
 

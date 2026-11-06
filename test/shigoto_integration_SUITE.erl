@@ -17,6 +17,20 @@
     test_retry_job/1,
     test_drain_queue/1,
     test_migration/1,
+    test_migration_reports_failure/1,
+    test_concurrent_migrations/1,
+    test_migration_refuses_an_open_transaction/1,
+    test_schema_version_covers_every_version/1,
+    test_current_migration_does_not_block_claims/1,
+    test_migration_behind_a_reader_times_out/1,
+    test_newer_schema_is_left_alone/1,
+    test_huge_schema_comment_is_not_a_version/1,
+    test_migration_does_not_queue_behind_a_reader/1,
+    test_migration_succeeds_under_steady_writes/1,
+    test_comment_with_a_trailing_newline_is_not_a_version/1,
+    test_commit_refused_raises/1,
+    test_commit_unanswered_raises/1,
+    test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
     test_unique_prevents_duplicate/1,
     test_unique_different_args_allowed/1,
@@ -67,6 +81,20 @@
 all() ->
     [
         test_migration,
+        test_migration_reports_failure,
+        test_concurrent_migrations,
+        test_migration_refuses_an_open_transaction,
+        test_schema_version_covers_every_version,
+        test_current_migration_does_not_block_claims,
+        test_migration_behind_a_reader_times_out,
+        test_newer_schema_is_left_alone,
+        test_huge_schema_comment_is_not_a_version,
+        test_migration_does_not_queue_behind_a_reader,
+        test_migration_succeeds_under_steady_writes,
+        test_comment_with_a_trailing_newline_is_not_a_version,
+        test_commit_refused_raises,
+        test_commit_unanswered_raises,
+        test_worker_inherits_logger_metadata,
         test_insert_and_claim,
         test_job_execution_success,
         test_job_execution_failure,
@@ -130,6 +158,7 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
+    _ = persistent_term:erase({shigoto_migration, unstamped_warned}),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -146,6 +175,250 @@ test_migration(_Config) ->
     ok = shigoto_migration:up(?POOL),
     %% Idempotent
     ok = shigoto_migration:up(?POOL).
+
+test_migration_reports_failure(_Config) ->
+    shigoto_migration:down(?POOL),
+    #{} = shigoto_db:query(?POOL, ~"CREATE VIEW shigoto_jobs AS SELECT 1 AS id", []),
+    try
+        ?assertMatch({error, {pgsql_error, _}}, shigoto_migration:up(?POOL))
+    after
+        #{} = shigoto_db:query(?POOL, ~"DROP VIEW shigoto_jobs", [])
+    end,
+    ok = shigoto_migration:up(?POOL).
+
+test_concurrent_migrations(_Config) ->
+    shigoto_migration:down(?POOL),
+    Self = self(),
+    Pids = [
+        spawn_link(fun() -> Self ! {self(), shigoto_migration:up(?POOL)} end)
+     || _ <- [1, 2, 3]
+    ],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 30000 -> timeout
+        end
+     || Pid <- Pids
+    ],
+    ?assertEqual([ok, ok, ok], Results).
+
+test_migration_refuses_an_open_transaction(_Config) ->
+    ?assertEqual(
+        {error, in_transaction},
+        shigoto_db:transaction(?POOL, fun() -> shigoto_migration:up(?POOL) end)
+    ).
+
+test_schema_version_covers_every_version(_Config) ->
+    Versions = [
+        binary_to_integer(Version)
+     || {Function, 0} <- shigoto_migration:module_info(functions),
+        [<<"v", Version/binary>>, ~"statements"] <- [
+            string:split(atom_to_binary(Function), ~"_")
+        ]
+    ],
+    ?assertEqual(lists:max(Versions), shigoto_migration:schema_version()),
+    ok = shigoto_migration:up(?POOL),
+    Expected = iolist_to_binary([~"shigoto ", integer_to_binary(shigoto_migration:schema_version())]),
+    ?assertMatch(
+        #{rows := [#{version := Expected}]},
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
+    ).
+
+test_current_migration_does_not_block_claims(_Config) ->
+    ok = shigoto_migration:up(?POOL),
+    {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+    ct:pal("claim latency with a current schema and an archive reader: ~p ms", [ClaimMs]),
+    ?assertEqual(ok, Migration),
+    ?assert(ClaimMs < 1000).
+
+test_migration_behind_a_reader_times_out(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ct:pal("claim latency with a migration behind an archive reader: ~p ms", [ClaimMs]),
+        ?assertEqual({error, lock_timeout}, Migration),
+        ?assert(ClaimMs < 3000)
+    after
+        ok = shigoto_migration:up(?POOL)
+    end,
+    ?assertMatch(
+        #{rows := [#{version := ~"shigoto 6"}]},
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
+    ).
+
+test_newer_schema_is_left_alone(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 999'", []),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ?assertEqual(ok, Migration),
+        ?assert(ClaimMs < 1000),
+        ?assertEqual(~"shigoto 999", schema_comment())
+    after
+        #{} = shigoto_db:query(
+            ?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'not a shigoto version'", []
+        )
+    end,
+    ok = shigoto_migration:up(?POOL),
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+test_huge_schema_comment_is_not_a_version(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"DO $$ BEGIN EXECUTE format('COMMENT ON TABLE shigoto_jobs IS %L', 'shigoto ' || repeat('9', 1000000)); END $$",
+        []
+    ),
+    ?assertEqual(ok, shigoto_migration:up(?POOL)),
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+%% A migration that cannot take its table locks at once gives up at once,
+%% rather than queueing an ACCESS EXCLUSIVE request that claims wait behind.
+test_migration_does_not_queue_behind_a_reader(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+    try
+        {Migration, ClaimMs} = migrate_behind_an_archive_reader(),
+        ct:pal("claim latency with a migration refused its table locks: ~p ms", [ClaimMs]),
+        ?assertEqual({error, lock_timeout}, Migration),
+        ?assert(ClaimMs < 700)
+    after
+        ok = shigoto_migration:up(?POOL)
+    end.
+
+%% Short insert transactions keep shigoto_jobs locked almost all the time. A
+%% migration that waits briefly for its table locks still gets them; one that
+%% refuses to wait never does.
+test_migration_succeeds_under_steady_writes(_Config) ->
+    Stop = atomics:new(1, []),
+    Writers = [spawn_link(fun() -> write_until(Stop) end) || _ <- [1, 2]],
+    timer:sleep(300),
+    try
+        Results = [
+            begin
+                #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
+                shigoto_migration:up(?POOL)
+            end
+         || _ <- lists:seq(1, 5)
+        ],
+        ?assertEqual([ok, ok, ok, ok, ok], Results)
+    after
+        atomics:put(Stop, 1, 1),
+        [unlink(Writer) || Writer <- Writers],
+        timer:sleep(300)
+    end,
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+write_until(Stop) ->
+    case atomics:get(Stop, 1) of
+        1 ->
+            ok;
+        0 ->
+            shigoto_db:transaction(?POOL, fun() ->
+                #{} = shigoto_db:query(
+                    ?POOL,
+                    ~"INSERT INTO shigoto_jobs (queue, worker, args) VALUES ('writes', 'w', '{}')",
+                    []
+                ),
+                #{} = shigoto_db:query(?POOL, ~"SELECT pg_sleep(0.02)", [])
+            end),
+            write_until(Stop)
+    end.
+
+test_comment_with_a_trailing_newline_is_not_a_version(_Config) ->
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS E'shigoto 6\\n'", []),
+    ?assertEqual(<<"shigoto 6\n">>, schema_comment()),
+    ?assertEqual(ok, shigoto_migration:up(?POOL)),
+    ?assertEqual(~"shigoto 6", schema_comment()).
+
+schema_comment() ->
+    #{rows := [#{version := Version}]} =
+        shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", []),
+    Version.
+
+%% Runs up/1 while another connection reads shigoto_jobs_archive, and times a
+%% claim made while the migration runs.
+migrate_behind_an_archive_reader() ->
+    {ok, _} = shigoto_repo:insert_job(?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}),
+    Self = self(),
+    Reader = spawn_link(fun() ->
+        shigoto_db:transaction(?POOL, fun() ->
+            #{} = shigoto_db:query(?POOL, ~"SELECT count(*) FROM shigoto_jobs_archive", []),
+            Self ! reading,
+            receive
+                stop -> ok
+            end
+        end)
+    end),
+    receive
+        reading -> ok
+    after 5000 -> ct:fail(reader_did_not_start)
+    end,
+    Migrator = spawn_link(fun() -> Self ! {migrated, shigoto_migration:up(?POOL)} end),
+    timer:sleep(300),
+    Started = erlang:monotonic_time(millisecond),
+    {ok, _} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ClaimMs = erlang:monotonic_time(millisecond) - Started,
+    Migration =
+        receive
+            {migrated, Result} -> Result
+        after 30000 -> ct:fail({migration_did_not_finish, Migrator})
+        end,
+    Reader ! stop,
+    {Migration, ClaimMs}.
+
+test_commit_refused_raises(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE TABLE IF NOT EXISTS shigoto_deferred_probe (
+          id integer, CONSTRAINT shigoto_deferred_probe_id UNIQUE (id) DEFERRABLE INITIALLY DEFERRED
+        )
+        """,
+        []
+    ),
+    try
+        ?assertError(
+            {shigoto_db, {commit_failed, {pgsql_error, #{code := ~"23505"}}}},
+            shigoto_db:transaction(?POOL, fun() ->
+                #{} = shigoto_db:query(?POOL, ~"INSERT INTO shigoto_deferred_probe VALUES (1)", []),
+                #{} = shigoto_db:query(?POOL, ~"INSERT INTO shigoto_deferred_probe VALUES (1)", [])
+            end)
+        )
+    after
+        #{} = shigoto_db:query(?POOL, ~"DROP TABLE shigoto_deferred_probe", [])
+    end.
+
+test_commit_unanswered_raises(_Config) ->
+    ?assertError(
+        {shigoto_db, {commit_unknown, {holder_died, _}}},
+        shigoto_db:transaction(?POOL, fun() ->
+            Holder = shigoto_db:in_transaction(?POOL),
+            true = is_pid(Holder),
+            exit(Holder, kill)
+        end)
+    ).
+
+test_worker_inherits_logger_metadata(_Config) ->
+    register(shigoto_metadata_probe, self()),
+    try
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL,
+            #{
+                worker => shigoto_test_worker,
+                args => #{~"action" => ~"report_metadata", ~"to" => ~"shigoto_metadata_probe"}
+            },
+            #{}
+        ),
+        {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+        ok = shigoto_executor:execute_sync(Claimed, ?POOL, 5000),
+        receive
+            {logger_metadata, Metadata} ->
+                ?assertMatch(
+                    #{shigoto_job_id := JobId, shigoto_worker := shigoto_test_worker}, Metadata
+                )
+        after 2000 -> ct:fail(no_metadata_reported)
+        end
+    after
+        unregister(shigoto_metadata_probe)
+    end.
 
 test_insert_and_claim(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
@@ -926,7 +1199,7 @@ start_pool2() ->
     case
         shigoto_db:start_pool(Pool2, #{
             host => "localhost",
-            port => 5556,
+            port => shigoto_test_repo:port(),
             database => "shigoto_test",
             user => "postgres",
             password => "root",
