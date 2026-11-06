@@ -1,6 +1,6 @@
 # Shigoto 仕事
 
-PostgreSQL-backed background job processing for Erlang.
+PostgreSQL-backed background job processing for Erlang. If you know [Oban](https://github.com/oban-bg/oban) from Elixir, shigoto fills the same role on a plain Erlang/OTP stack.
 
 Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR UPDATE SKIP LOCKED` for safe multi-node operation. No Redis or external broker needed — if you have PostgreSQL, you have a job queue.
 
