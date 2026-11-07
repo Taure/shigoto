@@ -166,6 +166,10 @@ whether shigoto is configured with `repo` or `pool`. Only the other direction,
 kura writes joining `shigoto:transaction/1`, needs `repo`; with `{pool, Pool}`,
 `shigoto:transaction/1` covers shigoto's own statements on that pool.
 
+In tests, jobs join `kura_sandbox`: a job inserted while the test has the
+repo's sandbox checked out is rolled back at checkin with the test's other
+writes. See [Testing](guides/testing.md#with-kura_sandbox).
+
 ## Job Lifecycle
 
 ```

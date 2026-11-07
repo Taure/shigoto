@@ -156,6 +156,42 @@ test_email_job(_Config) ->
 In an app on kura, start the repo instead and set `{repo, my_app_repo}`;
 shigoto then runs on the repo's pool.
 
+## With kura_sandbox
+
+In an app on kura, check the repo out of `kura_sandbox` per test and jobs join
+the sandbox like the repo's own writes: inserted in the test's transaction,
+visible to the test's kura reads, and rolled back at `kura_sandbox:checkin/1`.
+Nothing needs deleting between tests. This needs kura 2.24 or later.
+
+```erlang
+init_per_testcase(_Case, Config) ->
+    ok = kura_sandbox:checkout(my_app_repo),
+    Config.
+
+end_per_testcase(_Case, _Config) ->
+    kura_sandbox:checkin(my_app_repo).
+
+welcome_email_is_sent(_Config) ->
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    ok = shigoto:drain_queue(~"default").
+```
+
+- `shigoto:insert/1,2` from the test process, from a process it allowed with
+  `kura_sandbox:allow/3`, or from any process with `#{shared => true}`, runs on
+  the sandbox connection, inside or outside `my_app_repo:transaction/1`.
+- `shigoto:transaction/1` is a savepoint there, as `my_app_repo:transaction/1`
+  is: a raise undoes only its own writes and jobs and the test carries on. That
+  needs `{repo, my_app_repo}` naming the repo module. With `pool`, or `repo`
+  naming a pool override, it runs directly on the sandbox connection, and a
+  raise is undone only at checkin.
+- shigoto's own processes (queues, stager, cron, pruner, heartbeat) stay out of
+  the sandbox even when it is shared, so they never see or run a test's jobs.
+  Run them from the test with `drain_queue/1`, which does join the sandbox, and
+  set `{queues, []}` in the test config.
+- An advisory lock a job insert takes (a unique insert, a rate-limited worker)
+  is held until checkin. Another connection inserting the same unique key
+  waits for the test to end.
+
 ## Testing Workers Directly
 
 For unit testing worker logic without the job queue:
