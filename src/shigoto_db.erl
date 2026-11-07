@@ -59,18 +59,26 @@ inside a kura transaction it joins that one, as it does outside the sandbox.
 the repo and the repo's pool is named after it. Configured with `pool`, or with
 `repo` naming a pool override, `transaction/2` runs its function directly on
 the sandbox connection: nothing leaves the sandbox, but a raise is not undone
-until checkin. Needs kura 2.24 or later; with an older kura the sandbox is not
-looked at, and a warning says so.
+until checkin. Needs kura 2.24 or later and kura_postgres 1.1.7 or later; with
+older ones the sandbox is not joined, and a test that checks one out logs a
+notice saying so.
 
 shigoto's own processes (queues and their executors, the stager, cron, pruner,
-heartbeat, notifier and migrator) never use the sandbox, shared or not. They
-see only committed rows, so the jobs a test inserts are not run in the
-background: run them from the test with `shigoto:drain_queue/1`.
+heartbeat, notifier and migrator) never use the sandbox, shared or not, and nor
+do the processes their workers run in. They see only committed rows, so the
+jobs a test inserts are not run in the background: run them from the test with
+`shigoto:drain_queue/1`, which claims and completes them in the sandbox. A
+worker's `perform/1` runs in a process of its own, so with a checkout that is
+not shared, what it reads and writes is outside the sandbox.
 
-An advisory lock taken with `pg_advisory_xact_lock` belongs to the sandbox's
-transaction, so one taken inside it is held until checkin, after the savepoint
-that took it is released. A unique insert and a rate-limited job take one, and
-another connection inserting the same unique key waits for the test to end.
+A transaction-level advisory lock taken on the sandbox connection is held until
+checkin, even after the savepoint that took it is released. A unique insert, a
+drained job of a worker with `global_concurrency/0`, `shigoto_cron:schedule_once/0`
+and `shigoto_migration:up/1` take one, so another connection inserting the same
+unique key waits for the test to end. A unique insert also opens a transaction,
+so two processes sharing the sandbox that insert at once, or one that inserts
+while the owner is inside `Repo:transaction/1`, can raise
+`{kura_sandbox, overlapping_transactions}`.
 
 ## When a transaction does not commit
 
@@ -99,6 +107,7 @@ opened through kura raises them the same way. A server error keeps only its
     reduced/1,
     kura_available/0,
     ignore_sandbox/0,
+    ignores_sandbox/0,
     start_pool/2,
     start_listener/2
 ]).
@@ -121,7 +130,9 @@ opened through kura raises them the same way. A server error keeps only its
     {?KURA_DB, get_pool, 1},
     {?KURA_DRIVER, query_on, 4}
 ]).
--define(SANDBOX_AVAILABLE, {?MODULE, sandbox_available}).
+-define(SANDBOX_SUPPORT, {?MODULE, sandbox_support}).
+-define(SANDBOX_NOTICED, {?MODULE, sandbox_noticed}).
+-define(FLAT, {?MODULE, flat}).
 -define(IGNORES_SANDBOX, {?MODULE, ignores_sandbox}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
@@ -258,7 +269,6 @@ begun(Pool, Fun) ->
 kura_opened(Pool, Fun) ->
     kura_failures(fun() -> kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}]) end).
 
-%% The shapes shigoto raises for a transaction it opened itself.
 -spec kura_failures(fun(() -> Result)) -> Result.
 kura_failures(Opened) ->
     try
@@ -435,14 +445,30 @@ sandboxed(Pool, Fun) ->
                 false -> kura_failures(fun() -> kura(?KURA_DB, transaction, [Repo, Fun]) end)
             end;
         none ->
-            Fun()
+            flat(Pool, Fun)
+    end.
+
+%% With no repo module to open a savepoint through, `Fun` runs in the sandbox's
+%% own transaction, which `transaction_open/1` still has to see.
+-spec flat(atom(), fun(() -> Result)) -> Result.
+flat(Pool, Fun) ->
+    case erlang:get({?FLAT, Pool}) of
+        true ->
+            Fun();
+        undefined ->
+            _ = erlang:put({?FLAT, Pool}, true),
+            try
+                Fun()
+            after
+                _ = erlang:erase({?FLAT, Pool})
+            end
     end.
 
 -spec sandbox_transaction(atom()) -> boolean().
 sandbox_transaction(Pool) ->
     case sandbox_repo(Pool) of
         {ok, Repo} -> kura(?KURA_DB, in_transaction, [Repo]) =:= true;
-        none -> false
+        none -> erlang:get({?FLAT, Pool}) =:= true
     end.
 
 -spec sandbox_repo(atom()) -> {ok, module()} | none.
@@ -453,7 +479,7 @@ sandbox_repo(Pool) ->
                 Pool -> {ok, Pool};
                 _Other -> none
             catch
-                _:_ -> none
+                error:_ -> none
             end;
         _NotTheRepo ->
             none
@@ -461,14 +487,20 @@ sandbox_repo(Pool) ->
 
 -spec sandbox_conn(atom()) -> {ok, pid()} | not_found.
 sandbox_conn(Pool) ->
-    case not ignores_sandbox() andalso sandbox_available() of
-        true -> sandbox_held(kura(?KURA_SANDBOX, get_conn, [Pool]));
-        false -> not_found
+    case ignores_sandbox() of
+        true -> not_found;
+        false -> sandbox_held(sandbox_support(), Pool)
     end.
 
--spec sandbox_held(dynamic()) -> {ok, pid()} | not_found.
-sandbox_held({ok, Conn}) when is_pid(Conn) -> {ok, Conn};
-sandbox_held(_NotSandboxed) -> not_found.
+-spec sandbox_held(none | partial | full, atom()) -> {ok, pid()} | not_found.
+sandbox_held(none, _Pool) ->
+    not_found;
+sandbox_held(Support, Pool) ->
+    case {Support, kura(?KURA_SANDBOX, get_conn, [Pool])} of
+        {full, {ok, Conn}} when is_pid(Conn) -> {ok, Conn};
+        {partial, {ok, _Conn}} -> unsupported();
+        _NotSandboxed -> not_found
+    end.
 
 -doc false.
 -spec ignore_sandbox() -> ok.
@@ -476,33 +508,49 @@ ignore_sandbox() ->
     _ = erlang:put(?IGNORES_SANDBOX, true),
     ok.
 
+-doc false.
 -spec ignores_sandbox() -> boolean().
 ignores_sandbox() ->
     erlang:get(?IGNORES_SANDBOX) =:= true.
 
--spec sandbox_available() -> boolean().
-sandbox_available() ->
-    case persistent_term:get(?SANDBOX_AVAILABLE, undefined) of
+%% `partial` is a kura that has a sandbox but not what shigoto joins it with.
+-spec sandbox_support() -> none | partial | full.
+sandbox_support() ->
+    case persistent_term:get(?SANDBOX_SUPPORT, undefined) of
         undefined ->
-            Available = kura_available() andalso sandbox_checked(),
-            persistent_term:put(?SANDBOX_AVAILABLE, Available),
-            Available;
-        Available when is_boolean(Available) ->
-            Available
+            Support = sandbox_checked(),
+            persistent_term:put(?SANDBOX_SUPPORT, Support),
+            Support;
+        Support when Support =:= none; Support =:= partial; Support =:= full ->
+            Support
     end.
 
--spec sandbox_checked() -> boolean().
+-spec sandbox_checked() -> none | partial | full.
 sandbox_checked() ->
-    case [MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)] of
-        [] ->
-            true;
-        Missing ->
-            ?LOG_WARNING(#{
-                msg => ~"shigoto_kura_sandbox_unavailable",
-                missing => Missing,
-                action => ~"jobs will not join kura_sandbox; upgrade kura to 2.24 or later"
+    case kura_available() andalso exported({?KURA_SANDBOX, get_conn, 1}) of
+        false -> none;
+        true -> supported([MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)])
+    end.
+
+-spec supported([mfa()]) -> partial | full.
+supported([]) -> full;
+supported(_Missing) -> partial.
+
+%% Only a test with a sandbox checked out gets here, so production nodes on an
+%% older kura say nothing.
+-spec unsupported() -> not_found.
+unsupported() ->
+    case persistent_term:get(?SANDBOX_NOTICED, false) of
+        true ->
+            not_found;
+        false ->
+            persistent_term:put(?SANDBOX_NOTICED, true),
+            ?LOG_NOTICE(#{
+                msg => ~"shigoto_kura_sandbox_unsupported",
+                missing => [MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)],
+                action => ~"jobs do not join kura_sandbox before kura 2.24 and kura_postgres 1.1.7"
             }),
-            false
+            not_found
     end.
 
 -spec exported(mfa()) -> boolean().

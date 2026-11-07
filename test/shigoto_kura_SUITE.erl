@@ -45,6 +45,10 @@ whose pool shigoto shares would do.
     sandboxed_overlapping_shigoto_transaction_raises/1,
     sandboxed_insert_with_pool_config_joins_the_sandbox/1,
     shigoto_processes_stay_out_of_the_sandbox/1,
+    workers_run_by_shigoto_processes_stay_out_of_the_sandbox/1,
+    sandboxed_refused_savepoint_raises_a_shigoto_error/1,
+    background_queue_does_not_claim_sandboxed_jobs/1,
+    shigoto_processes_ignore_the_sandbox/1,
     insert_after_checkin_commits/1
 ]).
 
@@ -66,6 +70,7 @@ all() ->
         repo_transaction_commits_its_jobs,
         repo_writes_join_shigoto_transaction,
         insert_after_checkin_commits,
+        shigoto_processes_ignore_the_sandbox,
         {group, sandbox},
         {group, shared_sandbox}
     ].
@@ -83,7 +88,10 @@ groups() ->
         sandboxed_repo_transaction_refuses_migration,
         sandboxed_overlapping_shigoto_transaction_raises,
         sandboxed_insert_with_pool_config_joins_the_sandbox,
-        shigoto_processes_stay_out_of_the_sandbox
+        shigoto_processes_stay_out_of_the_sandbox,
+        workers_run_by_shigoto_processes_stay_out_of_the_sandbox,
+        sandboxed_refused_savepoint_raises_a_shigoto_error,
+        background_queue_does_not_claim_sandboxed_jobs
     ],
     [{sandbox, [], Sandboxed}, {shared_sandbox, [], Sandboxed}].
 
@@ -433,6 +441,7 @@ sandboxed_insert_with_pool_config_joins_the_sandbox(Config) ->
             error(boom)
         end)
     ),
+    ?assertEqual({1, 0}, seen()),
     ?assertEqual({0, 0}, committed()),
     ok = kura_sandbox:checkin(?REPO),
     ?assertEqual({0, 0}, committed()).
@@ -450,6 +459,51 @@ shigoto_processes_stay_out_of_the_sandbox(Config) ->
     ),
     Shared = maps:get(shared, sandbox_opts(Config), false),
     ?assertEqual(Shared, elsewhere(Count) =:= 1).
+
+workers_run_by_shigoto_processes_stay_out_of_the_sandbox(Config) ->
+    sandbox(Config),
+    {ok, _Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+    ?assertEqual(
+        {ok, 0},
+        elsewhere(fun() ->
+            ok = shigoto_db:ignore_sandbox(),
+            shigoto:perform_job(shigoto_sandbox_probe_worker, #{})
+        end)
+    ).
+
+sandboxed_refused_savepoint_raises_a_shigoto_error(Config) ->
+    sandbox(Config),
+    {error, {pgsql_error, #{code := ~"22012"}}} = shigoto_db:query(?REPO, ~"SELECT 1 / 0", []),
+    ?assertError(
+        {shigoto_db, {savepoint_failed, {pgsql_error, #{code := ~"25P02"}}}},
+        shigoto:transaction(fun() -> ok end)
+    ).
+
+background_queue_does_not_claim_sandboxed_jobs(Config) ->
+    sandbox(Config),
+    {ok, #{id := Id}} = shigoto:insert(#{worker => shigoto_test_worker, args => #{}}),
+    application:set_env(shigoto, poll_interval, 100),
+    {ok, _} = application:ensure_all_started(shigoto),
+    try
+        timer:sleep(500),
+        #{rows := [#{state := State}]} =
+            kura_db:query(?REPO, ~"SELECT state FROM shigoto_jobs WHERE id = $1", [Id]),
+        ?assertEqual(~"available", State)
+    after
+        ok = application:stop(shigoto),
+        application:unset_env(shigoto, poll_interval)
+    end.
+
+shigoto_processes_ignore_the_sandbox(_Config) ->
+    application:set_env(shigoto, repo, ?REPO),
+    {ok, _} = application:ensure_all_started(shigoto),
+    try
+        Pids = supervised(shigoto_sup),
+        ?assertNotEqual([], Pids),
+        ?assertEqual([], [Pid || Pid <- Pids, not ignores_sandbox(Pid)])
+    after
+        ok = application:stop(shigoto)
+    end.
 
 insert_after_checkin_commits(_Config) ->
     application:set_env(shigoto, repo, ?REPO),
@@ -478,6 +532,19 @@ sandbox_opts(Config) ->
         {sandbox, #{} = Opts} -> Opts
     end.
 
+supervised(Sup) ->
+    lists:append([
+        supervised(Type, Pid)
+     || {_Id, Pid, Type, _Modules} <- supervisor:which_children(Sup), is_pid(Pid)
+    ]).
+
+supervised(supervisor, Sup) -> supervised(Sup);
+supervised(worker, Pid) -> [Pid].
+
+ignores_sandbox(Pid) ->
+    {dictionary, Dictionary} = erlang:process_info(Pid, dictionary),
+    proplists:get_value({shigoto_db, ignores_sandbox}, Dictionary) =:= true.
+
 attempted(Fun) ->
     try Fun() of
         Value -> {ok, Value}
@@ -505,7 +572,6 @@ sandbox_table() ->
     after 5000 -> ct:fail(no_sandbox_table)
     end.
 
-%% What the test sees through kura: its sandbox when one is checked out.
 seen() ->
     {
         seen(~"SELECT count(*) AS n FROM shigoto_jobs"),
@@ -516,7 +582,6 @@ seen(SQL) ->
     #{rows := [#{n := N}]} = kura_db:query(?REPO, SQL, []),
     N.
 
-%% What another connection sees: only what was committed.
 committed() ->
     {
         committed(~"SELECT count(*) AS n FROM shigoto_jobs"),
