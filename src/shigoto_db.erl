@@ -44,6 +44,34 @@ through kura behaves as kura's does: a statement in it that commits or rolls it
 back raises, and nothing meant for it runs outside it. Whether kura_postgres is
 there is decided once (`kura_available/0`).
 
+## Inside kura's test sandbox
+
+A test that checks out `kura_sandbox` for the pool has every statement shigoto
+runs from that process (or one it allowed, or any process with a shared
+checkout) go to the sandbox connection, so jobs commit and roll back with the
+test's own writes and are gone after `kura_sandbox:checkin/1`. kura's sandbox is
+looked at before kura's transaction, as kura itself does. `transaction/2` there
+runs through `kura_db:transaction/2`, which makes it a `SAVEPOINT` on the
+sandbox connection: a raise undoes only its own work and the sandbox stays
+usable, a statement that failed in it raises `transaction_rolled_back`, and
+inside a kura transaction it joins that one, as it does outside the sandbox.
+`kura_db:transaction/2` needs the repo module, so this holds when `repo` names
+the repo and the repo's pool is named after it. Configured with `pool`, or with
+`repo` naming a pool override, `transaction/2` runs its function directly on
+the sandbox connection: nothing leaves the sandbox, but a raise is not undone
+until checkin. Needs kura 2.24 or later; with an older kura the sandbox is not
+looked at, and a warning says so.
+
+shigoto's own processes (queues and their executors, the stager, cron, pruner,
+heartbeat, notifier and migrator) never use the sandbox, shared or not. They
+see only committed rows, so the jobs a test inserts are not run in the
+background: run them from the test with `shigoto:drain_queue/1`.
+
+An advisory lock taken with `pg_advisory_xact_lock` belongs to the sandbox's
+transaction, so one taken inside it is held until checkin, after the savepoint
+that took it is released. A unique insert and a rate-limited job take one, and
+another connection inserting the same unique key waits for the test to end.
+
 ## When a transaction does not commit
 
 A `COMMIT` the server answers with `ROLLBACK` raises `transaction_rolled_back`.
@@ -70,6 +98,7 @@ opened through kura raises them the same way. A server error keeps only its
     transaction_open/1,
     reduced/1,
     kura_available/0,
+    ignore_sandbox/0,
     start_pool/2,
     start_listener/2
 ]).
@@ -83,6 +112,17 @@ opened through kura raises them the same way. A server error keeps only its
     {?KURA_POOL, transaction_conn, 1}
 ]).
 -define(KURA_AVAILABLE, {?MODULE, kura_available}).
+-define(KURA_SANDBOX, kura_sandbox).
+-define(KURA_DB, kura_db).
+-define(SANDBOX_CALLS, [
+    {?KURA_SANDBOX, get_conn, 1},
+    {?KURA_DB, transaction, 2},
+    {?KURA_DB, in_transaction, 1},
+    {?KURA_DB, get_pool, 1},
+    {?KURA_DRIVER, query_on, 4}
+]).
+-define(SANDBOX_AVAILABLE, {?MODULE, sandbox_available}).
+-define(IGNORES_SANDBOX, {?MODULE, ignores_sandbox}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
 
@@ -108,13 +148,17 @@ options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
-    case {in_transaction(Pool), kura_transaction(Pool)} of
-        {undefined, undefined} ->
+    case route(Pool) of
+        pool ->
             answered(minato:query(Pool, SQL, Params, decoding(Opts)));
-        {undefined, _Kura} ->
+        {shigoto, Holder} ->
+            ran(Holder, SQL, Params, decoding(Opts));
+        {kura, _Holder} ->
             kura(?KURA_DRIVER, query, [?KURA_POOL, Pool, SQL, Params, decoding(Opts)]);
-        {Holder, _} ->
-            ran(Holder, SQL, Params, decoding(Opts))
+        {sandbox, Conn} ->
+            kura(?KURA_DRIVER, query_on, [
+                Conn, SQL, Params, (decoding(Opts))#{transaction => inside}
+            ])
     end.
 
 -doc """
@@ -126,8 +170,9 @@ know whether it is nested.
 """.
 -spec transaction(atom(), fun(() -> Result)) -> Result.
 transaction(Pool, Fun) ->
-    case {in_transaction(Pool), kura_transaction(Pool)} of
-        {undefined, undefined} -> begun(Pool, Fun);
+    case route(Pool) of
+        pool -> begun(Pool, Fun);
+        {sandbox, _Conn} -> sandboxed(Pool, Fun);
         _Open -> Fun()
     end.
 
@@ -144,7 +189,11 @@ in_transaction(Pool) ->
 -doc false.
 -spec transaction_open(atom()) -> boolean().
 transaction_open(Pool) ->
-    in_transaction(Pool) =/= undefined orelse kura_transaction(Pool) =/= undefined.
+    case route(Pool) of
+        pool -> false;
+        {sandbox, _Conn} -> sandbox_transaction(Pool);
+        _Open -> true
+    end.
 
 -doc """
 `Reason` with a server error cut down to the fields that cannot carry row values.
@@ -207,8 +256,13 @@ begun(Pool, Fun) ->
 
 -spec kura_opened(atom(), fun(() -> Result)) -> Result.
 kura_opened(Pool, Fun) ->
+    kura_failures(fun() -> kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}]) end).
+
+%% The shapes shigoto raises for a transaction it opened itself.
+-spec kura_failures(fun(() -> Result)) -> Result.
+kura_failures(Opened) ->
     try
-        kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}])
+        Opened()
     catch
         error:{kura_driver_minato, {no_connection, checkout_timeout}} ->
             error({?MODULE, checkout_timeout});
@@ -216,7 +270,8 @@ kura_opened(Pool, Fun) ->
             Failure =:= no_connection;
             Failure =:= begin_failed;
             Failure =:= commit_failed;
-            Failure =:= commit_unknown
+            Failure =:= commit_unknown;
+            Failure =:= savepoint_failed
         ->
             error({?MODULE, {Failure, Reason}})
     end.
@@ -343,6 +398,117 @@ release(Holder) ->
 %%----------------------------------------------------------------------
 %% kura, when it is there
 %%----------------------------------------------------------------------
+
+%% Where a statement on `Pool` runs for this process: shigoto's own transaction,
+%% the connection kura's test sandbox checked out, kura's transaction, or the
+%% pool. The sandbox comes before kura's transaction because kura_db looks there
+%% first, so a kura write and a shigoto write land on the same connection.
+-spec route(atom()) -> {shigoto | sandbox | kura, pid()} | pool.
+route(Pool) ->
+    case in_transaction(Pool) of
+        undefined -> unheld(Pool);
+        Holder -> {shigoto, Holder}
+    end.
+
+-spec unheld(atom()) -> {sandbox | kura, pid()} | pool.
+unheld(Pool) ->
+    case sandbox_conn(Pool) of
+        {ok, Conn} ->
+            {sandbox, Conn};
+        not_found ->
+            case kura_transaction(Pool) of
+                undefined -> pool;
+                Holder -> {kura, Holder}
+            end
+    end.
+
+%% The sandbox connection is already inside the test's transaction, and only
+%% kura_db knows how to open one inside it: a savepoint, with the sandbox's
+%% bookkeeping. That needs the repo module, which `repo` names when it is also
+%% the pool's name.
+-spec sandboxed(atom(), fun(() -> Result)) -> Result.
+sandboxed(Pool, Fun) ->
+    case sandbox_repo(Pool) of
+        {ok, Repo} ->
+            case kura(?KURA_DB, in_transaction, [Repo]) of
+                true -> Fun();
+                false -> kura_failures(fun() -> kura(?KURA_DB, transaction, [Repo, Fun]) end)
+            end;
+        none ->
+            Fun()
+    end.
+
+-spec sandbox_transaction(atom()) -> boolean().
+sandbox_transaction(Pool) ->
+    case sandbox_repo(Pool) of
+        {ok, Repo} -> kura(?KURA_DB, in_transaction, [Repo]) =:= true;
+        none -> false
+    end.
+
+-spec sandbox_repo(atom()) -> {ok, module()} | none.
+sandbox_repo(Pool) ->
+    case application:get_env(shigoto, repo) of
+        {ok, Pool} ->
+            try kura(?KURA_DB, get_pool, [Pool]) of
+                Pool -> {ok, Pool};
+                _Other -> none
+            catch
+                _:_ -> none
+            end;
+        _NotTheRepo ->
+            none
+    end.
+
+-spec sandbox_conn(atom()) -> {ok, pid()} | not_found.
+sandbox_conn(Pool) ->
+    case not ignores_sandbox() andalso sandbox_available() of
+        true -> sandbox_held(kura(?KURA_SANDBOX, get_conn, [Pool]));
+        false -> not_found
+    end.
+
+-spec sandbox_held(dynamic()) -> {ok, pid()} | not_found.
+sandbox_held({ok, Conn}) when is_pid(Conn) -> {ok, Conn};
+sandbox_held(_NotSandboxed) -> not_found.
+
+-doc false.
+-spec ignore_sandbox() -> ok.
+ignore_sandbox() ->
+    _ = erlang:put(?IGNORES_SANDBOX, true),
+    ok.
+
+-spec ignores_sandbox() -> boolean().
+ignores_sandbox() ->
+    erlang:get(?IGNORES_SANDBOX) =:= true.
+
+-spec sandbox_available() -> boolean().
+sandbox_available() ->
+    case persistent_term:get(?SANDBOX_AVAILABLE, undefined) of
+        undefined ->
+            Available = kura_available() andalso sandbox_checked(),
+            persistent_term:put(?SANDBOX_AVAILABLE, Available),
+            Available;
+        Available when is_boolean(Available) ->
+            Available
+    end.
+
+-spec sandbox_checked() -> boolean().
+sandbox_checked() ->
+    case [MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)] of
+        [] ->
+            true;
+        Missing ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_kura_sandbox_unavailable",
+                missing => Missing,
+                action => ~"jobs will not join kura_sandbox; upgrade kura to 2.24 or later"
+            }),
+            false
+    end.
+
+-spec exported(mfa()) -> boolean().
+exported({Module, Function, Arity}) ->
+    code:ensure_loaded(Module) =:= {module, Module} andalso
+        erlang:function_exported(Module, Function, Arity).
 
 -spec kura_transaction(atom()) -> pid() | undefined.
 kura_transaction(Pool) ->
