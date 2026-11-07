@@ -100,6 +100,7 @@ start_link() ->
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     {ok, #{timer => retry_later()}}.
 
 -doc false.

@@ -72,6 +72,7 @@ answer(_Ran) -> ok.
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     self() ! tick,
     {ok, #{misses => 0}}.
 

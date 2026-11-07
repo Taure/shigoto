@@ -65,6 +65,7 @@ execute_sync(Job, Pool, Timeout) ->
 
 -doc false.
 init({Job, Pool, QueuePid}) ->
+    ok = shigoto_db:ignore_sandbox(),
     JobId = maps:get(id, Job),
     ets:insert(shigoto_executors, {JobId, self()}),
     gen_server:cast(self(), execute),
