@@ -41,6 +41,7 @@ start_link() ->
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     self() ! connect,
     {ok, #state{}}.
 

@@ -38,6 +38,7 @@ start_link(Queue, Concurrency, Opts) ->
     gen_server:start_link(?MODULE, {Queue, Concurrency, Opts}, []).
 
 init({Queue, Concurrency, Opts}) ->
+    ok = shigoto_db:ignore_sandbox(),
     process_flag(trap_exit, true),
     Pool = shigoto_config:pool(),
     Window = maps:get(window, Opts, ?DEFAULT_WINDOW),

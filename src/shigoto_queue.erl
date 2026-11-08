@@ -28,6 +28,7 @@ start_link(Queue, Concurrency) ->
 
 -doc false.
 init({Queue, Concurrency}) ->
+    ok = shigoto_db:ignore_sandbox(),
     process_flag(trap_exit, true),
     Pool = shigoto_config:pool(),
     Weights = shigoto_config:queue_weights(),

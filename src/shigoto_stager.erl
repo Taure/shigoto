@@ -38,6 +38,7 @@ start_link() ->
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     erlang:send_after(shigoto_config:stage_interval(), self(), stage),
     {ok, #{misses => 0}}.
 

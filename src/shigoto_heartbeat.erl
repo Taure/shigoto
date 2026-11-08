@@ -18,6 +18,7 @@ start_link() ->
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     Interval = shigoto_config:heartbeat_interval(),
     erlang:send_after(Interval, self(), heartbeat),
     {ok, #{interval => Interval}}.

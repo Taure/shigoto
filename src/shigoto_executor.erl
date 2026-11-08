@@ -65,6 +65,7 @@ execute_sync(Job, Pool, Timeout) ->
 
 -doc false.
 init({Job, Pool, QueuePid}) ->
+    ok = shigoto_db:ignore_sandbox(),
     JobId = maps:get(id, Job),
     ets:insert(shigoto_executors, {JobId, self()}),
     gen_server:cast(self(), execute),
@@ -330,7 +331,9 @@ resolve_args(_) ->
 apply_with_timeout(Module, Function, Args, Timeout) ->
     Self = self(),
     Metadata = logger:get_process_metadata(),
+    IgnoresSandbox = shigoto_db:ignores_sandbox(),
     {Pid, Ref} = spawn_monitor(fun() ->
+        ok = inherit_sandbox_scope(IgnoresSandbox),
         inherit_logger_metadata(Metadata),
         Result = apply(Module, Function, Args),
         Self ! {self(), Result}
@@ -344,6 +347,9 @@ apply_with_timeout(Module, Function, Args, Timeout) ->
     after Timeout ->
         graceful_kill(Pid, Ref)
     end.
+
+inherit_sandbox_scope(true) -> shigoto_db:ignore_sandbox();
+inherit_sandbox_scope(false) -> ok.
 
 graceful_kill(Pid, Ref) ->
     %% Try graceful shutdown first (gives worker a chance to clean up)

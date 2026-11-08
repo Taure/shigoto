@@ -156,6 +156,55 @@ test_email_job(_Config) ->
 In an app on kura, start the repo instead and set `{repo, my_app_repo}`;
 shigoto then runs on the repo's pool.
 
+## With kura_sandbox
+
+In an app on kura, check the repo out of `kura_sandbox` per test and jobs join
+the sandbox like the repo's own writes: inserted in the test's transaction,
+visible to the test's kura reads, and rolled back at `kura_sandbox:checkin/1`.
+What the test inserts needs no deleting between tests. This needs kura 2.24
+and kura_postgres 1.1.7 or later.
+
+```erlang
+init_per_testcase(_Case, Config) ->
+    ok = kura_sandbox:checkout(my_app_repo),
+    Config.
+
+end_per_testcase(_Case, _Config) ->
+    kura_sandbox:checkin(my_app_repo).
+
+welcome_email_is_sent(_Config) ->
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    ok = shigoto:drain_queue(~"default").
+```
+
+- `shigoto:insert/1,2` from the test process, from a process it allowed with
+  `kura_sandbox:allow/3`, or from any process with `#{shared => true}`, runs on
+  the sandbox connection, inside or outside `my_app_repo:transaction/1`.
+- `shigoto:transaction/1` is a savepoint there, as `my_app_repo:transaction/1`
+  is: a raise undoes only its own writes and jobs and the test carries on.
+  Inside `my_app_repo:transaction/1` it joins that transaction, as it does
+  outside the sandbox. The savepoint
+  needs `{repo, my_app_repo}` naming the repo module. With `pool`, or `repo`
+  naming a pool override, it runs directly on the sandbox connection, and a
+  raise is undone only at checkin.
+- shigoto's own processes (queues, stager, cron, pruner, heartbeat) stay out of
+  the sandbox even when it is shared, so they never see or run a test's jobs.
+  Run them from the test with `drain_queue/1`, which claims and completes them
+  in the sandbox, and set `{queues, []}` in the test config.
+- A worker's `perform/1` runs in a process of its own. With a shared checkout it
+  uses the sandbox too; with one that is not shared, what it reads and writes
+  is outside the sandbox, so check out shared for a worker that uses the
+  database. That holds for `perform_job/2` too.
+- Migrate before checking out: `shigoto_migration:up/1` inside the sandbox
+  is rolled back at checkin.
+- A transaction-level advisory lock is held until checkin. A unique insert, a
+  drained `global_concurrency/0` worker, `shigoto_cron:schedule_once/0` and
+  `shigoto_migration:up/1` take one, so another connection inserting the same
+  unique key waits for the test to end.
+- A unique insert opens a transaction. Two processes sharing the sandbox that
+  make one at the same time, or one that makes one while the owner is inside
+  `my_app_repo:transaction/1`, can raise `{kura_sandbox, overlapping_transactions}`.
+
 ## Testing Workers Directly
 
 For unit testing worker logic without the job queue:
