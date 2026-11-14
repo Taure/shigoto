@@ -372,7 +372,7 @@ keys_are_checked_without_being_shown() ->
     [
         begin
             set(Env),
-            {error, {invalid_encryption_key, Problem}} = shigoto_crypto:check_keys(),
+            {error, {invalid, _Setting, Problem}} = shigoto_crypto:check_keys(),
             Text = iolist_to_binary(io_lib:format("~0p", [Problem])),
             [?assertEqual(nomatch, binary:match(Text, Key)) || Key <- [Short, key(1), key(2)]]
         end
@@ -380,10 +380,7 @@ keys_are_checked_without_being_shown() ->
     ],
     set(#{encryption_keys => [key(1), Short]}),
     ?assertEqual(
-        {error,
-            {invalid_encryption_key, #{
-                setting => encryption_keys, position => 2, problem => {bytes, 16}
-            }}},
+        {error, {invalid, encryption_keys, #{position => 2, problem => {bytes, 16}}}},
         shigoto_crypto:check_keys()
     ),
     set(#{}),

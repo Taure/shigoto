@@ -794,7 +794,8 @@ test_dependency_policy_defaults_to_the_application_setting(_Config) ->
         ),
         application:set_env(shigoto, on_dependency_failure, sometimes),
         ?assertError(
-            {invalid_on_dependency_failure, sometimes}, shigoto_config:on_dependency_failure()
+            {shigoto_config, {invalid, on_dependency_failure, sometimes}},
+            shigoto_config:on_dependency_failure()
         )
     after
         application:unset_env(shigoto, on_dependency_failure)

@@ -160,8 +160,11 @@ sees ciphertext.
 
 The application does not start with a key that is not 32 bytes, a key listed
 twice, an unknown `encryption_write_format` or `encryption_read_formats`, a
-`workers` that is not a list of atoms, or an `instance` that is not lower-case
-letters, digits and `_`. The error names the setting and never contains a key.
+`workers` that is not a list of atoms, an `instance` that is not lower-case
+letters, digits and `_`, or any other setting it cannot run with. The error is
+`{shigoto_config, {invalid, Setting, Value}}`. It names the setting and never
+contains a key: a key is described by its position in the list and what is
+wrong with it.
 
 With a key configured, `shigoto_plaintext_jobs_accepted` is logged once per
 boot while `require_encrypted` is not set.

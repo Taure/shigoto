@@ -11,11 +11,12 @@ supervision tree, so it blocks the release's boot while it does. Worst case:
 - plus however long another node holds the migration advisory lock, since
   nodes that boot together migrate one at a time.
 
-Before any of that it checks the settings that are dangerous to get wrong
-(`shigoto_config:check/0`): an encryption key that is not 32 bytes or is
-listed twice, an unknown `encryption_write_format`, a malformed `instance` or
-`workers`. The application does not start with one of those, and the reason
-names the setting, never a key. Once per boot it logs
+Before any of that it checks every setting (`shigoto_config:check/0`): an
+encryption key that is not 32 bytes or is listed twice, an unknown
+`encryption_write_format`, a malformed `instance` or `workers`, an interval
+that is zero or negative. The application does not start with one of those,
+and the reason, `{shigoto_config, {invalid, Setting, Value}}`, names the
+setting, never a key. Once per boot it logs
 `shigoto_plaintext_jobs_accepted` while a key is configured and
 `require_encrypted` is not set, and `shigoto_shutdown_cut_short` when
 `kernel`'s `shutdown_timeout` is shorter than shigoto needs to stop

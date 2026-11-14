@@ -11,13 +11,16 @@ things in. Nothing here needs a change in a worker.
    after the upgrade: step 6.
 2. **Workers.** Set `workers` to the list of your worker, batch callback and
    cron worker modules. It is optional in 1.x and will be required in 2.0.
-3. **Settings are checked.** The application does not start with an
-   encryption key that is not 32 bytes, an unknown `encryption_write_format`
-   or `encryption_read_formats`, a `workers` that is not a list of modules, an
+3. **Settings are checked.** Every setting is checked before anything starts,
+   and the application does not start with one it cannot run with: a value of
+   the wrong type (`poll_interval` as a string), an interval or timeout that is
+   zero or negative, an encryption key that is not 32 bytes, an unknown
+   `encryption_write_format`, `encryption_read_formats` or
+   `on_dependency_failure`, a `workers` that is not a list of modules, an
    `instance` outside `[a-z0-9_]{1,32}`, or a `propagator` that is not a
-   module implementing `shigoto_propagator`. A setting of the wrong type
-   (`poll_interval` as a string, say) raises `{shigoto_config, {invalid,
-   Setting, Value}}` where it is read, instead of failing at a timer.
+   module implementing `shigoto_propagator`. The reason always has one shape,
+   `{shigoto_config, {invalid, Setting, Value}}`. In 1.10 such a setting failed
+   later, at a timer or in a statement.
 
 ## Deploy
 

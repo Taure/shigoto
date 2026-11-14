@@ -408,7 +408,8 @@ is_enabled() ->
 %%
 %% The answer names the setting, the position of the key and what is wrong with
 %% it, never the key.
--spec check_keys() -> ok | {error, term()}.
+-spec check_keys() ->
+    ok | {error, {invalid, encryption_key | encryption_keys, not_a_list | map()}}.
 check_keys() ->
     Single = application:get_env(shigoto, encryption_key, undefined),
     Listed = application:get_env(shigoto, encryption_keys, []),
@@ -420,24 +421,21 @@ check_keys() ->
         {Key, []} ->
             checked_keys(encryption_key, [Key]);
         {_, _NotAList} ->
-            {error, {invalid_encryption_key, #{setting => encryption_keys, problem => not_a_list}}}
+            {error, {invalid, encryption_keys, not_a_list}}
     end.
 
 checked_keys(Setting, Keys) ->
     Problems = [
-        #{setting => Setting, position => Position, problem => Problem}
+        #{position => Position, problem => Problem}
      || {Position, Key} <- lists:enumerate(Keys), Problem <- [key_problem(Key)], Problem =/= none
     ],
     case Problems of
         [Problem | _] ->
-            {error, {invalid_encryption_key, Problem}};
+            {error, {invalid, Setting, Problem}};
         [] ->
             case length(lists:usort([key_id(Key) || Key <- Keys])) =:= length(Keys) of
-                true ->
-                    ok;
-                false ->
-                    {error,
-                        {invalid_encryption_key, #{setting => Setting, problem => duplicate_key}}}
+                true -> ok;
+                false -> {error, {invalid, Setting, #{problem => duplicate_key}}}
             end
     end.
 

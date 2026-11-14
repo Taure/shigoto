@@ -174,7 +174,7 @@ current() ->
 
 -doc false.
 %% Whether a `propagator` setting names a module that implements the behaviour.
--spec check(term()) -> ok | {error, {invalid_propagator, term()}}.
+-spec check(term()) -> ok | {error, {invalid, propagator, term()}}.
 check(undefined) ->
     ok;
 check(Module) when is_atom(Module) ->
@@ -187,10 +187,10 @@ check(Module) when is_atom(Module) ->
         ]
     of
         [] -> ok;
-        _Missing -> {error, {invalid_propagator, Module}}
+        _Missing -> {error, {invalid, propagator, Module}}
     end;
 check(Other) ->
-    {error, {invalid_propagator, Other}}.
+    {error, {invalid, propagator, Other}}.
 
 %%----------------------------------------------------------------------
 %% Internal

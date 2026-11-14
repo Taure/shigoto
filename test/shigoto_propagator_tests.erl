@@ -96,11 +96,18 @@ an_attach_that_raises_attaches_nothing() ->
 the_setting_has_to_name_a_propagator() ->
     ?assertEqual(ok, shigoto_propagator:check(undefined)),
     ?assertEqual(ok, shigoto_propagator:check(shigoto_fake_propagator)),
-    ?assertEqual({error, {invalid_propagator, lists}}, shigoto_propagator:check(lists)),
+    ?assertEqual({error, {invalid, propagator, lists}}, shigoto_propagator:check(lists)),
     ?assertEqual(
-        {error, {invalid_propagator, shigoto_no_such_module}},
+        {error, {invalid, propagator, shigoto_no_such_module}},
         shigoto_propagator:check(shigoto_no_such_module)
     ),
-    ?assertEqual({error, {invalid_propagator, ~"mod"}}, shigoto_propagator:check(~"mod")),
+    ?assertEqual({error, {invalid, propagator, ~"mod"}}, shigoto_propagator:check(~"mod")),
+    application:set_env(shigoto, pool, some_pool),
     application:set_env(shigoto, propagator, lists),
-    ?assertEqual({error, {shigoto_config, {invalid_propagator, lists}}}, shigoto_config:check()).
+    try
+        ?assertEqual(
+            {error, {shigoto_config, {invalid, propagator, lists}}}, shigoto_config:check()
+        )
+    after
+        application:unset_env(shigoto, pool)
+    end.

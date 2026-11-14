@@ -839,17 +839,17 @@ a_bad_key_stops_the_boot_without_printing_it(_Config) ->
     application:set_env(shigoto, encryption_key, Short),
     {error, Reason} = application:ensure_all_started(shigoto),
     Text = iolist_to_binary(io_lib:format("~0tp", [Reason])),
-    ?assertNotEqual(nomatch, binary:match(Text, ~"invalid_encryption_key")),
+    ?assertNotEqual(nomatch, binary:match(Text, ~"{invalid,encryption_key,")),
     ?assertEqual(nomatch, binary:match(Text, Short)),
     application:unset_env(shigoto, encryption_key),
     application:set_env(shigoto, encryption_keys, [key(1), key(2), key(1)]),
     ?assertMatch(
-        {error, {shigoto_config, {invalid_encryption_key, #{problem := duplicate_key}}}},
+        {error, {shigoto_config, {invalid, encryption_keys, #{problem := duplicate_key}}}},
         shigoto_config:check()
     ),
     application:set_env(shigoto, encryption_keys, [key(1)]),
     application:set_env(shigoto, instance, ~"Not Valid"),
-    ?assertMatch({error, {shigoto_config, {invalid_instance, _}}}, shigoto_config:check()).
+    ?assertMatch({error, {shigoto_config, {invalid, instance, _}}}, shigoto_config:check()).
 
 %%----------------------------------------------------------------------
 %% Locks and notifications

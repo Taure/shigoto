@@ -53,7 +53,7 @@ pool() ->
             case application:get_env(shigoto, pool) of
                 {ok, Pool} when is_atom(Pool) -> Pool;
                 {ok, Pool} -> error({shigoto_config, {invalid, pool, Pool}});
-                undefined -> error({shigoto_config, {not_set, pool}})
+                undefined -> error({shigoto_config, {invalid, pool, undefined}})
             end
     end.
 
@@ -68,12 +68,12 @@ queues() ->
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
 poll_interval() ->
-    integer_setting(poll_interval, 5000).
+    positive_setting(poll_interval, 5000).
 
 -doc "Stager interval in milliseconds for surfacing newly-due scheduled/retryable jobs. Default: 1000.".
 -spec stage_interval() -> pos_integer().
 stage_interval() ->
-    integer_setting(stage_interval, 1000).
+    positive_setting(stage_interval, 1000).
 
 -doc """
 Testing mode for `insert/1,2` and `insert_all/1,2`. Default: `disabled` (normal
@@ -136,14 +136,14 @@ cron_entries() ->
     end.
 
 -doc "Days to keep completed/discarded jobs before archiving. Default: 14.".
--spec prune_after_days() -> pos_integer().
+-spec prune_after_days() -> non_neg_integer().
 prune_after_days() ->
-    integer_setting(prune_after_days, 14).
+    non_negative_setting(prune_after_days, 14).
 
 -doc "Days to keep archived jobs before permanent deletion. Default: 90.".
--spec archive_after_days() -> pos_integer().
+-spec archive_after_days() -> non_neg_integer().
 archive_after_days() ->
-    integer_setting(archive_after_days, 90).
+    non_negative_setting(archive_after_days, 90).
 
 -doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
 -spec notifier_config() -> map() | undefined.
@@ -155,9 +155,9 @@ Milliseconds to wait for in-flight jobs during shutdown. Default: 15000. A job
 still running after that is stopped and its claim given back: it is
 `available` again and the interrupted run uses no attempt.
 """.
--spec shutdown_timeout() -> pos_integer().
+-spec shutdown_timeout() -> non_neg_integer().
 shutdown_timeout() ->
-    integer_setting(shutdown_timeout, 15000).
+    non_negative_setting(shutdown_timeout, 15000).
 
 -doc """
 The longest the application can take to stop, in milliseconds: every queue
@@ -182,7 +182,7 @@ queue nor the caller that discarded the job.
 """.
 -spec on_discard_timeout() -> pos_integer().
 on_discard_timeout() ->
-    integer_setting(on_discard_timeout, 60000).
+    positive_setting(on_discard_timeout, 60000).
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].
@@ -203,18 +203,18 @@ encryption_key() ->
     case setting(encryption_key, undefined) of
         undefined -> undefined;
         Key when is_binary(Key) -> Key;
-        _NotAKey -> error({shigoto_config, {invalid_encryption_key, not_a_binary}})
+        _NotAKey -> error({shigoto_config, {invalid, encryption_key, not_a_binary}})
     end.
 
 -doc "Heartbeat interval in milliseconds for executing jobs. Default: 30000.".
 -spec heartbeat_interval() -> pos_integer().
 heartbeat_interval() ->
-    integer_setting(heartbeat_interval, 30000).
+    positive_setting(heartbeat_interval, 30000).
 
 -doc "Milliseconds between sweeps for stale executing jobs. Default: 60000.".
 -spec rescue_interval() -> pos_integer().
 rescue_interval() ->
-    integer_setting(rescue_interval, 60000).
+    positive_setting(rescue_interval, 60000).
 
 -doc """
 Seconds an executing job may go without a heartbeat before it counts as stale:
@@ -233,7 +233,7 @@ without it (the default), or be `cancel`led or `discard`ed in turn.
 on_dependency_failure() ->
     case application:get_env(shigoto, on_dependency_failure, run) of
         Policy when Policy =:= run; Policy =:= cancel; Policy =:= discard -> Policy;
-        Other -> error({invalid_on_dependency_failure, Other})
+        Other -> error({shigoto_config, {invalid, on_dependency_failure, Other}})
     end.
 
 -doc "Load shedding config. Default: undefined (disabled).".
@@ -265,7 +265,7 @@ encryption_keys() ->
     [
         case Key of
             _ when is_binary(Key) -> Key;
-            _NotAKey -> error({shigoto_config, {invalid_encryption_key, not_a_binary}})
+            _NotAKey -> error({shigoto_config, {invalid, encryption_keys, not_a_binary}})
         end
      || Key <- list_setting(encryption_keys)
     ].
@@ -310,7 +310,7 @@ read whichever is written. See the
 encryption_write_format() ->
     case application:get_env(shigoto, encryption_write_format, v1) of
         Format when Format =:= v1; Format =:= v2 -> Format;
-        Other -> error({shigoto_config, {invalid_encryption_write_format, Other}})
+        Other -> error({shigoto_config, {invalid, encryption_write_format, Other}})
     end.
 
 -doc """
@@ -398,14 +398,40 @@ notify_channel() ->
     end.
 
 -doc """
-Check the settings that are dangerous to get wrong, before anything starts.
+Check every setting, before anything starts.
 
-Answers `{error, {shigoto_config, Reason}}` for the first problem. `Reason`
-names the setting and what is wrong with it, never a key.
+Answers `{error, {shigoto_config, {invalid, Setting, Value}}}` for the first
+one the application cannot run with: a value of the wrong type, a time that is
+zero or negative, a name that is not one of the choices. `Value` is what was
+configured, except where that could be a secret: an encryption key is
+described by its position and what is wrong with it, a `notifier` that is not
+a map as `not_a_map`.
+
+The readers of this module raise the same term, as
+`error({shigoto_config, {invalid, Setting, Value}})`, when a setting is changed
+to something invalid while the application runs.
 """.
--spec check() -> ok | {error, {shigoto_config, term()}}.
+-spec check() -> ok | {error, {shigoto_config, {invalid, atom(), term()}}}.
 check() ->
     try
+        _ = pool(),
+        _ = queues(),
+        _ = fanout_queues(),
+        _ = cron_entries(),
+        _ = middleware(),
+        _ = queue_weights(),
+        _ = fair_queues(),
+        _ = notifier_config(),
+        _ = load_shedding(),
+        _ = poll_interval(),
+        _ = stage_interval(),
+        _ = heartbeat_interval(),
+        _ = rescue_interval(),
+        _ = shutdown_timeout(),
+        _ = on_discard_timeout(),
+        _ = prune_after_days(),
+        _ = archive_after_days(),
+        _ = on_dependency_failure(),
         ok = checked(shigoto_crypto:check_keys()),
         _ = encryption_write_format(),
         ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
@@ -416,11 +442,12 @@ check() ->
         ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10))),
         ok = checked(shigoto_propagator:check(setting(propagator, undefined)))
     catch
-        error:{shigoto_config, Reason} -> {error, {shigoto_config, Reason}}
+        error:{shigoto_config, {invalid, Setting, Value}} ->
+            {error, {shigoto_config, {invalid, Setting, Value}}}
     end.
 
 checked(ok) -> ok;
-checked({error, Reason}) -> error({shigoto_config, Reason}).
+checked({error, {invalid, _Setting, _Value} = Reason}) -> error({shigoto_config, Reason}).
 
 %% A setting as it was configured, which is not yet known to be of its type.
 -spec setting(atom(), term()) -> term().
@@ -429,10 +456,17 @@ setting(Key, Default) ->
 
 %% A setting of the wrong type never worked: it failed further in, at a timer
 %% or in a statement. Here it fails by name.
--spec integer_setting(atom(), integer()) -> integer().
-integer_setting(Key, Default) ->
+-spec positive_setting(atom(), pos_integer()) -> pos_integer().
+positive_setting(Key, Default) ->
     case setting(Key, Default) of
-        Value when is_integer(Value) -> Value;
+        Value when is_integer(Value), Value > 0 -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
+
+-spec non_negative_setting(atom(), non_neg_integer()) -> non_neg_integer().
+non_negative_setting(Key, Default) ->
+    case setting(Key, Default) of
+        Value when is_integer(Value), Value >= 0 -> Value;
         Other -> error({shigoto_config, {invalid, Key, Other}})
     end.
 
@@ -454,33 +488,33 @@ list_setting(Key) ->
 read_formats_checked(Formats) when is_list(Formats), Formats =/= [] ->
     case [Format || Format <- Formats, Format =/= v1, Format =/= v2] of
         [] -> ok;
-        _ -> {error, {invalid_encryption_read_formats, Formats}}
+        _ -> {error, {invalid, encryption_read_formats, Formats}}
     end;
 read_formats_checked(Formats) ->
-    {error, {invalid_encryption_read_formats, Formats}}.
+    {error, {invalid, encryption_read_formats, Formats}}.
 
 boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
-boolean_checked(Setting, Value) -> {error, {not_a_boolean, Setting, Value}}.
+boolean_checked(Setting, Value) -> {error, {invalid, Setting, Value}}.
 
 workers_checked(undefined) ->
     ok;
 workers_checked(Workers) when is_list(Workers) ->
     case lists:all(fun erlang:is_atom/1, Workers) of
         true -> ok;
-        false -> {error, {invalid_workers, not_modules}}
+        false -> {error, {invalid, workers, Workers}}
     end;
-workers_checked(_Workers) ->
-    {error, {invalid_workers, not_a_list}}.
+workers_checked(Workers) ->
+    {error, {invalid, workers, Workers}}.
 
 instance_checked(undefined) ->
     ok;
 instance_checked(Instance) when is_binary(Instance) ->
     case re:run(Instance, ~"^[a-z0-9_]{1,32}$", [dollar_endonly, {capture, none}]) of
         match -> ok;
-        nomatch -> {error, {invalid_instance, Instance}}
+        nomatch -> {error, {invalid, instance, Instance}}
     end;
 instance_checked(Instance) ->
-    {error, {invalid_instance, Instance}}.
+    {error, {invalid, instance, Instance}}.
 
 interval_checked(_Setting, Ms) when is_integer(Ms), Ms >= 0 -> ok;
-interval_checked(Setting, Ms) -> {error, {not_milliseconds, Setting, Ms}}.
+interval_checked(Setting, Ms) -> {error, {invalid, Setting, Ms}}.
