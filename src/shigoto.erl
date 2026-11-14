@@ -276,7 +276,11 @@ cancel_by(Filters) ->
 cancel_by(Pool, Filters) ->
     shigoto_repo:cancel_by(Pool, Filters).
 
--doc "Retry a discarded or cancelled job. Uses the active transaction's pool, or the configured pool.".
+-doc """
+Retry a discarded or cancelled job. Uses the active transaction's pool, or the
+configured pool. A job that ended while it waited on other jobs waits on them
+again: see the Retrying section of the Job Dependencies guide.
+""".
 -spec retry(integer()) -> ok | {error, term()}.
 retry(JobId) ->
     retry(txn_pool(), JobId).

@@ -691,6 +691,10 @@ Retry a discarded or cancelled job by resetting to available.
 A job in a batch is taken out of the batch's discarded count, and is counted
 again when it ends. A batch that has already run its callback does not run it
 a second time.
+
+A job that ended while it waited on other jobs still waits on them: retried, it
+runs once they have completed, and follows its `on_dependency_failure` for one
+that is still discarded or cancelled.
 """.
 -spec retry_job(atom(), integer()) -> ok | {error, term()}.
 retry_job(Pool, JobId) ->
@@ -1193,6 +1197,11 @@ try_advisory_xact_lock(Pool, Key) ->
 %% them meanwhile: an UPDATE that waited for a row lock re-checks only its own
 %% WHERE clause against the new row.
 %%
+%% Only a job that is released to run stops waiting on the failed job. One
+%% that is cancelled or discarded for it, or was ended some other way while it
+%% waited, keeps the id in `depends_on`: retried, it waits on that job again,
+%% and the sweep applies its policy again if the job is still failed.
+%%
 %% In the same statement each batch counts its jobs that ended: the `done`
 %% rows now discarded or cancelled (`count_batches`, off for a statement whose
 %% `done` rows had ended before it ran) and every cascaded one. `own => ids`
@@ -1222,7 +1231,6 @@ with_dependents(Done, DefaultPolicy, #{own := Own, count_batches := CountOwn}) -
             state = CASE f.policy WHEN 'cancel' THEN 'cancelled' ELSE 'discarded' END,
             cancelled_at = CASE f.policy WHEN 'cancel' THEN now() ELSE d.cancelled_at END,
             discarded_at = CASE f.policy WHEN 'cancel' THEN d.discarded_at ELSE now() END,
-            depends_on = ARRAY(SELECT unnest(d.depends_on) EXCEPT SELECT id FROM failed),
             errors = $errors
           FROM failed f WHERE d.id = f.id AND f.policy IS NOT NULL
           AND d.state IN ('available', 'retryable')
@@ -1236,6 +1244,7 @@ with_dependents(Done, DefaultPolicy, #{own := Own, count_batches := CountOwn}) -
               WHERE p.id = ANY(d.depends_on) AND p.id IN (SELECT id FROM failed)
             )
           WHERE d.depends_on && ARRAY(SELECT id FROM failed) AND d.depends_on <> '{}'
+          AND d.state IN ('available', 'retryable')
           AND d.id NOT IN (SELECT id FROM failed)
         ), batch_counts AS (
           UPDATE shigoto_batches b SET discarded_jobs = b.discarded_jobs + ended.jobs

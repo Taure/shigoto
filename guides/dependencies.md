@@ -120,6 +120,25 @@ exists, and releases them the way the dependency would have: with the result,
 or by `on_dependency_failure`. A job waiting on a deleted job runs with `null`
 for it. Such a job waits at most one `rescue_interval` (default 60 s).
 
+## Retrying
+
+A job that was cancelled or discarded because a dependency failed still names
+that dependency. `shigoto:retry/1` puts it back in the queue, where it waits on
+it again:
+
+- Retry the dependency too (first, or in the same `shigoto:transaction/1`) and
+  the job waits for it, then runs with its result.
+- Leave the dependency failed and the job follows its `on_dependency_failure`
+  again, within one `rescue_interval`: `cancel` or `discard` end it again, with
+  a second `dependency_failed` entry in `errors`; `run` releases it.
+
+The same holds for a job you cancelled yourself while it was waiting: retried,
+it waits on whatever it was still waiting on, and follows its policy for the
+ones that have failed since.
+
+A job released to run without a failed dependency (`run`) has stopped waiting
+on it. Retrying the dependency afterwards does not hold that job back.
+
 ## Validation
 
 Shigoto validates dependencies on insert:

@@ -68,6 +68,9 @@ the application does with it.
     losing_every_connection_loses_no_job/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
+    a_retried_child_waits_for_its_retried_parent/1,
+    a_retried_child_of_a_parent_still_failed_fails_again/1,
+    a_job_cancelled_while_waiting_follows_its_failed_dependency_when_retried/1,
     two_parents_failing_at_once_discard_their_child_once/1,
     a_child_cancelled_while_its_parent_fails_ends_once/1,
     two_sweeps_at_once_follow_a_failed_dependency_once/1,
@@ -157,6 +160,9 @@ all() ->
         losing_every_connection_loses_no_job,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
+        a_retried_child_waits_for_its_retried_parent,
+        a_retried_child_of_a_parent_still_failed_fails_again,
+        a_job_cancelled_while_waiting_follows_its_failed_dependency_when_retried,
         two_parents_failing_at_once_discard_their_child_once,
         a_child_cancelled_while_its_parent_fails_ends_once,
         two_sweeps_at_once_follow_a_failed_dependency_once,
@@ -1525,6 +1531,64 @@ a_discarded_parent_follows_each_childs_policy(_Config) ->
     ok = idle(~"policy-cancel", 300),
     ok = idle(~"policy-grandchild", 0),
     ok = idle(~"policy-discard", 0).
+
+a_retried_child_waits_for_its_retried_parent(_Config) ->
+    Parent = enqueue(~"retried-parent", #{max_attempts => 1}),
+    Child = enqueue(
+        ~"retried-child", #{depends_on => [Parent], on_dependency_failure => cancel}
+    ),
+    instruct(performing(~"retried-parent"), {return, {error, gone}}),
+    _ = await(Parent, ~"discarded"),
+    ?assertMatch(#{attempt := 0, depends_on := [Parent]}, await(Child, ~"cancelled")),
+    ok = shigoto:retry(Parent),
+    ok = shigoto:retry(Child),
+    %% The parent runs again; the child waits for it, through several sweeps.
+    ParentWorker = performing(~"retried-parent"),
+    ok = idle(~"retried-child", 700),
+    ?assertMatch(#{state := ~"available", depends_on := [Parent]}, row(Child)),
+    instruct(ParentWorker, {return, {ok, #{~"rows" => 3}}}),
+    {ChildWorker, Args} = performing_with_args(~"retried-child"),
+    ?assertEqual(#{Parent => #{~"rows" => 3}}, maps:get(deps_results, Args)),
+    instruct(ChildWorker, {return, ok}),
+    _ = await(Child, ~"completed").
+
+a_retried_child_of_a_parent_still_failed_fails_again(_Config) ->
+    BatchId = open_batch(~"refailed-open"),
+    Parent = enqueue(~"refailed-parent", #{max_attempts => 1}),
+    Child = enqueue(
+        ~"refailed-child",
+        #{depends_on => [Parent], on_dependency_failure => discard, batch => BatchId}
+    ),
+    instruct(performing(~"refailed-parent"), {return, {error, gone}}),
+    _ = await(Parent, ~"discarded"),
+    _ = await(Child, ~"discarded"),
+    ?assertMatch({ok, #{discarded_jobs := 1}}, shigoto:get_batch(BatchId)),
+    ok = shigoto:retry(Child),
+    %% Its parent is as failed as it was: the next sweep discards it again.
+    ok = wait_for(fun() -> length(errors(row(Child))) =:= 2 end),
+    Row = await(Child, ~"discarded"),
+    ?assertMatch(
+        [#{~"error" := ~"dependency_failed"}, #{~"error" := ~"dependency_failed"}], errors(Row)
+    ),
+    ?assertMatch(#{attempt := 0, depends_on := [Parent]}, Row),
+    ?assertMatch({ok, #{discarded_jobs := 1}}, shigoto:get_batch(BatchId)),
+    ok = idle(~"refailed-child", 300).
+
+a_job_cancelled_while_waiting_follows_its_failed_dependency_when_retried(_Config) ->
+    Parent = enqueue(~"hand-parent", #{max_attempts => 1}),
+    Child = enqueue(~"hand-child", #{depends_on => [Parent], on_dependency_failure => cancel}),
+    ParentWorker = performing(~"hand-parent"),
+    ok = shigoto:cancel(Child),
+    _ = await(Child, ~"cancelled"),
+    instruct(ParentWorker, {return, {error, gone}}),
+    _ = await(Parent, ~"discarded"),
+    %% Cancelled by hand, it was not waiting when its parent failed. Retried,
+    %% it waits on that parent again, and goes the way its policy says.
+    ok = shigoto:retry(Child),
+    ok = wait_for(fun() -> errors(row(Child)) =/= [] end),
+    ?assertMatch(#{state := ~"cancelled", attempt := 0}, row(Child)),
+    ?assertMatch([#{~"error" := ~"dependency_failed"}], errors(row(Child))),
+    ok = idle(~"hand-child", 300).
 
 %% Each of the next three cases has two statements cascade to one waiting job
 %% at once. The case holds the job's row lock until both wait for it, so the
