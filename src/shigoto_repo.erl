@@ -220,7 +220,7 @@ complete_job(Pool, JobId, Result) ->
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE done.id = ANY(d.depends_on)
+          FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
         SELECT batch_id FROM done
         """,
@@ -252,7 +252,9 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE done.state = 'discarded' AND done.id = ANY(d.depends_on)
+          FROM done
+          WHERE done.state = 'discarded'
+          AND d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
         SELECT * FROM done
         """,
@@ -279,7 +281,7 @@ discard_job(Pool, JobId) ->
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE done.id = ANY(d.depends_on)
+          FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
         SELECT id FROM done
         """,
@@ -301,7 +303,7 @@ cancel_job(Pool, JobId) ->
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE done.id = ANY(d.depends_on)
+          FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
         SELECT id FROM done
         """,
@@ -481,7 +483,7 @@ resolve_dependencies(Pool, FinishedJobId) ->
             "deps_results = deps_results || jsonb_build_object(\n"
             "  $1::text, (SELECT result FROM shigoto_jobs WHERE id = $1)\n"
             ")\n"
-            "WHERE $1 = ANY(depends_on)"
+            "WHERE depends_on @> ARRAY[$1::bigint] AND depends_on <> '{}'"
         >>,
     case query(Pool, SQL, [FinishedJobId]) of
         #{num_rows := Count} -> {ok, Count};
