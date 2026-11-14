@@ -27,10 +27,16 @@ things in. Nothing here needs a change in a worker.
 4. **Migration.** `shigoto_migration:up/1` runs on boot as before and takes
    the schema to version 7: a partial index for claiming replaces the old one,
    two small partial indexes are added, and `shigoto_jobs` gets the nullable
-   column `on_dependency_failure`. On a jobs table of many millions of rows,
-   create the indexes with `CREATE INDEX CONCURRENTLY` first; the statements
-   are in `m:shigoto_migration`. 1.10 nodes keep working against a version 7
-   schema, so nodes can be upgraded one at a time.
+   column `on_dependency_failure`. It builds the indexes with the jobs table
+   locked, so no node claims or inserts until it is done: unnoticed on a small
+   table, minutes on one of many millions of rows. For such a table, build the
+   three indexes with `CREATE INDEX CONCURRENTLY` before you deploy; the
+   statements, and the lock each step takes, are in `shigoto_migration:up/1`.
+   The migration then finds them and only changes the catalog. A concurrent
+   build that failed leaves an invalid index: the migration answers
+   `{error, {invalid_index, Names}}`, changes nothing, and the node starts with
+   its queues held back until you drop and rebuild it. 1.10 nodes keep working
+   against a version 7 schema, so nodes can be upgraded one at a time.
 5. **Database role.** Run the migration as the role that owns the tables. See
    [Security](security.md#the-database-role).
 

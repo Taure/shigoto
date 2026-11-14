@@ -31,6 +31,8 @@
     test_migration_does_not_queue_behind_a_reader/1,
     test_migration_succeeds_under_steady_writes/1,
     test_comment_with_a_trailing_newline_is_not_a_version/1,
+    test_migration_keeps_the_indexes_an_operator_built/1,
+    test_migration_refuses_an_index_whose_build_failed/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
     test_worker_inherits_logger_metadata/1,
@@ -100,6 +102,8 @@ all() ->
         test_migration_does_not_queue_behind_a_reader,
         test_migration_succeeds_under_steady_writes,
         test_comment_with_a_trailing_newline_is_not_a_version,
+        test_migration_keeps_the_indexes_an_operator_built,
+        test_migration_refuses_an_index_whose_build_failed,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
         test_worker_inherits_logger_metadata,
@@ -260,6 +264,115 @@ test_migration_behind_a_reader_times_out(_Config) ->
         #{rows := [#{version := ~"shigoto 7"}]},
         shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
+
+test_migration_keeps_the_indexes_an_operator_built(_Config) ->
+    ok = as_version_6(),
+    _ = [
+        #{} = shigoto_db:query(?POOL, Build, [])
+     || Build <- [
+            <<
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx "
+                "ON shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')"
+            >>,
+            <<
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_waiting_on_idx "
+                "ON shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available', 'retryable')"
+            >>,
+            <<
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_batches_active_idx "
+                "ON shigoto_batches (id) WHERE state = 'active'"
+            >>
+        ]
+    ],
+    Built = version_7_indexes(),
+    ?assertMatch([{_, true}, {_, true}, {_, true}], [Index || {_Name, Index} <- Built]),
+    ok = shigoto_migration:up(?POOL),
+    %% The same indexes, not ones built again under the table lock.
+    ?assertEqual(Built, version_7_indexes()),
+    ?assertNot(index_exists(~"shigoto_jobs_queue_state_idx")),
+    ?assertEqual(~"shigoto 7", schema_comment()).
+
+test_migration_refuses_an_index_whose_build_failed(_Config) ->
+    ok = as_version_6(),
+    _ = [
+        {ok, _} = shigoto_repo:insert_job(?POOL, #{worker => shigoto_test_worker, args => #{}}, #{})
+     || _ <- [1, 2]
+    ],
+    %% A concurrent build that fails leaves its index behind, marked invalid.
+    %% Two jobs in one queue fail a unique one.
+    ?assertMatch(
+        {error, _},
+        shigoto_db:query(
+            ?POOL,
+            <<
+                "CREATE UNIQUE INDEX CONCURRENTLY shigoto_jobs_claimable_idx "
+                "ON shigoto_jobs (queue) WHERE state IN ('available', 'retryable')"
+            >>,
+            []
+        )
+    ),
+    ?assertMatch([{~"shigoto_jobs_claimable_idx", {_, false}}], version_7_indexes()),
+    try
+        ?assertEqual(
+            {error, {invalid_index, [~"shigoto_jobs_claimable_idx"]}},
+            shigoto_migration:up(?POOL)
+        ),
+        %% Nothing ran: the index claims use is still there.
+        ?assert(index_exists(~"shigoto_jobs_queue_state_idx")),
+        ?assertEqual(~"shigoto 6", schema_comment()),
+        %% A boot does not sleep between attempts on it.
+        {BootMicros, Current} = timer:tc(fun() -> shigoto_migrator:boot(?POOL) end),
+        ?assertNot(Current),
+        ?assert(BootMicros < 1000000)
+    after
+        #{} = shigoto_db:query(?POOL, ~"DROP INDEX IF EXISTS shigoto_jobs_claimable_idx", []),
+        true = shigoto_migrator:boot(?POOL)
+    end,
+    ?assertMatch(
+        [{_, {_, true}}, {_, {_, true}}, {_, {_, true}}], version_7_indexes()
+    ),
+    ?assertNot(index_exists(~"shigoto_jobs_queue_state_idx")),
+    ?assertEqual(~"shigoto 7", schema_comment()).
+
+%% The schema a 1.10 node left: version 7's indexes and column gone, the claim
+%% index version 7 drops back in place.
+as_version_6() ->
+    _ = [
+        #{} = shigoto_db:query(?POOL, SQL, [])
+     || SQL <- [
+            ~"DROP INDEX IF EXISTS shigoto_jobs_claimable_idx",
+            ~"DROP INDEX IF EXISTS shigoto_jobs_waiting_on_idx",
+            ~"DROP INDEX IF EXISTS shigoto_batches_active_idx",
+            <<
+                "CREATE INDEX IF NOT EXISTS shigoto_jobs_queue_state_idx "
+                "ON shigoto_jobs (queue, state, scheduled_at) WHERE state = 'available'"
+            >>,
+            ~"ALTER TABLE shigoto_jobs DROP COLUMN IF EXISTS on_dependency_failure",
+            ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 6'"
+        ]
+    ],
+    ok.
+
+version_7_indexes() ->
+    #{rows := Rows} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT c.relname::text AS name, c.oid::bigint AS oid, i.indisvalid AS valid
+        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname IN (
+            'shigoto_jobs_claimable_idx', 'shigoto_jobs_waiting_on_idx', 'shigoto_batches_active_idx'
+        )
+        ORDER BY c.relname
+        """,
+        []
+    ),
+    [{Name, {Oid, Valid}} || #{name := Name, oid := Oid, valid := Valid} <- Rows].
+
+index_exists(Name) ->
+    #{rows := [#{found := Found}]} = shigoto_db:query(
+        ?POOL, ~"SELECT to_regclass($1) IS NOT NULL AS found", [Name]
+    ),
+    Found.
 
 test_newer_schema_is_left_alone(_Config) ->
     #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 999'", []),

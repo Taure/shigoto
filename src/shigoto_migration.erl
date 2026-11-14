@@ -14,6 +14,10 @@ Migrations are idempotent and safe to run multiple times.
 %% The newest vN_statements/0. A CT case fails when a version is added without
 %% raising this.
 -define(SCHEMA_VERSION, 7).
+%% The indexes version 7 builds, which an operator may have built first.
+-define(BUILT_INDEXES, [
+    ~"shigoto_jobs_claimable_idx", ~"shigoto_jobs_waiting_on_idx", ~"shigoto_batches_active_idx"
+]).
 
 -doc """
 Create or update the shigoto tables.
@@ -36,22 +40,51 @@ it. Run `up/1` once as the table owner to record the version. A schema migrated
 by shigoto 1.9.x has no comment and not that column, so it is migrated like any
 older one, which takes the table owner.
 
-Version 7 builds one partial index on `shigoto_jobs` and drops the one it
-replaces, holding the table lock while it does: the build reads the whole table
-and indexes only the rows waiting to run. On a table of many millions of rows,
-run `CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx ON
-shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')`
-by hand first; the migration then finds it and skips the build. It builds a
-second, small partial index the same way, `shigoto_jobs_waiting_on_idx ON
-shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available',
-'retryable')` (another read of the table under the same lock; create it by hand
-first as well), and `shigoto_batches_active_idx ON shigoto_batches (id) WHERE
-state = 'active'`, which takes a SHARE lock on `shigoto_batches` while it reads
-that table: batch counts wait, jobs do not. Version 7 also
-adds the nullable `shigoto_jobs.on_dependency_failure` column, which rewrites
-nothing. Nodes still on the previous version keep working against a version 7
-schema. This version's statements also run against a version 6 one, where the
-only thing refused is inserting a job that sets `on_dependency_failure`.
+Version 7 adds three partial indexes, drops the claim index the first of them
+replaces, and adds the nullable `shigoto_jobs.on_dependency_failure` column.
+What each statement holds, all of it inside the one transaction that already
+has `shigoto_jobs` in ACCESS EXCLUSIVE mode (below), so until it commits no
+node claims or inserts:
+
+| Statement | Lock | Work |
+|---|---|---|
+| `CREATE INDEX shigoto_jobs_claimable_idx ON shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')` | SHARE on `shigoto_jobs` | reads the whole table, indexes the waiting rows |
+| `DROP INDEX shigoto_jobs_queue_state_idx` | ACCESS EXCLUSIVE on `shigoto_jobs` | catalog only |
+| `ALTER TABLE shigoto_jobs ADD COLUMN on_dependency_failure TEXT` | ACCESS EXCLUSIVE on `shigoto_jobs` | catalog only, no rewrite |
+| `CREATE INDEX shigoto_jobs_waiting_on_idx ON shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available', 'retryable')` | SHARE on `shigoto_jobs` | reads the whole table again |
+| `CREATE INDEX shigoto_batches_active_idx ON shigoto_batches (id) WHERE state = 'active'` | SHARE on `shigoto_batches` | reads that table; batch counts wait, jobs do not |
+
+The two reads of `shigoto_jobs` are what takes time: on a table of many
+millions of rows, minutes during which every node waits. To migrate such a
+table without that, build the three indexes first, outside any transaction, as
+the table owner:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx
+  ON shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_waiting_on_idx
+  ON shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available', 'retryable');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_batches_active_idx
+  ON shigoto_batches (id) WHERE state = 'active';
+```
+
+A concurrent build takes SHARE UPDATE EXCLUSIVE, which claims and inserts do
+not wait for. The migration then finds the indexes, builds nothing, and holds
+its lock only for the catalog changes.
+
+A concurrent build that fails or is cancelled leaves its index behind, marked
+invalid: it has the name and is never used. The migration looks for that before
+it changes anything. With one of the three invalid it logs
+`shigoto_migration_invalid_index`, answers `{error, {invalid_index, Names}}`
+and leaves the schema as it was, old claim index included, so nodes on the
+previous version keep claiming as before. `DROP INDEX CONCURRENTLY` the index,
+build it again, and the next retry migrates. (It does not rebuild the index
+itself: whoever built it concurrently chose not to hold the table lock for a
+build.)
+
+Nodes still on the previous version keep working against a version 7 schema.
+This version's statements also run against a version 6 one, where the only
+thing refused is inserting a job that sets `on_dependency_failure`.
 
 Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
 `shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
@@ -96,6 +129,7 @@ locked(Pool) ->
                     ok;
                 false ->
                     lock_tables(Pool),
+                    built_or_missing(Pool),
                     answered(
                         run(
                             Pool,
@@ -110,6 +144,7 @@ locked(Pool) ->
     catch
         throw:{?MODULE, lock_timeout} -> {error, lock_timeout};
         throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
+        throw:{?MODULE, {invalid_index, _} = Invalid} -> {error, Invalid};
         throw:{?MODULE, Reason} -> {error, shigoto_db:reduced(Reason)};
         error:{shigoto_db, Reason} -> {error, Reason}
     end.
@@ -206,6 +241,40 @@ lock_tables(Pool) ->
                 [] -> ok;
                 Tables -> answered(shigoto_db:query(Pool, lock_statement(Tables), []))
             end;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% `CREATE INDEX IF NOT EXISTS` is satisfied by the name alone. An index left
+%% behind by a concurrent build that failed has the name and is never used, so
+%% building on it would drop the index claims use and leave them a table scan.
+%% Read with the table locked: a concurrent build still running holds a lock
+%% the migration waits for, so an index that is invalid here is one whose build
+%% failed (on `shigoto_batches`, which is not locked, possibly one still running).
+built_or_missing(Pool) ->
+    SQL =
+        ~"""
+        SELECT c.relname::text AS name
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema() AND c.relname = ANY($1::text[])
+        AND NOT i.indisvalid
+        ORDER BY c.relname
+        """,
+    case shigoto_db:query(Pool, SQL, [?BUILT_INDEXES]) of
+        #{rows := []} ->
+            ok;
+        #{rows := Rows} ->
+            Invalid = [Name || #{name := Name} <- Rows],
+            ?LOG_ERROR(#{
+                msg => ~"shigoto_migration_invalid_index",
+                pool => Pool,
+                indexes => Invalid,
+                action =>
+                    ~"DROP INDEX CONCURRENTLY each one, build it again with CREATE INDEX CONCURRENTLY, then run the migration"
+            }),
+            throw({?MODULE, {invalid_index, Invalid}});
         {error, Reason} ->
             throw({?MODULE, Reason})
     end.
