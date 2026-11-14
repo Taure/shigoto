@@ -228,6 +228,10 @@ runs it this happens at once; from another node it happens at that node's next
 heartbeat, so within `heartbeat_interval`. `perform/1` may be cut off at any
 point, like any other crash, and the job is not retried.
 
+Answers `ok` also when there is nothing to cancel: no such job, or one that
+has already finished. `[shigoto, job, cancelled]` is only emitted for a job
+this call cancelled, with that job's worker and queue.
+
 Not transaction-aware: the process stop and `job_cancelled` telemetry fire
 immediately, so this always uses the configured pool rather than an enclosing
 `transaction/1,2` pool.
@@ -239,18 +243,18 @@ cancel(JobId) ->
 -doc "Cancel a job by ID on the given pool. See `cancel/1`.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.
 cancel(Pool, JobId) ->
-    Result = shigoto_repo:cancel_job(Pool, JobId),
-    case Result of
-        ok ->
+    case shigoto_repo:cancelled_job(Pool, JobId) of
+        {ok, {cancelled, Job}} ->
             _ = [
                 shigoto_executor:stop(Executor, cancelled)
              || Executor <- shigoto_executor:running(JobId)
             ],
-            shigoto_telemetry:job_cancelled(#{id => JobId, worker => unknown, queue => unknown});
-        _ ->
-            ok
-    end,
-    Result.
+            shigoto_telemetry:job_cancelled(Job);
+        {ok, unchanged} ->
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 -doc "Cancel available or retryable jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(map()) -> {ok, non_neg_integer()} | {error, term()}.

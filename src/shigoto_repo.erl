@@ -14,6 +14,7 @@ for safe multi-node job claiming.
     fail_job/4,
     discard_job/2,
     cancel_job/2,
+    cancelled_job/2,
     cancel_by/2,
     snooze_job/3,
     retry_job/2,
@@ -485,6 +486,17 @@ still finish.
 """.
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
+    case cancelled_job(Pool, JobId) of
+        {ok, _Outcome} -> ok;
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+`cancel_job/2`, answering what it did: `{cancelled, Job}` with the row as it is
+now, or `unchanged` when there is no such job or it had already finished.
+""".
+-spec cancelled_job(atom(), integer()) -> {ok, {cancelled, map()} | unchanged} | {error, term()}.
+cancelled_job(Pool, JobId) ->
     SQL = with_dependents(
         ~"""
         WITH RECURSIVE done AS (
@@ -496,8 +508,14 @@ cancel_job(Pool, JobId) ->
         ~"$2"
     ),
     case query(Pool, SQL, [JobId, default_policy()]) of
-        #{rows := Rows} -> ended(Pool, Rows);
-        {error, _} = Err -> Err
+        #{rows := Rows} ->
+            ok = ended(Pool, Rows),
+            case moved(Rows) of
+                {[Job], _Cascaded} -> {ok, {cancelled, Job}};
+                {[], _Cascaded} -> {ok, unchanged}
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 -doc """
