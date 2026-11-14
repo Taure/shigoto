@@ -25,7 +25,7 @@
 %%
 %% All locks are transaction-scoped: call these inside `shigoto_db:transaction/2`.
 
--export([try_xact/2, acquire_xact/2, acquire_xact/3]).
+-export([try_xact/2, acquire_xact/2, acquire_xact/3, statement/2]).
 
 -doc """
 Take a lock without waiting: `true` when this transaction holds it, `false`
@@ -77,6 +77,11 @@ tried(Pool, Keys) ->
         {error, _} = Failed -> Failed
     end.
 
+-doc """
+The statement that takes every lock in `Keys`, in that order, and its
+parameters, for an installation named `Instance` or for one without a name.
+""".
+-spec statement(binary() | undefined, [integer(), ...]) -> {binary(), [integer(), ...]}.
 statement(undefined, Keys) ->
     Calls = [
         [~"pg_try_advisory_xact_lock($", integer_to_binary(N), ~")"]

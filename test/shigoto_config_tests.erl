@@ -32,7 +32,9 @@
     advisory_lock_timeout,
     notify_min_interval,
     on_dependency_failure,
-    propagator
+    propagator,
+    testing,
+    testing_confirm_no_persistence
 ]).
 
 config_test_() ->
@@ -46,7 +48,16 @@ config_test_() ->
         fun middleware_has_to_be_funs_of_two/0,
         fun every_setting_is_checked_before_anything_starts/0,
         fun a_time_that_is_zero_or_negative_is_refused_where_it_is_read/0,
-        fun a_refused_key_is_named_by_its_position/0
+        fun a_refused_key_is_named_by_its_position/0,
+        fun every_default_is_the_documented_one/0,
+        fun a_setting_is_read_as_configured/0,
+        fun a_setting_read_leniently_falls_back/0,
+        fun the_smallest_value_of_a_setting_is_accepted/0,
+        fun a_testing_mode_needs_its_confirmation/0,
+        fun the_shutdown_budget_counts_every_queue/0,
+        fun a_job_is_stale_after_two_heartbeats/0,
+        fun an_instance_names_its_own_channel/0,
+        fun a_complete_configuration_passes_the_check/0
     ]}.
 
 unset() ->
@@ -82,7 +93,10 @@ a_setting_of_the_wrong_type_fails_by_name() ->
         {shigoto_config, {invalid, notifier, not_a_map}}, shigoto_config:notifier_config()
     ),
     application:set_env(shigoto, repo, ~"my_repo"),
-    ?assertError({shigoto_config, {invalid, repo, ~"my_repo"}}, shigoto_config:pool()).
+    ?assertError({shigoto_config, {invalid, repo, ~"my_repo"}}, shigoto_config:pool()),
+    application:unset_env(shigoto, repo),
+    application:set_env(shigoto, pool, ~"my_pool"),
+    ?assertError({shigoto_config, {invalid, pool, ~"my_pool"}}, shigoto_config:pool()).
 
 a_pool_that_is_not_set_fails_by_name() ->
     ?assertError({shigoto_config, {invalid, pool, undefined}}, shigoto_config:pool()),
@@ -166,6 +180,7 @@ every_setting_is_checked_before_anything_starts() ->
         {workers, a_module},
         {workers, [~"a_module"]},
         {instance, ~"Not Valid"},
+        {instance, billing},
         {advisory_lock_timeout, -1},
         {notify_min_interval, soon},
         {on_dependency_failure, sometimes},
@@ -185,6 +200,11 @@ every_setting_is_checked_before_anything_starts() ->
     application:set_env(shigoto, notifier, [{password, ~"secret"}]),
     ?assertEqual({error, {shigoto_config, {invalid, notifier, not_a_map}}}, shigoto_config:check()),
     application:unset_env(shigoto, notifier),
+    application:set_env(shigoto, load_shedding, [{max_in_flight, 10}]),
+    ?assertEqual(
+        {error, {shigoto_config, {invalid, load_shedding, not_a_map}}}, shigoto_config:check()
+    ),
+    application:unset_env(shigoto, load_shedding),
     application:unset_env(shigoto, pool),
     ?assertEqual({error, {shigoto_config, {invalid, pool, undefined}}}, shigoto_config:check()).
 
@@ -228,3 +248,151 @@ a_refused_key_is_named_by_its_position() ->
         {error, {shigoto_config, {invalid, encryption_keys, #{problem => duplicate_key}}}},
         shigoto_config:check()
     ).
+
+every_default_is_the_documented_one() ->
+    ?assertEqual(1000, shigoto_config:stage_interval()),
+    ?assertEqual(30000, shigoto_config:heartbeat_interval()),
+    ?assertEqual(60000, shigoto_config:rescue_interval()),
+    ?assertEqual(15000, shigoto_config:shutdown_timeout()),
+    ?assertEqual(60000, shigoto_config:on_discard_timeout()),
+    ?assertEqual(90, shigoto_config:archive_after_days()),
+    ?assertEqual(5000, shigoto_config:advisory_lock_timeout()),
+    ?assertEqual(10, shigoto_config:notify_min_interval()),
+    ?assertEqual(run, shigoto_config:on_dependency_failure()),
+    ?assertEqual(undefined, shigoto_config:load_shedding()),
+    ?assertEqual(undefined, shigoto_config:propagator()),
+    ?assertEqual(v1, shigoto_config:encryption_write_format()),
+    ?assertEqual([v1, v2], shigoto_config:encryption_read_formats()),
+    ?assertEqual(false, shigoto_config:require_encrypted()),
+    ?assertEqual(undefined, shigoto_config:workers()),
+    ?assertEqual(undefined, shigoto_config:instance()),
+    ?assertEqual(disabled, shigoto_config:testing_mode()).
+
+a_setting_is_read_as_configured() ->
+    Key = crypto:strong_rand_bytes(32),
+    Older = crypto:strong_rand_bytes(32),
+    Configured = #{
+        encryption_key => Key,
+        encryption_keys => [Key, Older],
+        load_shedding => #{max_in_flight => 10},
+        notifier => #{host => "localhost"},
+        propagator => shigoto_fake_propagator,
+        encryption_write_format => v2,
+        encryption_read_formats => [v2, v1],
+        require_encrypted => true,
+        workers => [shigoto_test_worker],
+        instance => ~"billing",
+        advisory_lock_timeout => 250,
+        notify_min_interval => 25,
+        on_dependency_failure => cancel
+    },
+    [application:set_env(shigoto, Setting, Value) || Setting := Value <- Configured],
+    ?assertEqual(Key, shigoto_config:encryption_key()),
+    ?assertEqual([Key, Older], shigoto_config:encryption_keys()),
+    ?assertEqual(#{max_in_flight => 10}, shigoto_config:load_shedding()),
+    ?assertEqual(#{host => "localhost"}, shigoto_config:notifier_config()),
+    ?assertEqual(shigoto_fake_propagator, shigoto_config:propagator()),
+    ?assertEqual(v2, shigoto_config:encryption_write_format()),
+    ?assertEqual([v1, v2], shigoto_config:encryption_read_formats()),
+    ?assertEqual(true, shigoto_config:require_encrypted()),
+    ?assertEqual([shigoto_test_worker], shigoto_config:workers()),
+    ?assertEqual(~"billing", shigoto_config:instance()),
+    ?assertEqual(250, shigoto_config:advisory_lock_timeout()),
+    ?assertEqual(25, shigoto_config:notify_min_interval()),
+    ?assertEqual(cancel, shigoto_config:on_dependency_failure()),
+    application:set_env(shigoto, encryption_read_formats, [v2]),
+    ?assertEqual([v2], shigoto_config:encryption_read_formats()).
+
+%% `check/0` refuses these values at boot. Set later, while jobs run, they do
+%% not raise where they are read.
+a_setting_read_leniently_falls_back() ->
+    Odd = #{
+        propagator => ~"a_module",
+        encryption_read_formats => v2,
+        require_encrypted => yes,
+        workers => a_module,
+        instance => billing,
+        advisory_lock_timeout => -1,
+        notify_min_interval => -1
+    },
+    [application:set_env(shigoto, Setting, Value) || Setting := Value <- Odd],
+    ?assertEqual(undefined, shigoto_config:propagator()),
+    ?assertEqual([], shigoto_config:encryption_read_formats()),
+    ?assertEqual(false, shigoto_config:require_encrypted()),
+    ?assertEqual([], shigoto_config:workers()),
+    ?assertEqual(undefined, shigoto_config:instance()),
+    ?assertEqual(5000, shigoto_config:advisory_lock_timeout()),
+    ?assertEqual(10, shigoto_config:notify_min_interval()),
+    application:set_env(shigoto, advisory_lock_timeout, soon),
+    application:set_env(shigoto, notify_min_interval, soon),
+    ?assertEqual(5000, shigoto_config:advisory_lock_timeout()),
+    ?assertEqual(10, shigoto_config:notify_min_interval()).
+
+the_smallest_value_of_a_setting_is_accepted() ->
+    application:set_env(shigoto, poll_interval, 1),
+    ?assertEqual(1, shigoto_config:poll_interval()),
+    application:set_env(shigoto, advisory_lock_timeout, 0),
+    ?assertEqual(0, shigoto_config:advisory_lock_timeout()),
+    application:set_env(shigoto, notify_min_interval, 0),
+    ?assertEqual(0, shigoto_config:notify_min_interval()),
+    application:set_env(shigoto, pool, some_pool),
+    ?assertEqual(ok, shigoto_config:check()).
+
+a_testing_mode_needs_its_confirmation() ->
+    application:set_env(shigoto, testing, inline),
+    ?assertEqual(disabled, shigoto_config:testing_mode()),
+    application:set_env(shigoto, testing_confirm_no_persistence, yes),
+    ?assertEqual(disabled, shigoto_config:testing_mode()),
+    application:set_env(shigoto, testing_confirm_no_persistence, true),
+    ?assertEqual(inline, shigoto_config:testing_mode()),
+    application:set_env(shigoto, testing, manual),
+    ?assertEqual(manual, shigoto_config:testing_mode()),
+    application:set_env(shigoto, testing, sometimes),
+    ?assertEqual(disabled, shigoto_config:testing_mode()),
+    application:set_env(shigoto, testing, disabled),
+    ?assertEqual(disabled, shigoto_config:testing_mode()).
+
+the_shutdown_budget_counts_every_queue() ->
+    Stop = shigoto_executor_sup:stop_timeout(),
+    ?assertEqual(16000 + Stop, shigoto_config:shutdown_budget()),
+    application:set_env(shigoto, queues, [{~"mail", 5}, {~"reports", 1}]),
+    application:set_env(shigoto, fanout_queues, [{~"events", 2, #{}}]),
+    application:set_env(shigoto, shutdown_timeout, 2000),
+    ?assertEqual(9000 + Stop, shigoto_config:shutdown_budget()),
+    application:set_env(shigoto, shutdown_timeout, 0),
+    ?assertEqual(3000 + Stop, shigoto_config:shutdown_budget()).
+
+a_job_is_stale_after_two_heartbeats() ->
+    ?assertEqual(60.0, shigoto_config:stale_after()),
+    application:set_env(shigoto, heartbeat_interval, 2500),
+    ?assertEqual(5.0, shigoto_config:stale_after()).
+
+an_instance_names_its_own_channel() ->
+    ?assertEqual(~"shigoto_jobs_insert", shigoto_config:notify_channel()),
+    application:set_env(shigoto, instance, ~"billing"),
+    ?assertEqual(~"shigoto_jobs_insert_billing", shigoto_config:notify_channel()).
+
+a_complete_configuration_passes_the_check() ->
+    Key = crypto:strong_rand_bytes(32),
+    Configured = #{
+        pool => some_pool,
+        queues => [{~"mail", 5}],
+        fanout_queues => [{~"events", 2, #{}}],
+        middleware => [fun(_Job, Next) -> Next() end],
+        queue_weights => #{~"mail" => 3},
+        fair_queues => [~"mail"],
+        notifier => #{host => "localhost"},
+        load_shedding => #{max_in_flight => 10},
+        encryption_key => Key,
+        encryption_write_format => v2,
+        encryption_read_formats => [v2],
+        require_encrypted => true,
+        workers => [shigoto_test_worker, shigoto_unique_worker],
+        instance => ~"billing_2",
+        advisory_lock_timeout => 0,
+        notify_min_interval => 0,
+        on_dependency_failure => discard,
+        propagator => shigoto_fake_propagator
+    },
+    [application:set_env(shigoto, Setting, Value) || Setting := Value <- Configured],
+    ?assertEqual(ok, shigoto_config:check()).
