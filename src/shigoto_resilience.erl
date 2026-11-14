@@ -150,9 +150,8 @@ check_global_concurrency(Worker, Job = #{}) ->
             MaxGlobal = Worker:global_concurrency(),
             Pool = shigoto_config:pool(),
             WorkerBin = atom_to_binary(Worker, utf8),
-            JobId = maps:get(id, Job),
             LockKey = erlang:phash2({global_concurrency, WorkerBin}),
-            admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey)
+            admit_global(Pool, WorkerBin, Job, MaxGlobal, LockKey)
     end.
 
 -doc "Check circuit breaker for a worker. Returns ok or {snooze, 10}.".
@@ -220,7 +219,7 @@ setup_load_shedder() ->
 %% Internal
 %%----------------------------------------------------------------------
 
-admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey) ->
+admit_global(Pool, WorkerBin, #{id := JobId} = Job, MaxGlobal, LockKey) ->
     try
         shigoto_db:transaction(Pool, fun() ->
             _ = shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
@@ -228,7 +227,7 @@ admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey) ->
                 ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
             case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
                 #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
-                    _ = shigoto_repo:snooze_job(Pool, JobId, ?GLOBAL_CONCURRENCY_SNOOZE),
+                    _ = shigoto_repo:snooze_job(Pool, Job, ?GLOBAL_CONCURRENCY_SNOOZE),
                     {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
                 _ ->
                     ok

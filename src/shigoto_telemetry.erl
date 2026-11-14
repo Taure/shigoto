@@ -30,6 +30,20 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, job, discarded]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, cancelled]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, progress]` | `progress` | job_id, worker, queue, attempt, priority, progress |
+| `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
+| `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
+
+`lost` fires when a run finished but its claim no longer held, so its outcome
+(`transition`: `completed`, `failed` or `snoozed`) was not written: the job had
+been rescued and claimed again, or cancelled, while this run was going. No
+`completed`, `failed` or `snoozed` event fires for that run. A steady rate of it
+means jobs outlive the stale threshold (`heartbeat_interval * 2`) without a
+heartbeat.
+
+`transition_failed` fires when writing the outcome failed for any other reason
+(`reason` is the database error, cut down by `shigoto_db:reduced/1`). The row
+stays `executing` and the stale-job rescue returns it to the queue, so the job
+runs again.
 
 ## Queue Events
 
@@ -114,6 +128,8 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     job_discarded/1,
     job_cancelled/1,
     job_progress/2,
+    job_lost/2,
+    job_transition_failed/3,
     %% Queue events
     queue_poll/2,
     queue_paused/1,
@@ -199,6 +215,16 @@ job_cancelled(Job) ->
 job_progress(Job, Progress) ->
     Meta = (job_meta(Job))#{progress => Progress},
     telemetry:execute([shigoto, job, progress], #{progress => Progress}, Meta).
+
+-spec job_lost(map(), completed | failed | snoozed) -> ok.
+job_lost(Job, Transition) ->
+    Meta = (job_meta(Job))#{transition => Transition},
+    telemetry:execute([shigoto, job, lost], #{count => 1}, Meta).
+
+-spec job_transition_failed(map(), completed | failed | snoozed, term()) -> ok.
+job_transition_failed(Job, Transition, Reason) ->
+    Meta = (job_meta(Job))#{transition => Transition, reason => Reason},
+    telemetry:execute([shigoto, job, transition_failed], #{count => 1}, Meta).
 
 %%----------------------------------------------------------------------
 %% Queue events

@@ -34,6 +34,16 @@ for safe multi-node job claiming.
     fetch_fanout_jobs/3
 ]).
 
+-export_type([claim/0]).
+
+-doc """
+The claim a transition is made under: the job map `claim_jobs/3` answered, or
+its id. With the map, the claim's `attempt` fences the write: once the job has
+been claimed again its attempt has moved on, and a write under the old claim
+finds no row.
+""".
+-type claim() :: #{id := integer(), attempt => integer(), _ => _} | integer().
+
 -define(DEFAULT_UNIQUE, #{
     keys => [worker, args],
     states => [available, executing, retryable],
@@ -198,24 +208,32 @@ claim_jobs_fair(Pool, Queue, Limit) ->
     end.
 
 -doc "Mark a job as completed with no result. Equivalent to `complete_job/3` with `null`.".
--spec complete_job(atom(), integer()) -> ok | {error, term()}.
-complete_job(Pool, JobId) ->
-    complete_job(Pool, JobId, null).
+-spec complete_job(atom(), claim()) -> ok | {error, lost | term()}.
+complete_job(Pool, Claim) ->
+    complete_job(Pool, Claim, null).
 
 -doc """
-Mark a job as completed and store its JSON-encodable result on the row.
+Mark a claimed job as completed and store its JSON-encodable result on the row.
+
+`Claim` is the job as `claim_jobs/3` answered it. The write only applies while
+that claim still holds: the row is `executing` and its `attempt` is the claim's.
+A job that was rescued, claimed again or cancelled in the meantime is left as it
+is and the answer is `{error, lost}`. Given a bare job id there is no attempt to
+compare, and only the `executing` state is checked.
 
 The result is propagated to any jobs that depend on this one (see
 `resolve_dependencies/2`) so they can read it via `deps_results`.
 """.
--spec complete_job(atom(), integer(), term()) -> ok | {error, term()}.
-complete_job(Pool, JobId, Result) ->
+-spec complete_job(atom(), claim(), term()) -> ok | {error, lost | term()}.
+complete_job(Pool, Claim, Result) ->
+    {JobId, Attempt} = fence(Claim),
     ResultJson = encode_result(Result),
     SQL =
         ~"""
         WITH done AS (
           UPDATE shigoto_jobs SET state = 'completed', completed_at = now(), result = $2::jsonb
-          WHERE id = $1 RETURNING id, result, batch_id
+          WHERE id = $1 AND state = 'executing' AND ($3::integer IS NULL OR attempt = $3)
+          RETURNING id, result, batch_id
         ), dependents AS (
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
@@ -224,19 +242,27 @@ complete_job(Pool, JobId, Result) ->
         )
         SELECT batch_id FROM done
         """,
-    case query(Pool, SQL, [JobId, ResultJson]) of
-        #{rows := [#{batch_id := BatchId}]} when BatchId =/= null ->
-            shigoto_batch:job_completed(Pool, BatchId);
-        #{rows := _} ->
+    case query(Pool, SQL, [JobId, ResultJson, Attempt]) of
+        #{rows := [#{batch_id := null}]} ->
             ok;
+        #{rows := [#{batch_id := BatchId}]} ->
+            shigoto_batch:job_completed(Pool, BatchId);
+        #{rows := []} ->
+            {error, lost};
         {error, _} = Err ->
             Err
     end.
 
--doc "Record a job failure with structured error and configurable backoff.".
--spec fail_job(atom(), map(), term(), pos_integer()) -> ok | {error, term()}.
+-doc """
+Record the failure of a claimed job, with a structured error and the backoff
+before its next attempt. At `max_attempts` the job is discarded instead.
+
+Like `complete_job/3`, the write only applies while the claim in `Job` still
+holds, and answers `{error, lost}` otherwise.
+""".
+-spec fail_job(atom(), map(), term(), pos_integer()) -> ok | {error, lost | term()}.
 fail_job(Pool, Job, Reason, BackoffSeconds) ->
-    JobId = maps:get(id, Job),
+    {JobId, Attempt} = fence(Job),
     ErrorJson = encode_json(build_structured_error(Job, Reason)),
     SQL =
         ~"""
@@ -247,7 +273,8 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
             scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at
               ELSE now() + make_interval(secs => $3) END,
             errors = errors || $2::jsonb
-          WHERE id = $1 RETURNING *
+          WHERE id = $1 AND state = 'executing' AND ($4::integer IS NULL OR attempt = $4)
+          RETURNING *
         ), dependents AS (
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
@@ -258,25 +285,32 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
         )
         SELECT * FROM done
         """,
-    case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds]) of
+    case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds, Attempt]) of
         #{rows := [#{state := ~"discarded"} = Updated]} ->
             _ = maybe_on_discard(Job, Updated),
             _ = maybe_batch_discard(Pool, Updated),
             ok;
         #{rows := [_Updated]} ->
             ok;
+        #{rows := []} ->
+            {error, lost};
         {error, _} = Err ->
             Err
     end.
 
--doc "Mark a job as discarded. Resolves dependencies so dependent jobs aren't stuck.".
+-doc """
+Discard a job that has not finished. Resolves dependencies so dependent jobs
+aren't stuck. A job that is already completed, discarded or cancelled is left
+as it is.
+""".
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
     SQL =
         ~"""
         WITH done AS (
           UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now()
-          WHERE id = $1 RETURNING id, result
+          WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
+          RETURNING id, result
         ), dependents AS (
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
@@ -349,23 +383,29 @@ cancel_matching(Pool, Filters) ->
     end.
 
 -doc """
-Snooze a job: reschedule it for later without counting it as a failure.
+Snooze a claimed job: reschedule it for later without counting it as a failure.
 
 Claiming counts an attempt, so a snooze raises `max_attempts` by one to give
 that attempt back. `attempt` keeps counting runs, and a job that snoozes is
 never discarded for it.
+
+Like `complete_job/3`, the write only applies while the claim still holds, and
+answers `{error, lost}` otherwise.
 """.
--spec snooze_job(atom(), integer(), pos_integer()) -> ok | {error, term()}.
-snooze_job(Pool, JobId, Seconds) ->
+-spec snooze_job(atom(), claim(), pos_integer()) -> ok | {error, lost | term()}.
+snooze_job(Pool, Claim, Seconds) ->
+    {JobId, Attempt} = fence(Claim),
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET state = 'available',\n"
-            "scheduled_at = now() + make_interval(secs => $2),\n"
-            "max_attempts = max_attempts + 1\n"
-            "WHERE id = $1 AND state = 'executing'"
-        >>,
-    case query(Pool, SQL, [JobId, Seconds]) of
-        #{command := update} -> ok;
+        ~"""
+        UPDATE shigoto_jobs SET state = 'available',
+          scheduled_at = now() + make_interval(secs => $2),
+          max_attempts = max_attempts + 1
+        WHERE id = $1 AND state = 'executing' AND ($3::integer IS NULL OR attempt = $3)
+        RETURNING id
+        """,
+    case query(Pool, SQL, [JobId, Seconds, Attempt]) of
+        #{rows := [_]} -> ok;
+        #{rows := []} -> {error, lost};
         {error, _} = Err -> Err
     end.
 
@@ -693,6 +733,15 @@ try_advisory_xact_lock(Pool, Key) ->
         #{rows := [#{locked := Locked}]} -> Locked;
         {error, _} = Err -> Err
     end.
+
+%%----------------------------------------------------------------------
+%% Internal: fencing
+%%----------------------------------------------------------------------
+
+-spec fence(claim()) -> {integer(), integer() | null}.
+fence(#{id := JobId, attempt := Attempt}) when is_integer(Attempt) -> {JobId, Attempt};
+fence(#{id := JobId}) -> {JobId, null};
+fence(JobId) when is_integer(JobId) -> {JobId, null}.
 
 %%----------------------------------------------------------------------
 %% Internal: dependency validation

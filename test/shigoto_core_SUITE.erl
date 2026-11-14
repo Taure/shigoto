@@ -49,6 +49,9 @@
     test_retryable_job_is_claimed_once_due/1,
     test_retryable_job_is_claimed_fairly_once_due/1,
     test_retry_frees_a_unique_key/1,
+    test_an_old_claim_cannot_finish_a_reclaimed_job/1,
+    test_a_cancelled_job_keeps_its_state/1,
+    test_discard_leaves_a_finished_job_alone/1,
     test_concurrent_claim_no_double_execute/1,
     test_cancel_by_no_match/1,
     test_insert_minimal_params/1,
@@ -90,6 +93,9 @@ all() ->
         test_retryable_job_is_claimed_once_due,
         test_retryable_job_is_claimed_fairly_once_due,
         test_retry_frees_a_unique_key,
+        test_an_old_claim_cannot_finish_a_reclaimed_job,
+        test_a_cancelled_job_keeps_its_state,
+        test_discard_leaves_a_finished_job_alone,
         test_concurrent_claim_no_double_execute,
         test_cancel_by_no_match,
         test_insert_minimal_params,
@@ -420,7 +426,8 @@ test_archive_jobs(_Config) ->
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     JobId = maps:get(id, Job),
-    ok = shigoto_repo:complete_job(?POOL, JobId),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
     %% Archive with 0 days threshold
     {ok, Count} = shigoto_repo:archive_jobs(?POOL, 0),
     ?assert(Count >= 1),
@@ -622,6 +629,54 @@ test_retry_frees_a_unique_key(_Config) ->
     ok = shigoto_repo:complete_job(?POOL, maps:get(id, Second)),
     {ok, #{id := NextId}} = shigoto_repo:insert_job(?POOL, Params, Unique),
     ?assertNotEqual(JobId, NextId).
+
+test_an_old_claim_cannot_finish_a_reclaimed_job(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [First]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    %% What the stale-job rescue does: the row goes back and is claimed again.
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET state = 'available' WHERE id = $1", [JobId]
+    ),
+    {ok, [Second]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertMatch(#{id := JobId, attempt := 2}, Second),
+    ?assertEqual({error, lost}, shigoto_repo:complete_job(?POOL, First, ~"stale")),
+    ?assertEqual({error, lost}, shigoto_repo:fail_job(?POOL, First, boom, 60)),
+    ?assertEqual({error, lost}, shigoto_repo:snooze_job(?POOL, First, 60)),
+    ?assertMatch(
+        {ok, #{state := ~"executing", attempt := 2, max_attempts := 3, errors := ~"[]"}},
+        shigoto_repo:get_job(?POOL, JobId)
+    ),
+    ok = shigoto_repo:complete_job(?POOL, Second, ~"current"),
+    {ok, #{state := ~"completed", result := Result}} = shigoto_repo:get_job(?POOL, JobId),
+    ?assertEqual(~"current", json:decode(Result)).
+
+test_a_cancelled_job_keeps_its_state(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:cancel_job(?POOL, JobId),
+    ?assertEqual({error, lost}, shigoto_repo:complete_job(?POOL, Claimed)),
+    ?assertEqual({error, lost}, shigoto_repo:complete_job(?POOL, JobId)),
+    ?assertEqual({error, lost}, shigoto_repo:fail_job(?POOL, Claimed, boom, 60)),
+    ?assertEqual({error, lost}, shigoto_repo:snooze_job(?POOL, Claimed, 60)),
+    ?assertMatch(
+        {ok, #{state := ~"cancelled", completed_at := null, errors := ~"[]"}},
+        shigoto_repo:get_job(?POOL, JobId)
+    ).
+
+test_discard_leaves_a_finished_job_alone(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
+    ok = shigoto_repo:discard_job(?POOL, JobId),
+    ?assertMatch(
+        {ok, #{state := ~"completed", discarded_at := null}}, shigoto_repo:get_job(?POOL, JobId)
+    ).
 
 test_concurrent_claim_no_double_execute(_Config) ->
     {ok, _} = shigoto_repo:insert_job(

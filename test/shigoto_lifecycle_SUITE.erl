@@ -19,6 +19,7 @@ the application does with it.
     a_failed_job_runs_again_after_its_backoff/1,
     a_retry_is_woken_by_the_stager/1,
     a_job_out_of_attempts_is_discarded/1,
+    a_crash_in_perform_is_recorded_without_its_args/1,
     a_killed_worker_process_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
     a_burst_of_notifications_leaves_one_poll_timer/1,
@@ -48,6 +49,7 @@ all() ->
         a_failed_job_runs_again_after_its_backoff,
         a_retry_is_woken_by_the_stager,
         a_job_out_of_attempts_is_discarded,
+        a_crash_in_perform_is_recorded_without_its_args,
         a_killed_worker_process_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
         a_burst_of_notifications_leaves_one_poll_timer,
@@ -191,6 +193,22 @@ a_job_out_of_attempts_is_discarded(_Config) ->
     after 2000 -> ct:fail(on_discard_not_called)
     end,
     ok = idle(~"exhausted", 1500).
+
+a_crash_in_perform_is_recorded_without_its_args(_Config) ->
+    Id = enqueue(~"crash-191212121212"),
+    instruct(performing(~"crash-191212121212"), no_clause),
+    Failed = await(Id, ~"retryable"),
+    Stored = maps:get(errors, Failed),
+    ?assertMatch([#{~"error" := <<"error:function_clause", _/binary>>}], errors(Failed)),
+    ?assertNotEqual(nomatch, binary:match(Stored, ~"only_absent")),
+    ?assertEqual(nomatch, binary:match(Stored, ~"191212121212")),
+    instruct(performing(~"crash-191212121212"), crash),
+    Again = await(Id, ~"retryable"),
+    ?assertMatch(
+        [_, #{~"error" := <<"error:deliberate_crash", _/binary>>, ~"attempt" := 2}], errors(Again)
+    ),
+    instruct(performing(~"crash-191212121212"), {return, ok}),
+    ?assertMatch(#{attempt := 3}, await(Id, ~"completed")).
 
 a_killed_worker_process_is_a_failure(_Config) ->
     Id = enqueue(~"killed"),

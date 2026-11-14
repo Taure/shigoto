@@ -48,7 +48,7 @@ update_heartbeats() ->
         undefined ->
             ok;
         _ ->
-            JobIds = [Id || {Id, _Pid} <- ets:tab2list(shigoto_executors)],
+            JobIds = [Id || {{Id, _Attempt}, _Pid} <- ets:tab2list(shigoto_executors)],
             case JobIds of
                 [] ->
                     ok;

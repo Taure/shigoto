@@ -9,10 +9,13 @@
     init_per_testcase/2,
     end_per_testcase/2
 ]).
+-export([forward/4]).
 -export([
     test_insert_and_claim/1,
     test_job_execution_success/1,
     test_job_execution_failure/1,
+    test_a_lost_claim_is_reported_not_recorded/1,
+    test_a_crash_is_recorded_as_class_and_reason/1,
     test_cancel_job/1,
     test_retry_job/1,
     test_drain_queue/1,
@@ -101,6 +104,8 @@ all() ->
         test_insert_and_claim,
         test_job_execution_success,
         test_job_execution_failure,
+        test_a_lost_claim_is_reported_not_recorded,
+        test_a_crash_is_recorded_as_class_and_reason,
         test_cancel_job,
         test_retry_job,
         test_drain_queue,
@@ -466,6 +471,49 @@ test_job_execution_failure(_Config) ->
     {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
     {error, _} = shigoto_executor:execute_sync(Claimed, ?POOL, 5000).
 
+test_a_lost_claim_is_reported_not_recorded(_Config) ->
+    Events = [[shigoto, job, lost], [shigoto, job, completed], [shigoto, job, failed]],
+    ok = telemetry:attach_many(?FUNCTION_NAME, Events, fun ?MODULE:forward/4, self()),
+    try
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}, #{}
+        ),
+        {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+        ok = shigoto_repo:cancel_job(?POOL, JobId),
+        ?assertEqual({error, lost}, shigoto_executor:execute_sync(Claimed, ?POOL, 5000)),
+        ?assertMatch({ok, #{state := ~"cancelled"}}, shigoto_repo:get_job(?POOL, JobId)),
+        receive
+            {telemetry, Event, Measurements, Metadata} ->
+                ?assertEqual([shigoto, job, lost], Event),
+                ?assertEqual(#{count => 1}, Measurements),
+                ?assertMatch(#{job_id := JobId, attempt := 1, transition := completed}, Metadata)
+        after 1000 -> ct:fail(lost_claim_not_reported)
+        end,
+        receive
+            {telemetry, Other, _, _} -> ct:fail({also_reported, Other})
+        after 100 -> ok
+        end
+    after
+        telemetry:detach(?FUNCTION_NAME)
+    end.
+
+test_a_crash_is_recorded_as_class_and_reason(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"action" => ~"crash"}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertMatch({error, {error, _}}, shigoto_executor:execute_sync(Claimed, ?POOL, 5000)),
+    [Error] = json:decode(stored_errors(JobId)),
+    ?assertMatch(#{~"error" := <<"error:", _/binary>>, ~"attempt" := 1}, Error),
+    ?assertNotEqual(
+        nomatch, binary:match(maps:get(~"stacktrace", Error), ~"shigoto_test_worker")
+    ).
+
+-doc false.
+forward(Event, Measurements, Metadata, Owner) ->
+    Owner ! {telemetry, Event, Measurements, Metadata},
+    ok.
+
 test_cancel_job(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
         ?POOL,
@@ -513,7 +561,7 @@ test_drain_queue(_Config) ->
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
 
 test_prune_old_jobs(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, _Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -521,7 +569,8 @@ test_prune_old_jobs(_Config) ->
         },
         #{}
     ),
-    shigoto_repo:complete_job(?POOL, maps:get(id, Job)),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
     {ok, Count} = shigoto_repo:prune_jobs(?POOL, 0),
     ?assert(Count >= 1).
 
@@ -923,10 +972,11 @@ test_transaction_pool_option(_Config) ->
     ?assertEqual(0, count_jobs()).
 
 test_prune_archive(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, _Job} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
-    shigoto_repo:complete_job(?POOL, maps:get(id, Job)),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
     {ok, _} = shigoto_repo:archive_jobs(?POOL, 0),
     ?assertEqual(1, count_archive()),
     %% A just-archived row is within the retention window and must survive.

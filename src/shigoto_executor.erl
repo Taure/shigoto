@@ -1,11 +1,28 @@
 -module(shigoto_executor).
 -moduledoc """
-Executes a single job through the middleware chain with seki resilience.
-Started by the executor supervisor, reports back to the queue process when done.
+Runs one claimed job: the resilience gates, the middleware chain and the
+worker's `perform/1`, then records the outcome.
+
+One process per running job, started by the executor supervisor for a queue,
+which it tells when it is done. `execute_sync/3` runs the same code in the
+calling process, for `shigoto:drain_queue/1,2`, with one difference: it does not
+report the outcome to the worker's circuit breaker, so a test that drains
+failing jobs does not open the breaker for the jobs after it.
+
+The outcome is written under the claim the job was started with (see
+`t:shigoto_repo:claim/0`). When that claim no longer holds, because the job was
+rescued and claimed again or cancelled while this run was going, the write
+changes nothing: the executor logs `shigoto_job_transition_lost`, emits
+`[shigoto, job, lost]` and reports no completion or failure of its own. A write
+that fails for any other reason is logged as `shigoto_job_transition_failed`
+with `[shigoto, job, transition_failed]`; the row stays `executing` and the
+stale-job rescue returns it to the queue.
 """.
 -behaviour(gen_server).
 
--export([start_link/3, execute_sync/3, run_perform/4]).
+-include_lib("kernel/include/logger.hrl").
+
+-export([start_link/3, execute_sync/3, run_perform/4, running/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
@@ -14,60 +31,39 @@ Started by the executor supervisor, reports back to the queue process when done.
     queue_pid :: pid()
 }).
 
+-type outcome() ::
+    {completed, term()}
+    | {snooze, pos_integer()}
+    | {snoozed, pos_integer()}
+    | {failed, Stored :: term(), Reported :: term()}.
+
 -doc false.
 start_link(Job, Pool, QueuePid) ->
     gen_server:start_link(?MODULE, {Job, Pool, QueuePid}, []).
 
--doc "Execute a job synchronously (for drain_queue).".
+-doc """
+Execute a claimed job in the calling process (for `shigoto:drain_queue/1,2`).
+
+Answers what the job did when that was recorded: `ok`, `{snooze, Seconds}` or
+`{error, Reason}`. When the outcome could not be recorded it answers why
+instead: `{error, lost}` when the claim no longer held, or the database error.
+""".
 -spec execute_sync(map(), atom(), timeout()) -> ok | {snooze, pos_integer()} | {error, term()}.
 execute_sync(Job, Pool, Timeout) ->
-    Worker = resolve_worker(Job),
-    Args = resolve_args(Job),
-    JobId = maps:get(id, Job),
-    set_logger_metadata(Job, Worker),
-    T0 = erlang:monotonic_time(native),
-    try
-        case run_with_resilience(Job, Worker, Args, Timeout) of
-            ok ->
-                Duration = erlang:monotonic_time(native) - T0,
-                _ = shigoto_repo:complete_job(Pool, JobId, null),
-                _ = shigoto_telemetry:job_completed(Job, Duration),
-                ok;
-            {ok, Result} ->
-                Duration = erlang:monotonic_time(native) - T0,
-                _ = shigoto_repo:complete_job(Pool, JobId, Result),
-                _ = shigoto_telemetry:job_completed(Job, Duration),
-                ok;
-            {snooze, Seconds} ->
-                _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
-                _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
-                {snooze, Seconds};
-            {error, FailReason} ->
-                Duration = erlang:monotonic_time(native) - T0,
-                BackoffSecs = compute_backoff(Worker, Job, FailReason),
-                _ = shigoto_repo:fail_job(Pool, Job, FailReason, BackoffSecs),
-                _ = shigoto_telemetry:job_failed(Job, FailReason, Duration),
-                _ = maybe_emit_discarded(Job),
-                {error, FailReason}
-        end
-    catch
-        Class:CatchReason:Stack ->
-            Duration2 = erlang:monotonic_time(native) - T0,
-            Err = {Class, CatchReason, Stack},
-            BackoffSecs2 = compute_backoff(Worker, Job, Err),
-            _ = shigoto_repo:fail_job(Pool, Job, Err, BackoffSecs2),
-            _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}, Duration2),
-            _ = maybe_emit_discarded(Job),
-            {error, {Class, CatchReason}}
-    after
-        clear_logger_metadata()
+    executed(Job, Pool, Timeout, leave_breaker).
+
+-doc "The executor processes running a job on this node.".
+-spec running(integer()) -> [pid()].
+running(JobId) ->
+    case ets:whereis(shigoto_executors) of
+        undefined -> [];
+        _Table -> ets:select(shigoto_executors, [{{{JobId, '_'}, '$1'}, [], ['$1']}])
     end.
 
 -doc false.
 init({Job, Pool, QueuePid}) ->
     ok = shigoto_db:ignore_sandbox(),
-    JobId = maps:get(id, Job),
-    ets:insert(shigoto_executors, {JobId, self()}),
+    ets:insert(shigoto_executors, {registered_as(Job), self()}),
     gen_server:cast(self(), execute),
     {ok, #state{job = Job, pool = Pool, queue_pid = QueuePid}}.
 
@@ -77,54 +73,9 @@ handle_call(_Request, _From, State) ->
 
 -doc false.
 handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = State) ->
-    Worker = resolve_worker(Job),
-    Args = resolve_args(Job),
-    JobId = maps:get(id, Job),
-    Timeout = resolve_timeout(Worker),
-    set_logger_metadata(Job, Worker),
-    T0 = erlang:monotonic_time(native),
-    try
-        case run_with_resilience(Job, Worker, Args, Timeout) of
-            ok ->
-                on_success(Pool, JobId, null, Job, Worker, QueuePid, T0, State);
-            {ok, Result} ->
-                on_success(Pool, JobId, Result, Job, Worker, QueuePid, T0, State);
-            {snooze, Seconds} ->
-                _ = shigoto_repo:snooze_job(Pool, JobId, Seconds),
-                _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
-                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
-                {stop, normal, State};
-            {error, Reason} ->
-                Duration = erlang:monotonic_time(native) - T0,
-                BackoffSecs = compute_backoff(Worker, Job, Reason),
-                _ = shigoto_repo:fail_job(Pool, Job, Reason, BackoffSecs),
-                _ = shigoto_telemetry:job_failed(Job, Reason, Duration),
-                _ = maybe_emit_discarded(Job),
-                _ = shigoto_resilience:complete_load(
-                    Job, erlang:convert_time_unit(Duration, native, millisecond)
-                ),
-                notify_breaker_failure(Worker),
-                gen_server:cast(QueuePid, {job_finished, JobId, self()}),
-                {stop, normal, State}
-        end
-    catch
-        Class:CatchReason:Stack ->
-            Duration2 = erlang:monotonic_time(native) - T0,
-            Err = {Class, CatchReason, Stack},
-            BackoffSecs2 = compute_backoff(Worker, Job, Err),
-            _ = shigoto_repo:fail_job(Pool, Job, Err, BackoffSecs2),
-            _ = shigoto_telemetry:job_failed(Job, {Class, CatchReason}, Duration2),
-            _ = maybe_emit_discarded(Job),
-            _ = shigoto_resilience:complete_load(
-                Job, erlang:convert_time_unit(Duration2, native, millisecond)
-            ),
-            notify_breaker_failure(Worker),
-            gen_server:cast(QueuePid, {job_finished, JobId, self()}),
-            {stop, normal, State}
-    after
-        shigoto_resilience:release_bulkhead(Worker),
-        clear_logger_metadata()
-    end;
+    _ = executed(Job, Pool, worker_timeout, tell_breaker),
+    gen_server:cast(QueuePid, {job_finished, maps:get(id, Job), self()}),
+    {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -134,8 +85,124 @@ handle_info(_Info, State) ->
 
 -doc false.
 terminate(_Reason, #state{job = Job}) ->
-    ets:delete(shigoto_executors, maps:get(id, Job)),
+    ets:delete(shigoto_executors, registered_as(Job)),
     ok.
+
+%% A job that is rescued and claimed again while its first run is still going
+%% has two executors for a while; the attempt tells them apart.
+registered_as(Job) ->
+    {maps:get(id, Job), maps:get(attempt, Job, 0)}.
+
+%%----------------------------------------------------------------------
+%% Internal: run, then record
+%%----------------------------------------------------------------------
+
+-spec executed(map(), atom(), timeout() | worker_timeout, tell_breaker | leave_breaker) ->
+    ok | {snooze, pos_integer()} | {error, term()}.
+executed(Job, Pool, Timeout, Breaker) ->
+    Worker = resolve_worker(Job),
+    set_logger_metadata(Job, Worker),
+    T0 = erlang:monotonic_time(native),
+    try
+        Outcome = outcome(Job, Worker, Timeout),
+        Duration = erlang:monotonic_time(native) - T0,
+        Answer = recorded(Outcome, Job, Pool, Worker, Duration),
+        ok = gates_told(Outcome, Job, Worker, Duration, Breaker),
+        Answer
+    after
+        shigoto_resilience:release_bulkhead(Worker),
+        clear_logger_metadata()
+    end.
+
+-spec outcome(map(), module(), timeout() | worker_timeout) -> outcome().
+outcome(Job, Worker, Timeout) ->
+    try run_with_resilience(Job, Worker, resolve_args(Job), timeout_of(Timeout, Worker)) of
+        ok -> {completed, null};
+        {ok, Result} -> {completed, Result};
+        {snooze, Seconds} -> {snooze, Seconds};
+        {snoozed, Seconds} -> {snoozed, Seconds};
+        {error, Reason} -> {failed, Reason, Reason};
+        Other -> {failed, {bad_return_value, Other}, {bad_return_value, Other}}
+    catch
+        Class:Reason:Stack -> {failed, {Class, Reason, Stack}, {Class, Reason}}
+    end.
+
+timeout_of(worker_timeout, Worker) -> resolve_timeout(Worker);
+timeout_of(Timeout, _Worker) -> Timeout.
+
+-spec recorded(outcome(), map(), atom(), module(), integer()) ->
+    ok | {snooze, pos_integer()} | {error, term()}.
+recorded({completed, Result}, Job, Pool, _Worker, Duration) ->
+    case shigoto_repo:complete_job(Pool, Job, Result) of
+        ok ->
+            _ = shigoto_telemetry:job_completed(Job, Duration),
+            ok;
+        {error, Reason} ->
+            unrecorded(completed, Job, Reason)
+    end;
+recorded({snooze, Seconds}, Job, Pool, _Worker, _Duration) ->
+    case shigoto_repo:snooze_job(Pool, Job, Seconds) of
+        ok ->
+            _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
+            {snooze, Seconds};
+        {error, Reason} ->
+            unrecorded(snoozed, Job, Reason)
+    end;
+recorded({snoozed, Seconds}, Job, _Pool, _Worker, _Duration) ->
+    _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
+    {snooze, Seconds};
+recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
+    Backoff = compute_backoff(Worker, Job, Stored),
+    case shigoto_repo:fail_job(Pool, Job, Stored, Backoff) of
+        ok ->
+            _ = shigoto_telemetry:job_failed(Job, Reported, Duration),
+            _ = maybe_emit_discarded(Job),
+            {error, Reported};
+        {error, Reason} ->
+            unrecorded(failed, Job, Reason)
+    end.
+
+%% The load shedder and the circuit breaker hear how the run went, whether or
+%% not its outcome could be written.
+-spec gates_told(outcome(), map(), module(), integer(), tell_breaker | leave_breaker) -> ok.
+gates_told({completed, _Result}, Job, Worker, Duration, Breaker) ->
+    _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
+    breaker_told(Breaker, Worker, ok);
+gates_told({failed, _Stored, _Reported}, Job, Worker, Duration, Breaker) ->
+    _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
+    breaker_told(Breaker, Worker, {error, job_failed});
+gates_told(_Snoozed, _Job, _Worker, _Duration, _Breaker) ->
+    ok.
+
+milliseconds(Duration) ->
+    erlang:convert_time_unit(Duration, native, millisecond).
+
+%% The outcome was not written. `lost` is the fence doing its job; anything
+%% else is a write that failed.
+-spec unrecorded(completed | snoozed | failed, map(), term()) -> {error, term()}.
+unrecorded(Transition, Job, lost) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_job_transition_lost",
+        transition => Transition,
+        job_id => maps:get(id, Job, undefined),
+        attempt => maps:get(attempt, Job, undefined),
+        note =>
+            ~"the job was rescued, claimed again or cancelled during this run; nothing was written"
+    }),
+    _ = shigoto_telemetry:job_lost(Job, Transition),
+    {error, lost};
+unrecorded(Transition, Job, Reason) ->
+    Reduced = shigoto_db:reduced(Reason),
+    ?LOG_ERROR(#{
+        msg => ~"shigoto_job_transition_failed",
+        transition => Transition,
+        job_id => maps:get(id, Job, undefined),
+        attempt => maps:get(attempt, Job, undefined),
+        reason => Reduced,
+        note => ~"the row stays executing until the stale-job rescue returns it to the queue"
+    }),
+    _ = shigoto_telemetry:job_transition_failed(Job, Transition, Reduced),
+    {error, Reduced}.
 
 %%----------------------------------------------------------------------
 %% Internal: resilience + middleware
@@ -152,16 +219,21 @@ run_with_resilience(Job, Worker, Args, Timeout) ->
                     Snooze;
                 ok ->
                     case shigoto_resilience:check_global_concurrency(Worker, Job) of
-                        {snooze, _} = Snooze ->
-                            Snooze;
+                        {snooze, Seconds} ->
+                            %% This gate has already put the job back itself.
+                            {snoozed, Seconds};
                         ok ->
                             case shigoto_resilience:check_bulkhead(Worker, Job) of
                                 {snooze, _} = Snooze ->
                                     Snooze;
                                 ok ->
                                     case shigoto_resilience:check_circuit(Worker, Job) of
-                                        {snooze, _} = Snooze -> Snooze;
-                                        ok -> run_middleware_chain(Job, Worker, Args, Timeout)
+                                        {snooze, _} = Snooze ->
+                                            Snooze;
+                                        ok ->
+                                            run_middleware_chain(
+                                                Job, Worker, Args, Timeout, reraise
+                                            )
                                     end
                             end
                     end
@@ -171,7 +243,8 @@ run_with_resilience(Job, Worker, Args, Timeout) ->
 -doc """
 Run a worker through the exact perform path production uses: `deps_results`
 injection + the middleware chain + `perform/1` under `Timeout`. Returns the raw
-worker result (`ok | {ok, Result} | {error, _} | {snooze, _}`).
+worker result (`ok | {ok, Result} | {error, _} | {snooze, _}`), and
+`{error, _}` when `perform/1` raises.
 
 Shared by the queue executor, `execute_sync/3`, and `shigoto:perform_job/2,3`.
 It performs NO persistence, telemetry, retry, or resilience gating — those are the
@@ -180,17 +253,32 @@ caller's responsibility. Used by the testing helpers to run a worker with no DB.
 -spec run_perform(map(), module(), map(), timeout()) ->
     ok | {ok, term()} | {error, term()} | {snooze, pos_integer()}.
 run_perform(Job, Worker, Args, Timeout) ->
-    run_middleware_chain(Job, Worker, Args, Timeout).
+    run_middleware_chain(Job, Worker, Args, Timeout, as_error).
 
-run_middleware_chain(Job, Worker, Args, Timeout) ->
+run_middleware_chain(Job, Worker, Args, Timeout, WhenRaised) ->
     %% Pass decoded args in the job map so middleware sees maps, not binaries.
     %% For dependent jobs, expose the predecessors' results under deps_results.
     PerformArgs = inject_deps_results(Args, Job),
     JobWithArgs = Job#{args => PerformArgs},
     PerformFn = fun(_JobArg) ->
-        apply_with_timeout(Worker, perform, [PerformArgs], Timeout)
+        performed(apply_with_timeout(Worker, perform, [PerformArgs], Timeout), WhenRaised)
     end,
     shigoto_middleware:run(JobWithArgs, Worker, PerformFn).
+
+%% perform/1 runs in a process of its own. For the executor an exception there
+%% is raised again here, so middleware and the executor see it as if perform/1
+%% had run inline, with the worker's stacktrace. The testing helpers get it as
+%% the exit reason the worker process would have died with.
+performed({returned, Result}, _WhenRaised) ->
+    Result;
+performed({raised, Class, Reason, Stack}, reraise) ->
+    erlang:raise(Class, Reason, Stack);
+performed({raised, error, Reason, Stack}, as_error) ->
+    {error, {Reason, Stack}};
+performed({raised, throw, Thrown, Stack}, as_error) ->
+    {error, {{nocatch, Thrown}, Stack}};
+performed({raised, exit, Reason, _Stack}, as_error) ->
+    {error, Reason}.
 
 inject_deps_results(Args, Job) when is_map(Args) ->
     case resolve_deps_results(Job) of
@@ -229,37 +317,14 @@ to_id(K) when is_binary(K) ->
 to_id(K) ->
     K.
 
-on_success(Pool, JobId, Result, Job, Worker, QueuePid, T0, State) ->
-    Duration = erlang:monotonic_time(native) - T0,
-    _ = shigoto_repo:complete_job(Pool, JobId, Result),
-    _ = shigoto_telemetry:job_completed(Job, Duration),
-    _ = shigoto_resilience:complete_load(
-        Job, erlang:convert_time_unit(Duration, native, millisecond)
-    ),
-    notify_breaker_success(Worker),
-    gen_server:cast(QueuePid, {job_finished, JobId, self()}),
-    {stop, normal, State}.
-
-notify_breaker_success(Worker) ->
+breaker_told(leave_breaker, _Worker, _Result) ->
+    ok;
+breaker_told(tell_breaker, Worker, Result) ->
     case whereis(seki_sup) of
         undefined ->
             ok;
         _ ->
-            BreakerName = breaker_name(Worker),
-            try seki:call(BreakerName, fun() -> ok end) of
-                _ -> ok
-            catch
-                _:_ -> ok
-            end
-    end.
-
-notify_breaker_failure(Worker) ->
-    case whereis(seki_sup) of
-        undefined ->
-            ok;
-        _ ->
-            BreakerName = breaker_name(Worker),
-            try seki:call(BreakerName, fun() -> {error, job_failed} end) of
+            try seki:call(breaker_name(Worker), fun() -> Result end) of
                 _ -> ok
             catch
                 _:_ -> ok
@@ -328,6 +393,8 @@ resolve_args(#{args := Args}) when is_binary(Args) ->
 resolve_args(_) ->
     #{}.
 
+-spec apply_with_timeout(module(), atom(), [term()], timeout()) ->
+    {returned, term()} | {raised, error | exit | throw, term(), list()}.
 apply_with_timeout(Module, Function, Args, Timeout) ->
     Self = self(),
     Metadata = logger:get_process_metadata(),
@@ -335,17 +402,23 @@ apply_with_timeout(Module, Function, Args, Timeout) ->
     {Pid, Ref} = spawn_monitor(fun() ->
         ok = inherit_sandbox_scope(IgnoresSandbox),
         inherit_logger_metadata(Metadata),
-        Result = apply(Module, Function, Args),
-        Self ! {self(), Result}
+        Self ! {self(), applied(Module, Function, Args)}
     end),
     receive
-        {Pid, Result} ->
+        {Pid, Applied} ->
             erlang:demonitor(Ref, [flush]),
-            Result;
+            Applied;
         {'DOWN', Ref, process, Pid, Reason} ->
-            {error, Reason}
+            {returned, {error, Reason}}
     after Timeout ->
-        graceful_kill(Pid, Ref)
+        {returned, graceful_kill(Pid, Ref)}
+    end.
+
+applied(Module, Function, Args) ->
+    try
+        {returned, apply(Module, Function, Args)}
+    catch
+        Class:Reason:Stack -> {raised, Class, Reason, Stack}
     end.
 
 inherit_sandbox_scope(true) -> shigoto_db:ignore_sandbox();

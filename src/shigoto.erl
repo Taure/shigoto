@@ -230,15 +230,7 @@ cancel(JobId) ->
 -doc "Cancel a job by ID. Also stops executing jobs on this node.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.
 cancel(Pool, JobId) ->
-    case ets:whereis(shigoto_executors) of
-        undefined ->
-            ok;
-        _ ->
-            case ets:lookup(shigoto_executors, JobId) of
-                [{_, Pid}] -> exit(Pid, shutdown);
-                [] -> ok
-            end
-    end,
+    _ = [exit(Executor, shutdown) || Executor <- shigoto_executor:running(JobId)],
     Result = shigoto_repo:cancel_job(Pool, JobId),
     case Result of
         ok ->
