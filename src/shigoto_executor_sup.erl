@@ -33,6 +33,7 @@ init([]) ->
             _ ->
                 ok
         end,
+    ok = shigoto_resilience:new_table(),
     ChildSpec = #{
         id => shigoto_executor,
         start => {shigoto_executor, start_link, []},

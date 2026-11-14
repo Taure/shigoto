@@ -41,7 +41,8 @@ the application does with it.
     a_cancelled_batch_job_still_finishes_the_batch/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
-    a_burst_of_jobs_all_complete/1
+    a_burst_of_jobs_all_complete/1,
+    a_workers_gates_are_set_up_once/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -89,7 +90,8 @@ all() ->
         a_cancelled_batch_job_still_finishes_the_batch,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
-        a_burst_of_jobs_all_complete
+        a_burst_of_jobs_all_complete,
+        a_workers_gates_are_set_up_once
     ].
 
 init_per_suite(Config) ->
@@ -400,6 +402,18 @@ a_heartbeat_keeps_a_live_job_from_rescue(_Config) ->
     ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id)),
     instruct(Worker, {return, ok}),
     ?assertMatch(#{attempt := 1, errors := ~"[]"}, await(Id, ~"completed")).
+
+a_workers_gates_are_set_up_once(_Config) ->
+    First = enqueue(~"gates-first"),
+    instruct(performing(~"gates-first"), {return, ok}),
+    _ = await(First, ~"completed"),
+    ok = wait_for(fun() -> executors_of(First) =:= [] end),
+    %% The executor that set them up is gone; what it set up is remembered.
+    ?assert(ets:member(shigoto_resilience_init, shigoto_lifecycle_worker)),
+    ?assertEqual(whereis(shigoto_executor_sup), ets:info(shigoto_resilience_init, owner)),
+    Second = enqueue(~"gates-second"),
+    instruct(performing(~"gates-second"), {return, ok}),
+    _ = await(Second, ~"completed").
 
 %%----------------------------------------------------------------------
 %% Waking up

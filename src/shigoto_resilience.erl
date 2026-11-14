@@ -37,6 +37,7 @@ jobs are shed first when the system is overloaded.
     check_load/1,
     complete_load/2,
     ensure_worker_primitives/1,
+    new_table/0,
     setup_load_shedder/0
 ]).
 
@@ -45,23 +46,45 @@ jobs are shed first when the system is overloaded.
 -define(INIT_TABLE, shigoto_resilience_init).
 -define(GLOBAL_CONCURRENCY_SNOOZE, 5).
 
--doc "Ensure seki primitives exist for a worker. Lazy and idempotent.".
+-doc """
+Create the table that remembers which workers have their seki primitives. The
+calling process owns it; `shigoto_executor_sup` calls this, so the table lasts
+as long as the executors do.
+""".
+-spec new_table() -> ok.
+new_table() ->
+    case ets:whereis(?INIT_TABLE) of
+        undefined ->
+            _ = ets:new(?INIT_TABLE, [named_table, public, set, {read_concurrency, true}]),
+            ok;
+        _Table ->
+            ok
+    end.
+
+-doc """
+Ensure seki primitives exist for a worker. Lazy and idempotent: they are
+created on the worker's first job and remembered. Without the table (a job
+drained while the application is not running) they are ensured every time.
+""".
 -spec ensure_worker_primitives(module()) -> ok.
 ensure_worker_primitives(Worker) ->
-    case is_seki_running() of
-        false ->
-            ok;
-        true ->
-            case ets:whereis(?INIT_TABLE) of
-                undefined ->
-                    _ = ets:new(?INIT_TABLE, [named_table, public, set, {read_concurrency, true}]),
-                    do_ensure(Worker);
-                _ ->
-                    case ets:lookup(?INIT_TABLE, Worker) of
-                        [{_, true}] -> ok;
-                        [] -> do_ensure(Worker)
-                    end
-            end
+    case is_seki_running() andalso not is_remembered(Worker) of
+        true -> do_ensure(Worker);
+        false -> ok
+    end.
+
+is_remembered(Worker) ->
+    try
+        ets:member(?INIT_TABLE, Worker)
+    catch
+        error:badarg -> false
+    end.
+
+remember(Worker) ->
+    try
+        ets:insert(?INIT_TABLE, {Worker, true})
+    catch
+        error:badarg -> true
     end.
 
 -doc "Check per-worker rate limit. Returns ok or {snooze, Seconds}.".
@@ -254,7 +277,7 @@ do_ensure(Worker) ->
     _ = maybe_create_limiter(Worker),
     _ = maybe_create_bulkhead(Worker),
     _ = maybe_create_breaker(Worker),
-    ets:insert(?INIT_TABLE, {Worker, true}),
+    _ = remember(Worker),
     ok.
 
 maybe_create_limiter(Worker) ->
