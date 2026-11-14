@@ -45,6 +45,9 @@ the application does with it.
     a_burst_of_jobs_all_complete/1,
     a_workers_gates_are_set_up_once/1,
     a_declared_gate_is_not_skipped_without_seki/1,
+    a_snoozed_job_gives_its_place_in_the_load_shedder_back/1,
+    a_backlog_drains_without_waiting_for_the_poll_timer/1,
+    cancelling_a_finished_job_reports_nothing/1,
     a_result_that_looks_like_a_frame_reaches_its_dependent/1
 ]).
 
@@ -61,7 +64,8 @@ the application does with it.
     fanout_queues,
     shutdown_timeout,
     encryption_key,
-    encryption_write_format
+    encryption_write_format,
+    load_shedding
 ]).
 
 all() ->
@@ -99,6 +103,9 @@ all() ->
         a_burst_of_jobs_all_complete,
         a_workers_gates_are_set_up_once,
         a_declared_gate_is_not_skipped_without_seki,
+        a_snoozed_job_gives_its_place_in_the_load_shedder_back,
+        a_backlog_drains_without_waiting_for_the_poll_timer,
+        cancelling_a_finished_job_reports_nothing,
         a_result_that_looks_like_a_frame_reaches_its_dependent
     ].
 
@@ -168,6 +175,10 @@ overrides(stopping_the_application_stops_a_running_worker) ->
     #{shutdown_timeout => 200};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
+overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
+    #{load_shedding => #{target => 60000, max_in_flight => 100}};
+overrides(a_backlog_drains_without_waiting_for_the_poll_timer) ->
+    #{poll_interval => 3000};
 overrides(a_result_that_looks_like_a_frame_reaches_its_dependent) ->
     #{encryption_key => binary:copy(<<7>>, 32), encryption_write_format => v1};
 overrides(_TestCase) ->
@@ -459,9 +470,48 @@ a_declared_gate_is_not_skipped_without_seki(_Config) ->
     instruct(performing(~"gated"), {return, ok}),
     ?assertMatch(#{attempt := 2}, await(Gated, ~"completed")).
 
+a_snoozed_job_gives_its_place_in_the_load_shedder_back(_Config) ->
+    %% The worker's bulkhead holds two; the third job is put back by it.
+    Tags = [~"shed-one", ~"shed-two", ~"shed-three"],
+    Ids = [enqueue(Tag, #{worker => shigoto_gated_worker}) || Tag <- Tags],
+    Running = [performing_any(Tags), performing_any(Tags)],
+    ok = wait_for(fun() ->
+        [Row || Id <- Ids, #{state := ~"available", attempt := 1} = Row <- [row(Id)]] =/= []
+    end),
+    ?assertEqual(2, shed_in_flight()),
+    %% A snooze the worker asks for ends its run as well.
+    [First, Second] = Running,
+    instruct(First, {return, {snooze, 60}}),
+    instruct(Second, {return, ok}),
+    ok = wait_for(fun() -> shed_in_flight() =:= 0 end).
+
+shed_in_flight() ->
+    maps:get(in_flight, seki_shed:status(shigoto_load_shedder)).
+
+performing_any(Tags) ->
+    receive
+        {performing, Tag, Worker, _Args} ->
+            ?assert(lists:member(Tag, Tags)),
+            Worker
+    after 5000 -> ct:fail({never_performed, Tags})
+    end.
+
 %%----------------------------------------------------------------------
 %% Waking up
 %%----------------------------------------------------------------------
+
+a_backlog_drains_without_waiting_for_the_poll_timer(_Config) ->
+    %% Three times what the queue runs at once, polling alone, every three
+    %% seconds. One claim per tick would take three ticks; a queue that
+    %% claims again when a job finishes is done soon after the first.
+    ?assertEqual(undefined, whereis(shigoto_notifier)),
+    Tags = [iolist_to_binary([~"backlog-", integer_to_binary(N)]) || N <- lists:seq(1, 15)],
+    Started = erlang:monotonic_time(millisecond),
+    Ids = [enqueue(Tag) || Tag <- Tags],
+    ok = answer_all(length(Tags)),
+    [?assertMatch(#{attempt := 1}, await(Id, ~"completed")) || Id <- Ids],
+    Took = erlang:monotonic_time(millisecond) - Started,
+    ?assert(Took < 5500, Took).
 
 a_burst_of_notifications_leaves_one_poll_timer(_Config) ->
     ok = telemetry:attach(?MODULE, [shigoto, queue, poll], fun ?MODULE:forward/4, self()),
@@ -475,6 +525,29 @@ a_burst_of_notifications_leaves_one_poll_timer(_Config) ->
     Polls = polls_within(2000),
     ?assert(Polls >= 5, Polls),
     ?assert(Polls =< 15, Polls).
+
+cancelling_a_finished_job_reports_nothing(_Config) ->
+    Done = enqueue(~"finished"),
+    instruct(performing(~"finished"), {return, ok}),
+    _ = await(Done, ~"completed"),
+    Waiting = enqueue(~"cancel-reported", #{scheduled_at => seconds_from_now(3600)}),
+    ok = telemetry:attach(?MODULE, [shigoto, job, cancelled], fun ?MODULE:forward/4, self()),
+    ?assertEqual(ok, shigoto:cancel(Done)),
+    ?assertEqual(ok, shigoto:cancel(Done + 1000000)),
+    receive
+        {telemetry, [shigoto, job, cancelled], _, Unexpected} ->
+            ct:fail({cancel_reported, Unexpected})
+    after 300 -> ok
+    end,
+    ?assertMatch(#{state := ~"completed"}, row(Done)),
+    ?assertEqual(ok, shigoto:cancel(Waiting)),
+    receive
+        {telemetry, [shigoto, job, cancelled], #{count := 1}, Meta} ->
+            ?assertMatch(
+                #{job_id := Waiting, worker := ~"shigoto_lifecycle_worker", queue := ?QUEUE}, Meta
+            )
+    after 2000 -> ct:fail(cancel_not_reported)
+    end.
 
 %%----------------------------------------------------------------------
 %% Pruning
