@@ -113,6 +113,13 @@ not waited for. Its result is put into the new job's `deps_results` straight
 away, so depending on a job that completed a moment ago behaves like depending
 on one that completes a moment later.
 
+A dependency that ends in the instant its dependent is being inserted can miss
+it: neither statement sees the other. Each queue therefore looks, every
+`rescue_interval`, for jobs waiting on a job that has ended or no longer
+exists, and releases them the way the dependency would have: with the result,
+or by `on_dependency_failure`. A job waiting on a deleted job runs with `null`
+for it. Such a job waits at most one `rescue_interval` (default 60 s).
+
 ## Validation
 
 Shigoto validates dependencies on insert:

@@ -42,6 +42,7 @@ the application does with it.
     a_cancelled_batch_job_still_finishes_the_batch/1,
     a_retried_job_does_not_finish_its_batch_early/1,
     a_batch_left_unsettled_is_settled_by_the_sweep/1,
+    a_job_waiting_on_an_ended_job_is_released_by_the_sweep/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1,
@@ -102,6 +103,7 @@ all() ->
         a_cancelled_batch_job_still_finishes_the_batch,
         a_retried_job_does_not_finish_its_batch_early,
         a_batch_left_unsettled_is_settled_by_the_sweep,
+        a_job_waiting_on_an_ended_job_is_released_by_the_sweep,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete,
@@ -727,6 +729,45 @@ a_batch_left_unsettled_is_settled_by_the_sweep(_Config) ->
         {batch_callback, _} -> ct:fail(second_batch_callback)
     after 600 -> ok
     end.
+
+a_job_waiting_on_an_ended_job_is_released_by_the_sweep(_Config) ->
+    Parent = enqueue(~"raced-parent"),
+    instruct(performing(~"raced-parent"), {return, {ok, #{~"rows" => 3}}}),
+    _ = await(Parent, ~"completed"),
+    Failed = enqueue(~"raced-failed", #{max_attempts => 1}),
+    instruct(performing(~"raced-failed"), {return, {error, gone}}),
+    _ = await(Failed, ~"discarded"),
+    Missing = Failed + 1000000,
+    %% What an insert that raced its dependency's last statement leaves: a job
+    %% waiting on one that has already ended. The last waits on no job at all.
+    Runs = waiting_on(~"raced-child", [Parent], null),
+    Cancels = waiting_on(~"raced-cancelled", [Failed], ~"cancel"),
+    Released = waiting_on(~"raced-released", [Failed], ~"run"),
+    Orphan = waiting_on(~"raced-orphan", [Missing], null),
+    {RunsWorker, RunsArgs} = performing_with_args(~"raced-child"),
+    ?assertEqual(#{Parent => #{~"rows" => 3}}, maps:get(deps_results, RunsArgs)),
+    {ReleasedWorker, ReleasedArgs} = performing_with_args(~"raced-released"),
+    ?assertEqual(#{Failed => null}, maps:get(deps_results, ReleasedArgs)),
+    {OrphanWorker, OrphanArgs} = performing_with_args(~"raced-orphan"),
+    ?assertEqual(#{Missing => null}, maps:get(deps_results, OrphanArgs)),
+    [instruct(Worker, {return, ok}) || Worker <- [RunsWorker, ReleasedWorker, OrphanWorker]],
+    [_ = await(Id, ~"completed") || Id <- [Runs, Released, Orphan]],
+    ?assertMatch(#{attempt := 0}, await(Cancels, ~"cancelled")),
+    ok = idle(~"raced-cancelled", 300).
+
+waiting_on(Tag, DependsOn, Policy) ->
+    Args = iolist_to_binary(
+        json:encode(#{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag})
+    ),
+    #{rows := [#{id := Id}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, depends_on, on_dependency_failure)
+        VALUES ($1, 'shigoto_lifecycle_worker', $2::jsonb, $3, $4) RETURNING id
+        """,
+        [?QUEUE, Args, DependsOn, Policy]
+    ),
+    Id.
 
 a_child_runs_after_its_parent_with_the_result(_Config) ->
     Parent = enqueue(~"parent"),

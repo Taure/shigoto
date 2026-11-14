@@ -32,6 +32,7 @@ for safe multi-node job claiming.
     get_job/2,
     find_jobs/2,
     resolve_dependencies/2,
+    release_stuck_dependents/1,
     archive_jobs/2,
     fetch_fanout_jobs/3,
     unique_materials/3
@@ -807,6 +808,73 @@ resolve_dependencies(Pool, FinishedJobId) ->
     case query(Pool, SQL, [FinishedJobId]) of
         #{num_rows := Count} -> {ok, Count};
         {error, _} = Err -> Err
+    end.
+
+-doc """
+Release the jobs that wait on a job that has already ended.
+
+A finished job releases its dependents in the statement that finishes it, and
+that statement only sees the dependents committed before it began. A job
+inserted with `depends_on` just as its dependency finishes can be missed: the
+insert saw the dependency still running, and the dependency's last statement
+did not see the insert. This finds what such a race left behind, and jobs
+waiting on a job that no longer exists, and does for them what the dependency
+would have done: a completed (or missing) dependency is removed and its result
+handed over; a discarded or cancelled one is followed by each waiting job's
+`on_dependency_failure`. The queues run it every `rescue_interval`.
+
+Answers how many dependencies it resolved.
+""".
+-spec release_stuck_dependents(atom()) -> {ok, non_neg_integer()} | {error, term()}.
+release_stuck_dependents(Pool) ->
+    SQL =
+        ~"""
+        SELECT DISTINCT dep.id AS id, p.state AS state
+        FROM shigoto_jobs d
+        CROSS JOIN LATERAL unnest(d.depends_on) AS dep(id)
+        LEFT JOIN shigoto_jobs p ON p.id = dep.id
+        WHERE d.depends_on <> '{}' AND d.state IN ('available', 'retryable')
+        AND (p.id IS NULL OR p.state IN ('completed', 'discarded', 'cancelled'))
+        LIMIT 500
+        """,
+    case query(Pool, SQL, []) of
+        #{rows := []} ->
+            {ok, 0};
+        #{rows := Rows} ->
+            Failed = [
+                Id
+             || #{id := Id, state := State} <- Rows,
+                State =:= ~"discarded" orelse State =:= ~"cancelled"
+            ],
+            Finished = [Id || #{id := Id} <- Rows, not lists:member(Id, Failed)],
+            _ = [resolve_dependencies(Pool, Id) || Id <- Finished],
+            case failed_dependencies_followed(Pool, Failed) of
+                ok -> {ok, length(Rows)};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+failed_dependencies_followed(_Pool, []) ->
+    ok;
+failed_dependencies_followed(Pool, Failed) ->
+    SQL = with_dependents(
+        ~"""
+        WITH RECURSIVE done AS (
+          SELECT * FROM shigoto_jobs
+          WHERE id = ANY($1::bigint[]) AND state IN ('discarded', 'cancelled')
+        )
+        """,
+        ~"$2",
+        #{own => ids, count_batches => false}
+    ),
+    case query(Pool, SQL, [Failed, default_policy()]) of
+        #{rows := Rows} ->
+            {_Own, Cascaded} = moved(Rows),
+            dependents_followed(Pool, Cascaded);
+        {error, _} = Err ->
+            Err
     end.
 
 -doc "Update job progress (0-100).".
