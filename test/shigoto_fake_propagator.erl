@@ -1,7 +1,8 @@
 -module(shigoto_fake_propagator).
 -moduledoc """
 A propagator for tests. The context of a process is one binary in its process
-dictionary; `raise` and `oversized` in its place make `inject/0` misbehave.
+dictionary; `raise` and `oversized` in its place make `inject/0` misbehave. A
+process without one injects the `fake_propagator_root` setting, if there is one.
 """.
 -behaviour(shigoto_propagator).
 
@@ -9,10 +10,17 @@ dictionary; `raise` and `oversized` in its place make `inject/0` misbehave.
 
 inject() ->
     case get(?MODULE) of
-        undefined -> #{};
+        undefined -> root();
         raise -> error(deliberate_inject_crash);
         oversized -> #{~"baggage" => binary:copy(~"x", 5000)};
         Trace -> #{~"traceparent" => Trace}
+    end.
+
+%% What a process without a context of its own injects, the scheduler for one.
+root() ->
+    case application:get_env(shigoto, fake_propagator_root) of
+        {ok, Root} -> #{~"traceparent" => Root};
+        undefined -> #{}
     end.
 
 attach(#{~"traceparent" := ~"unattachable"}) ->

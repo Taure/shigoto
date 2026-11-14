@@ -661,15 +661,15 @@ a_cron_job_gets_what_the_scheduler_injects(_Config) ->
         }}
     ]),
     try
-        %% The pass runs in this process: with a context, as the scheduler
-        %% would have one if the propagator gave it one, and without.
-        _ = in_trace(~"trace-cron", fun shigoto_cron:schedule_once/0),
+        ok = wait_for(fun() ->
+            ok = shigoto_cron:schedule_once(),
+            #{rows := Rows} = shigoto_db:query(?POOL, ~"SELECT id FROM shigoto_jobs", []),
+            Rows =/= []
+        end),
         {Worker, _} = performing_with_args(~"traced-cron"),
         ?assertEqual(~"trace-cron", trace_seen_by(Worker, ~"traced-cron")),
         instruct(Worker, {return, ok}),
-        #{rows := [#{id := Id}]} = shigoto_db:query(
-            ?POOL, ~"SELECT id FROM shigoto_jobs WHERE worker = 'shigoto_lifecycle_worker'", []
-        ),
+        #{rows := [#{id := Id}]} = shigoto_db:query(?POOL, ~"SELECT id FROM shigoto_jobs", []),
         ?assertEqual(#{~"traceparent" => ~"trace-cron"}, stored_carrier(Id))
     after
         application:unset_env(shigoto, cron),
@@ -804,6 +804,11 @@ cancelling_a_finished_job_reports_nothing(_Config) ->
     Done = enqueue(~"finished"),
     instruct(performing(~"finished"), {return, ok}),
     _ = await(Done, ~"completed"),
+    %% Nothing is attached in the scheduler: it injects what a process with no
+    %% context of its own does, here the fake's root. A pass made here while the
+    %% application's own holds the cron lock is skipped, so passes are made
+    %% until one has scheduled the entry.
+    application:set_env(shigoto, fake_propagator_root, ~"trace-cron"),
     Waiting = enqueue(~"cancel-reported", #{scheduled_at => seconds_from_now(3600)}),
     ok = telemetry:attach(?MODULE, [shigoto, job, cancelled], fun ?MODULE:forward/4, self()),
     ?assertEqual(ok, shigoto:cancel(Done)),
@@ -821,6 +826,7 @@ cancelling_a_finished_job_reports_nothing(_Config) ->
                 #{job_id := Waiting, worker := ~"shigoto_lifecycle_worker", queue := ?QUEUE}, Meta
             )
     after 2000 -> ct:fail(cancel_not_reported)
+        application:unset_env(shigoto, fake_propagator_root),
     end.
 
 %%----------------------------------------------------------------------
