@@ -1520,17 +1520,32 @@ unique_keys(JobParams, Opts, UniqueOpts) ->
 -spec unique_locks(atom(), [integer()]) -> ok | {error, term()}.
 unique_locks(Pool, LockKeys) ->
     Deadline = erlang:monotonic_time(millisecond) + shigoto_config:advisory_lock_timeout(),
-    unique_locks(Pool, lists:usort(LockKeys), Deadline).
+    unique_locks(Pool, ordsets:from_list(LockKeys), Deadline).
 
+-spec unique_locks(atom(), [integer()], integer()) -> ok | {error, term()}.
 unique_locks(_Pool, [], _Deadline) ->
     ok;
-unique_locks(Pool, LockKeys, Deadline) ->
-    {Now, Later} = lists:split(min(?LOCKS_PER_STATEMENT, length(LockKeys)), LockKeys),
-    Left = max(0, Deadline - erlang:monotonic_time(millisecond)),
-    case shigoto_lock:acquire_xact(Pool, Now, Left) of
+unique_locks(Pool, [Key | Keys], Deadline) ->
+    {Now, Later} = statement_of(Keys, ?LOCKS_PER_STATEMENT - 1, [Key]),
+    case shigoto_lock:acquire_xact(Pool, Now, time_left(Deadline)) of
         ok -> unique_locks(Pool, Later, Deadline);
         {error, lock_timeout} -> {error, {lock_timeout, unique}};
         {error, Reason} -> {error, shigoto_db:reduced(Reason)}
+    end.
+
+%% The keys one statement takes, and the keys after them.
+-spec statement_of([integer()], non_neg_integer(), [integer(), ...]) ->
+    {[integer(), ...], [integer()]}.
+statement_of([Key | Later], Room, Now) when Room > 0 ->
+    statement_of(Later, Room - 1, [Key | Now]);
+statement_of(Later, _Room, Now) ->
+    {Now, Later}.
+
+-spec time_left(integer()) -> non_neg_integer().
+time_left(Deadline) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left > 0 -> Left;
+        _Over -> 0
     end.
 
 %% With the job's unique locks held.

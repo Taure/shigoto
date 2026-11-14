@@ -71,8 +71,8 @@ warn_if_plaintext_accepted(false) ->
 %% (`infinity` unless set) and kills it after that.
 warn_if_shutdown_is_cut_short() ->
     Budget = shigoto_config:shutdown_budget(),
-    case application:get_env(kernel, shutdown_timeout) of
-        {ok, Allowed} when is_integer(Allowed), Allowed < Budget ->
+    case proplists:get_value(shutdown_timeout, application:get_all_env(kernel)) of
+        Allowed when is_integer(Allowed), Allowed < Budget ->
             ?LOG_WARNING(#{
                 msg => ~"shigoto_shutdown_cut_short",
                 kernel_shutdown_timeout => Allowed,

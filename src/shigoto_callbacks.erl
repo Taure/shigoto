@@ -71,7 +71,9 @@ callback_of(Job) ->
 
 handed_over(Worker, Job) ->
     case whereis(?MODULE) of
-        undefined ->
+        Server when is_pid(Server) ->
+            gen_server:cast(Server, {on_discard, Worker, Job});
+        _NotRunning ->
             {Pid, Monitor} = spawn_monitor(fun() -> run(Worker, Job) end),
             receive
                 {'DOWN', Monitor, process, Pid, Reason} -> ended(Reason, Job)
@@ -79,9 +81,7 @@ handed_over(Worker, Job) ->
                 exit(Pid, kill),
                 erlang:demonitor(Monitor, [flush]),
                 ended(timeout, Job)
-            end;
-        Server ->
-            gen_server:cast(Server, {on_discard, Worker, Job})
+            end
     end.
 
 init(Limits) ->
@@ -236,14 +236,16 @@ ended(timeout, Job) ->
         worker => maps:get(worker, Job, undefined),
         timeout => shigoto_config:on_discard_timeout(),
         note => ~"the callback was stopped; raise on_discard_timeout if it needs longer"
-    });
+    }),
+    ok;
 ended(Reason, Job) ->
     ?LOG_WARNING(#{
         msg => ~"shigoto_on_discard_failed",
         job_id => maps:get(id, Job, undefined),
         worker => maps:get(worker, Job, undefined),
         reason => reason(Reason)
-    }).
+    }),
+    ok.
 
 reason({raised, Shape}) -> Shape;
 reason({unreadable, Shape}) -> Shape;

@@ -66,7 +66,11 @@ handle_info(_Info, State) ->
 %% their passes so most find the lock free.
 scheduled() ->
     Interval = shigoto_config:rescue_interval(),
-    erlang:send_after(Interval + rand:uniform(max(1, Interval div 10)), self(), pass).
+    erlang:send_after(Interval + jitter(Interval), self(), pass).
+
+-spec jitter(pos_integer()) -> pos_integer().
+jitter(Interval) when Interval >= 10 -> rand:uniform(Interval div 10);
+jitter(_Interval) -> 1.
 
 -spec runs_a_queue() -> boolean().
 runs_a_queue() ->

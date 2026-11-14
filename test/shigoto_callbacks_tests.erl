@@ -27,15 +27,15 @@ listen() ->
 
 cleanup(_) ->
     case whereis(shigoto_callbacks) of
-        undefined ->
-            ok;
-        Pid ->
+        Pid when is_pid(Pid) ->
             unlink(Pid),
             Monitor = monitor(process, Pid),
             exit(Pid, shutdown),
             receive
                 {'DOWN', Monitor, process, Pid, _} -> ok
-            end
+            end;
+        _NotRunning ->
+            ok
     end,
     application:unset_env(shigoto, on_discard_timeout),
     ok.
@@ -126,7 +126,7 @@ job(Tag, Then) ->
     #{
         id => Tag,
         state => ~"discarded",
-        worker => atom_to_binary(shigoto_callback_probe_worker),
+        worker => ~"shigoto_callback_probe_worker",
         queue => ~"default",
         attempt => 1,
         args => iolist_to_binary(json:encode(#{~"tag" => Tag, ~"then" => Then})),

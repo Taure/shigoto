@@ -392,7 +392,7 @@ v1_leaves_results_and_callback_args_as_1_10_reads_them(_Config) ->
         callback_worker => shigoto_canary_other_worker,
         callback_args => #{~"canary" => Canary}
     }),
-    #{rows := [#{callback_args := StoredArgs}]} = shigoto_db:query(
+    #{rows := [#{callback_args := <<StoredArgs/binary>>}]} = shigoto_db:query(
         ?POOL, ~"SELECT callback_args FROM shigoto_batches WHERE id = $1", [BatchId]
     ),
     ?assertEqual(#{~"canary" => Canary}, json:decode(StoredArgs)),
@@ -768,11 +768,13 @@ insert_all_inserts_nothing_when_a_unique_lock_is_held(_Config) ->
     ?assertEqual(3, job_count()).
 
 two_bulk_inserts_at_once_insert_each_unique_job_once(_Config) ->
-    Jobs = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 300)],
     Test = self(),
     Inserters = [
-        spawn_monitor(fun() -> Test ! {answered, self(), shigoto:insert_all(Order)} end)
-     || Order <- [Jobs, lists:reverse(Jobs)]
+        spawn_monitor(fun() ->
+            Jobs = [waiting(shigoto_unique_worker, N) || N <- Order],
+            Test ! {answered, self(), shigoto:insert_all(Jobs)}
+        end)
+     || Order <- [lists:seq(1, 300), lists:seq(300, 1, -1)]
     ],
     [{ok, Forward}, {ok, Backward}] = [
         receive
