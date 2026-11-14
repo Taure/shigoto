@@ -1453,7 +1453,7 @@ notifier_listening() ->
 connection() ->
     #{
         host => "localhost",
-        port => shigoto_test_repo:port(),
+        port => shigoto_test_repo:listen_port(),
         database => "shigoto_test",
         user => "postgres",
         password => "root"

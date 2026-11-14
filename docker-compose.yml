@@ -13,3 +13,26 @@ services:
       interval: 1s
       timeout: 3s
       retries: 60
+
+  # PgBouncer in transaction mode in front of the same database, for checking
+  # that shigoto runs behind a pooler: `docker compose --profile pgbouncer up -d`
+  # and `SHIGOTO_TEST_DB_PORT=5557 SHIGOTO_TEST_LISTEN_PORT=5556 rebar3 ct
+  # --suite test/shigoto_lifecycle_SUITE`. The notifier listens on PostgreSQL
+  # itself: LISTEN does not work through transaction mode.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624
+    profiles: [pgbouncer]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5557:5432"
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: root
+      DB_NAME: shigoto_test
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "20"

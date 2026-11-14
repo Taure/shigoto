@@ -281,6 +281,35 @@ shigoto:drain_queue(<<"default">>, #{timeout => 30000}).
 :shigoto.drain_queue("default", %{timeout: 30000})
 ```
 
+## Connection Poolers
+
+shigoto keeps nothing on a session between statements: its advisory locks are
+transaction scoped, the only setting it changes is made with `SET LOCAL`, and
+whatever takes more than one statement runs in a transaction. It runs behind a
+pooler in session mode, and behind PgBouncer in transaction mode with two
+conditions:
+
+- `max_prepared_statements` is above 0 (PgBouncer 1.21 or later). minato
+  prepares the statements it runs more than once, and PgBouncer has to know
+  them to hand a transaction to another server connection. With it at 0, jobs
+  fail to move between states.
+- `notifier` points at PostgreSQL itself, not at the pooler. `LISTEN` belongs
+  to a session, so through transaction mode no notification arrives. The
+  `notifier` map has its own `host` and `port` for this. Without `notifier`,
+  queues poll.
+
+```erlang
+{shigoto, [
+    {pool, my_pool},                       %% a minato pool on PgBouncer, 6432
+    {notifier, #{host => "db.internal", port => 5432,
+                 database => "mydb", user => "shigoto", password => "secret"}}
+]}
+```
+
+The lifecycle suite passes through PgBouncer 1.26 in transaction mode:
+`docker compose --profile pgbouncer up -d --wait`, then
+`SHIGOTO_TEST_DB_PORT=5557 SHIGOTO_TEST_LISTEN_PORT=5556 rebar3 ct --suite test/shigoto_lifecycle_SUITE`.
+
 ## Next Steps
 
 - [Workers](workers.md) — Error handling, retries, backoff, timeouts, and optional callbacks
