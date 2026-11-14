@@ -213,7 +213,10 @@ check_rate_limit(Worker, _Job = #{}) ->
                     ok;
                 {deny, #{retry_after := Ms}} ->
                     shigoto_telemetry:resilience_rate_limited(Worker, Ms),
-                    {snooze, max(1, Ms div 1000)}
+                    case Ms div 1000 of
+                        Seconds when Seconds >= 1 -> {snooze, Seconds};
+                        _Sooner -> {snooze, 1}
+                    end
             end
     end.
 

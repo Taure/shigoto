@@ -195,7 +195,10 @@ kura holds.
 """.
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
-    erlang:get({?HOLDER, Pool}).
+    case erlang:get({?HOLDER, Pool}) of
+        Holder when is_pid(Holder) -> Holder;
+        _None -> undefined
+    end.
 
 -doc false.
 -spec transaction_open(atom()) -> boolean().
@@ -232,8 +235,8 @@ start_pool(Name, Config) ->
     Connection = maps:fold(fun connection/3, #{}, Config),
     Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
     case minato:start_pool(Name, Opts) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
+        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+        {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
         {error, Reason} -> {error, Reason}
     end.
 
@@ -249,8 +252,8 @@ start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
     Connection = maps:fold(fun connection/3, #{}, Config),
     case minato:start_listener(Name, #{connection => Connection}) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
+        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+        {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
         {error, Reason} -> {error, Reason}
     end.
 
@@ -292,13 +295,16 @@ opened(Pool, Fun) ->
     _ = erlang:put({?HOLDER, Pool}, Holder),
     try
         ok = begun_on(Holder),
-        committed(Holder, Fun())
-    catch
-        Class:Reason:Stacktrace ->
-            _ = ran(Holder, ~"ROLLBACK", [], #{}),
-            erlang:raise(Class, Reason, Stacktrace)
-    after
+        Result = committed(Holder, Fun()),
         _ = erlang:erase({?HOLDER, Pool}),
+        Result
+    after
+        %% Still registered here, the transaction did not commit.
+        _ =
+            case erlang:erase({?HOLDER, Pool}) of
+                undefined -> ok;
+                _Holder -> ran(Holder, ~"ROLLBACK", [], #{})
+            end,
         release(Holder)
     end.
 
@@ -624,7 +630,9 @@ answered({error, Reason}) -> {error, Reason}.
 decoding(Opts) ->
     maps:merge(?DEFAULT_DECODE, maps:without([pool, decode_opts], Opts)).
 
--spec connection(term(), term(), map()) -> map().
+%% Connection options are handed to minato as the caller wrote them, apart
+%% from the spellings shigoto has always taken for a name or a host.
+-spec connection(term(), dynamic(), map()) -> map().
 connection(host, Value, Connection) -> Connection#{host => text(Value)};
 connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
 connection(port, Value, Connection) -> Connection#{port => Value};
@@ -637,12 +645,12 @@ connection(ssl_options, Value, Connection) -> Connection#{ssl_options => Value};
 connection(socket_options, Value, Connection) -> Connection#{socket_options => Value};
 connection(_Key, _Value, Connection) -> Connection.
 
--spec text(term()) -> string().
+-spec text(dynamic()) -> dynamic().
 text(Value) when is_binary(Value) -> binary_to_list(Value);
 text(Value) when is_atom(Value) -> atom_to_list(Value);
 text(Value) -> Value.
 
--spec binary(term()) -> binary().
+-spec binary(dynamic()) -> dynamic().
 binary(Value) when is_list(Value) -> list_to_binary(Value);
 binary(Value) when is_atom(Value) -> atom_to_binary(Value);
 binary(Value) -> Value.

@@ -145,7 +145,7 @@ due_queues(Pool) ->
         """,
     case shigoto_db:query(Pool, SQL, []) of
         #{rows := Rows} ->
-            {ok, [maps:get(queue, Row) || Row <- Rows]};
+            {ok, [Queue || #{queue := Queue} <- Rows, is_binary(Queue)]};
         {error, _} = Err ->
             Err
     end.

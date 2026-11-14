@@ -143,7 +143,7 @@ with_dependencies(Pool, Jobs) ->
         [] ->
             {ok, Jobs};
         DepIds ->
-            case dependencies(Pool, DepIds) of
+            case dependencies(Pool, [Id || Id <- DepIds, is_integer(Id)]) of
                 {ok, Found} -> with_dependencies(Jobs, Found, []);
                 {error, _} = Err -> Err
             end
@@ -180,9 +180,8 @@ insert_all_validated(Pool, Jobs, Opts) ->
     Optional = [
         Column
      || {Column, true} <- [
-            {meta, lists:any(fun(Job) -> is_map_key(meta, Job) end, Jobs)},
-            {deps_results,
-                lists:any(fun(Job) -> maps:get(deps_results, Job, #{}) =/= #{} end, Jobs)},
+            {meta, [meta || #{meta := _} <- Jobs] =/= []},
+            {deps_results, [Job || Job <- Jobs, maps:get(deps_results, Job, #{}) =/= #{}] =/= []},
             {on_dependency_failure, lists:any(fun(Job) -> policy_column(Job) =/= null end, Jobs)}
         ]
     ],
@@ -194,9 +193,9 @@ insert_all_validated(Pool, Jobs, Opts) ->
     ],
     Insert = [
         ~"INSERT INTO shigoto_jobs (",
-        lists:join(~", ", [atom_to_binary(Column) || Column <- Columns]),
+        joined(~", ", [atom_to_binary(Column) || Column <- Columns]),
         ~") VALUES ",
-        lists:join(~", ", Values),
+        joined(~", ", Values),
         ~" RETURNING *"
     ],
     Params = lists:append([[bulk_value(Column, Job, Opts) || Column <- Columns] || Job <- Jobs]),
@@ -206,12 +205,13 @@ insert_all_validated(Pool, Jobs, Opts) ->
         {error, _} = Err -> Err
     end.
 
+-spec bulk_placeholders(non_neg_integer(), [atom()]) -> iodata().
 bulk_placeholders(Offset, Columns) ->
     Placeholders = [
         bulk_placeholder(Column, Offset + N)
      || {N, Column} <- lists:enumerate(Columns)
     ],
-    [~"(", lists:join(~", ", Placeholders), ~")"].
+    [~"(", joined(~", ", Placeholders), ~")"].
 
 bulk_placeholder(deps_results, N) -> [~"$", integer_to_binary(N), ~"::jsonb"];
 bulk_placeholder(_Column, N) -> [~"$", integer_to_binary(N)].
@@ -490,7 +490,10 @@ batches_settled(Pool, Rows) ->
         is_integer(BatchId),
         State =:= ~"discarded" orelse State =:= ~"cancelled"
     ],
-    _ = [shigoto_batch:settle(Pool, BatchId) || BatchId <- lists:usort(Batches)],
+    _ = [
+        shigoto_batch:settle(Pool, BatchId)
+     || BatchId <- lists:usort(Batches), is_integer(BatchId)
+    ],
     ok.
 
 -doc """
@@ -552,7 +555,7 @@ cancel_by(Pool, Filters) ->
 
 cancel_matching(Pool, Filters) ->
     {WhereClauses, Params, Next} = build_filter_clauses(Filters, 1),
-    Matching = lists:join(~" AND ", [~"state IN ('available', 'retryable')" | WhereClauses]),
+    Matching = joined(~" AND ", [~"state IN ('available', 'retryable')" | WhereClauses]),
     SQL = with_dependents(
         [
             ~"WITH RECURSIVE done AS (UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
@@ -660,7 +663,7 @@ retry_matching(Pool, Filters) ->
             _ ->
                 iolist_to_binary([
                     ~"state IN ('discarded', 'cancelled') AND ",
-                    lists:join(~" AND ", WhereClauses)
+                    joined(~" AND ", WhereClauses)
                 ])
         end,
     case query(Pool, retrying(WhereSQL), Params) of
@@ -927,7 +930,7 @@ find_matching(Pool, Filters0) ->
     WhereSQL =
         case AllClauses of
             [] -> ~"TRUE";
-            _ -> iolist_to_binary(lists:join(~" AND ", AllClauses))
+            _ -> iolist_to_binary(joined(~" AND ", AllClauses))
         end,
     SQL = iolist_to_binary([
         ~"SELECT * FROM shigoto_jobs WHERE ", WhereSQL, ~" ORDER BY id ASC"
@@ -1192,6 +1195,12 @@ own_columns(ids) ->
     )).*
     """.
 
+%% `lists:join/2` for the pieces of a statement.
+-spec joined(binary(), [iodata()]) -> [iodata()].
+joined(_Separator, []) -> [];
+joined(_Separator, [Part]) -> [Part];
+joined(Separator, [Part | Parts]) -> [Part, Separator | joined(Separator, Parts)].
+
 -spec default_policy() -> binary().
 default_policy() ->
     atom_to_binary(shigoto_config:on_dependency_failure()).
@@ -1309,22 +1318,17 @@ decoded_result(#{result := Result}) -> Result.
 apply_worker_defaults(JobParams) ->
     Worker = maps:get(worker, JobParams),
     _ = code:ensure_loaded(Worker),
-    Defaults = lists:foldl(
-        fun({Callback, Key}, Acc) ->
-            case maps:is_key(Key, JobParams) of
-                true ->
-                    Acc;
-                false ->
-                    case erlang:function_exported(Worker, Callback, 0) of
-                        true -> Acc#{Key => Worker:Callback()};
-                        false -> Acc
-                    end
-            end
-        end,
-        JobParams,
-        [{max_attempts, max_attempts}, {queue, queue}, {priority, priority}]
-    ),
-    Defaults.
+    worker_defaults([max_attempts, queue, priority], Worker, JobParams).
+
+%% What the job does not set itself, from the worker's callback of that name.
+-spec worker_defaults([atom()], module(), map()) -> map().
+worker_defaults([], _Worker, JobParams) ->
+    JobParams;
+worker_defaults([Key | Keys], Worker, JobParams) ->
+    case is_map_key(Key, JobParams) orelse not erlang:function_exported(Worker, Key, 0) of
+        true -> worker_defaults(Keys, Worker, JobParams);
+        false -> worker_defaults(Keys, Worker, JobParams#{Key => Worker:Key()})
+    end.
 
 resolve_unique(JobParams, Opts) ->
     case Opts of
@@ -1373,8 +1377,9 @@ build_unique_keys(#{keys := Keys}, Worker, Args, Queue) ->
 -spec unique_material([worker | args | queue], binary(), binary(), binary()) -> binary().
 unique_material(Keys, Worker, ArgsJson, Queue) ->
     Parts = [unique_part(Key, Worker, ArgsJson, Queue) || Key <- lists:sort(Keys)],
-    iolist_to_binary(lists:join(~":", Parts)).
+    iolist_to_binary(joined(~":", Parts)).
 
+-spec unique_part(term(), binary(), binary(), binary()) -> binary().
 unique_part(worker, Worker, _ArgsJson, _Queue) -> Worker;
 unique_part(args, _Worker, ArgsJson, _Queue) -> ArgsJson;
 unique_part(queue, _Worker, _ArgsJson, Queue) -> Queue.
@@ -1434,9 +1439,10 @@ find_existing_job(Pool, #{states := States, period := Period}, UniqueKeys) ->
         {error, _} = Err -> Err
     end.
 
+-spec states_in_clause([atom()]) -> iodata().
 states_in_clause(States) ->
     Quoted = [<<"'", (atom_to_binary(S))/binary, "'">> || S <- States],
-    lists:join(~", ", Quoted).
+    joined(~", ", Quoted).
 
 maybe_replace(Pool, Existing, _JobParams, #{replace := [], debounce := Seconds}) when
     is_integer(Seconds), Seconds > 0
@@ -1455,27 +1461,20 @@ maybe_replace(Pool, Existing, _JobParams, #{replace := [], debounce := Seconds})
 maybe_replace(_Pool, Existing, _JobParams, #{replace := []}) ->
     {ok, {conflict, Existing}};
 maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Debounce}) ->
-    {SetParts0, Params0, NextIdx} = lists:foldl(
-        fun(Field, {Acc, Ps, I}) ->
-            {Col, Val} = replace_field_value(Field, JobParams, Existing),
-            IBin = integer_to_binary(I),
-            Part = <<Col/binary, " = $", IBin/binary>>,
-            {[Part | Acc], Ps ++ [Val], I + 1}
-        end,
-        {[], [maps:get(id, Existing)], 2},
-        Fields
-    ),
+    Replaced = [replace_field_value(Field, JobParams, Existing) || Field <- Fields],
+    Sets0 = assignments(Replaced, 2),
+    Params0 = [maps:get(id, Existing) | [Value || {_Column, Value} <- Replaced]],
     %% Append debounce scheduled_at reset if configured
-    {SetParts, Params} =
+    {Sets, Params} =
         case is_integer(Debounce) andalso Debounce > 0 of
             true ->
-                IBin2 = integer_to_binary(NextIdx),
-                Part = <<"scheduled_at = now() + make_interval(secs => $", IBin2/binary, ")">>,
-                {[Part | SetParts0], Params0 ++ [Debounce]};
+                Next = integer_to_binary(length(Replaced) + 2),
+                Reset = <<"scheduled_at = now() + make_interval(secs => $", Next/binary, ")">>,
+                {Sets0 ++ [Reset], Params0 ++ [Debounce]};
             false ->
-                {SetParts0, Params0}
+                {Sets0, Params0}
         end,
-    SetClause = lists:join(~", ", lists:reverse(SetParts)),
+    SetClause = joined(~", ", Sets),
     SQL = iolist_to_binary([
         ~"UPDATE shigoto_jobs SET ",
         SetClause,
@@ -1488,6 +1487,13 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
 
 %% The new args go into the existing row, so they are encrypted for the worker
 %% that row names, which need not be the worker of the job that replaces them.
+-spec assignments([{binary(), term()}], pos_integer()) -> [binary()].
+assignments([], _Index) ->
+    [];
+assignments([{Column, _Value} | Rest], Index) ->
+    [<<Column/binary, " = $", (integer_to_binary(Index))/binary>> | assignments(Rest, Index + 1)].
+
+-spec replace_field_value(atom(), map(), map()) -> {binary(), term()}.
 replace_field_value(args, JobParams, #{worker := Worker}) when is_binary(Worker) ->
     ArgsJson = encode_json(maps:get(args, JobParams, #{})),
     {~"args", shigoto_crypto:seal(ArgsJson, {args, Worker})};
@@ -1571,16 +1577,19 @@ args_filter_refused(#{args := _}) ->
 args_filter_refused(_Filters) ->
     ok.
 
+-spec build_filter_clauses(map(), pos_integer()) -> {[binary()], [term()], pos_integer()}.
 build_filter_clauses(Filters, StartIdx) ->
-    maps:fold(
-        fun(Key, Value, {Clauses, Params, Idx}) ->
-            {Clause, NewParams, NewIdx} = filter_clause(Key, Value, Idx),
-            {[Clause | Clauses], Params ++ NewParams, NewIdx}
-        end,
-        {[], [], StartIdx},
-        Filters
-    ).
+    filter_clauses(maps:to_list(Filters), {[], [], StartIdx}).
 
+-spec filter_clauses([{term(), term()}], {[binary()], [term()], pos_integer()}) ->
+    {[binary()], [term()], pos_integer()}.
+filter_clauses([], Built) ->
+    Built;
+filter_clauses([{Key, Value} | Filters], {Clauses, Params, Idx}) ->
+    {Clause, NewParams, NewIdx} = filter_clause(Key, Value, Idx),
+    filter_clauses(Filters, {[Clause | Clauses], Params ++ NewParams, NewIdx}).
+
+-spec filter_clause(term(), term(), pos_integer()) -> {binary(), [term()], pos_integer()}.
 filter_clause(worker, Worker, Idx) ->
     IBin = integer_to_binary(Idx),
     WorkerBin =

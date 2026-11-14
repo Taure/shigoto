@@ -65,17 +65,19 @@ init({Queue, Concurrency}) ->
 -doc "Pause a queue — stops claiming new jobs but lets in-flight jobs finish.".
 -spec pause(pid()) -> ok.
 pause(Pid) ->
-    gen_server:call(Pid, pause).
+    _ = gen_server:call(Pid, pause),
+    ok.
 
 -doc "Resume a paused queue.".
 -spec resume(pid()) -> ok.
 resume(Pid) ->
-    gen_server:call(Pid, resume).
+    _ = gen_server:call(Pid, resume),
+    ok.
 
 -doc "Whether this queue process is currently paused.".
 -spec is_paused(pid()) -> boolean().
 is_paused(Pid) ->
-    gen_server:call(Pid, is_paused).
+    gen_server:call(Pid, is_paused) =:= true.
 
 -doc false.
 handle_call(pause, _From, State) ->
@@ -94,7 +96,7 @@ handle_cast({job_finished, _JobId, Pid}, #state{active = Active, executors = Exe
             erlang:demonitor(Ref, [flush]),
             {noreply,
                 refilled(State#state{
-                    active = max(0, Active - 1), executors = maps:remove(Pid, Execs)
+                    active = one_fewer(Active), executors = maps:remove(Pid, Execs)
                 })};
         #{} ->
             {noreply, State}
@@ -132,27 +134,9 @@ handle_info(
                         case claim(Pool, Queue, Available, Fair) of
                             {ok, Jobs} ->
                                 shigoto_telemetry:queue_poll(Queue, length(Jobs)),
-                                lists:foreach(
-                                    fun shigoto_telemetry:job_claimed/1,
-                                    Jobs
-                                ),
-                                {Started, Execs1} = lists:foldl(
-                                    fun(Job, {Count, AccExecs}) ->
-                                        case
-                                            shigoto_executor_sup:start_executor(
-                                                Job, Pool, self()
-                                            )
-                                        of
-                                            {ok, Pid} ->
-                                                Ref = erlang:monitor(process, Pid),
-                                                {Count + 1, AccExecs#{Pid => Ref}};
-                                            {error, _} ->
-                                                {Count, AccExecs}
-                                        end
-                                    end,
-                                    {0, Execs},
-                                    Jobs
-                                ),
+                                _ = [shigoto_telemetry:job_claimed(Job) || Job <- Jobs],
+                                Execs1 = executing(Jobs, Pool, Execs),
+                                Started = map_size(Execs1) - map_size(Execs),
                                 {Active + Started, Execs1, length(Jobs) >= Available};
                             {error, _} ->
                                 {Active, Execs, true}
@@ -181,7 +165,7 @@ handle_info(
         #{Pid := _} ->
             {noreply,
                 refilled(State#state{
-                    active = max(0, Active - 1), executors = maps:remove(Pid, Execs)
+                    active = one_fewer(Active), executors = maps:remove(Pid, Execs)
                 })};
         #{} ->
             {noreply, State}
@@ -203,10 +187,26 @@ terminate(_Reason, #state{executors = Execs}) ->
 %% Internal
 %%----------------------------------------------------------------------
 
+-spec claim(atom(), binary(), pos_integer(), boolean()) -> {ok, [map()]} | {error, term()}.
 claim(Pool, Queue, Limit, true) ->
     shigoto_repo:claim_jobs_fair(Pool, Queue, Limit);
 claim(Pool, Queue, Limit, false) ->
     shigoto_repo:claim_jobs(Pool, Queue, Limit).
+
+%% An executor for each claimed job, monitored. A job whose executor does not
+%% start stays `executing` in its row until the rescue takes it back.
+-spec executing([map()], atom(), #{pid() => reference()}) -> #{pid() => reference()}.
+executing([], _Pool, Execs) ->
+    Execs;
+executing([Job | Jobs], Pool, Execs) ->
+    case shigoto_executor_sup:start_executor(Job, Pool, self()) of
+        {ok, Pid} -> executing(Jobs, Pool, Execs#{Pid => erlang:monitor(process, Pid)});
+        {error, _} -> executing(Jobs, Pool, Execs)
+    end.
+
+-spec one_fewer(non_neg_integer()) -> non_neg_integer().
+one_fewer(0) -> 0;
+one_fewer(Active) -> Active - 1.
 
 %% A slot came free. When the last poll left work behind, or could not look,
 %% the queue polls now; `drop_queued_polls/0` makes several slots freed together

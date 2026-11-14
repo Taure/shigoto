@@ -111,7 +111,7 @@ search_jobs(Filters) ->
     WhereSQL =
         case WhereClauses of
             [] -> ~"true";
-            _ -> iolist_to_binary(lists:join(~" AND ", WhereClauses))
+            [First | Rest] -> iolist_to_binary([First | [[~" AND ", Clause] || Clause <- Rest]])
         end,
     LimitIdx = integer_to_binary(NextIdx),
     OffsetIdx = integer_to_binary(NextIdx + 1),
@@ -211,18 +211,24 @@ state_name(~"discarded") -> discarded;
 state_name(~"cancelled") -> cancelled;
 state_name(_Other) -> other.
 
+-spec build_search_clauses(map(), pos_integer()) -> {[binary()], [term()], pos_integer()}.
 build_search_clauses(Filters, StartIdx) ->
-    maps:fold(
-        fun(Key, Value, {Clauses, Params, Idx}) ->
-            case search_clause(Key, Value, Idx) of
-                skip -> {Clauses, Params, Idx};
-                {Clause, NewParams, NewIdx} -> {[Clause | Clauses], Params ++ NewParams, NewIdx}
-            end
-        end,
-        {[], [], StartIdx},
-        Filters
-    ).
+    search_clauses(maps:to_list(Filters), {[], [], StartIdx}).
 
+-spec search_clauses([{term(), term()}], {[binary()], [term()], pos_integer()}) ->
+    {[binary()], [term()], pos_integer()}.
+search_clauses([], Built) ->
+    Built;
+search_clauses([{Key, Value} | Filters], {Clauses, Params, Idx}) ->
+    case search_clause(Key, Value, Idx) of
+        skip ->
+            search_clauses(Filters, {Clauses, Params, Idx});
+        {Clause, NewParams, NewIdx} ->
+            search_clauses(Filters, {[Clause | Clauses], Params ++ NewParams, NewIdx})
+    end.
+
+-spec search_clause(term(), term(), pos_integer()) ->
+    skip | {binary(), [term()], pos_integer()}.
 search_clause(worker, Worker, Idx) ->
     IBin = integer_to_binary(Idx),
     WorkerBin =

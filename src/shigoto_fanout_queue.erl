@@ -37,7 +37,7 @@ node. A failure or a snooze is reported through telemetry and is not retried.
     shutting_down :: boolean()
 }).
 
--spec start_link(binary(), pos_integer(), map()) -> {ok, pid()}.
+-spec start_link(binary(), pos_integer(), map()) -> gen_server:start_ret().
 start_link(Queue, Concurrency, Opts) ->
     gen_server:start_link(?MODULE, {Queue, Concurrency, Opts}, []).
 
@@ -105,29 +105,13 @@ handle_info(
                 case fetch_recent_jobs(Pool, Queue, Window) of
                     {ok, Jobs} ->
                         Unseen = [J || #{id := Id} = J <- Jobs, not ets:member(Seen, Id)],
-                        Take = lists:sublist(Unseen, Available),
+                        Take = [Job || Job <- lists:sublist(Unseen, Available), is_map(Job)],
                         lists:foreach(
                             fun(#{id := Id}) -> ets:insert(Seen, {Id}) end,
                             Take
                         ),
-                        {Started, Execs1} = lists:foldl(
-                            fun(Job, {Count, AccExecs}) ->
-                                case
-                                    shigoto_executor_sup:start_fanout_executor(
-                                        Job, Pool, self()
-                                    )
-                                of
-                                    {ok, Pid} ->
-                                        Ref = erlang:monitor(process, Pid),
-                                        {Count + 1, AccExecs#{Pid => Ref}};
-                                    {error, _} ->
-                                        {Count, AccExecs}
-                                end
-                            end,
-                            {0, Execs},
-                            Take
-                        ),
-                        {Active + Started, Execs1};
+                        Execs1 = executing(Take, Pool, Execs),
+                        {Active + map_size(Execs1) - map_size(Execs), Execs1};
                     {error, _} ->
                         {Active, Execs}
                 end;
@@ -157,7 +141,11 @@ handle_info(
     {'DOWN', _Ref, process, Pid, _Reason}, #state{active = Active, executors = Execs} = State
 ) ->
     NewExecs = maps:remove(Pid, Execs),
-    NewActive = max(0, Active - 1),
+    NewActive =
+        case Active of
+            0 -> 0;
+            _ -> Active - 1
+        end,
     {noreply, State#state{active = NewActive, executors = NewExecs}};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -172,6 +160,16 @@ terminate(_Reason, #state{executors = Execs}) ->
 %% Internal
 %%----------------------------------------------------------------------
 
+-spec executing([map()], atom(), #{pid() => reference()}) -> #{pid() => reference()}.
+executing([], _Pool, Execs) ->
+    Execs;
+executing([Job | Jobs], Pool, Execs) ->
+    case shigoto_executor_sup:start_fanout_executor(Job, Pool, self()) of
+        {ok, Pid} -> executing(Jobs, Pool, Execs#{Pid => erlang:monitor(process, Pid)});
+        {error, _} -> executing(Jobs, Pool, Execs)
+    end.
+
+-spec fetch_recent_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 fetch_recent_jobs(Pool, Queue, WindowSeconds) ->
     shigoto_repo:fetch_fanout_jobs(Pool, Queue, WindowSeconds).
 

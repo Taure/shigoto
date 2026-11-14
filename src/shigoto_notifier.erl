@@ -92,13 +92,17 @@ handle_info(_Info, State) ->
 %%----------------------------------------------------------------------
 
 start_listener(Channel) ->
-    Config = shigoto_config:notifier_config(),
-    case shigoto_db:start_listener(?LISTENER, Config) of
-        {ok, Pid} ->
-            erlang:monitor(process, Pid),
-            listening(?LISTENER, Channel);
-        {error, _Reason} = Failed ->
-            Failed
+    case shigoto_config:notifier_config() of
+        undefined ->
+            {error, notifier_not_configured};
+        Config ->
+            case shigoto_db:start_listener(?LISTENER, Config) of
+                {ok, Pid} ->
+                    erlang:monitor(process, Pid),
+                    listening(?LISTENER, Channel);
+                {error, _Reason} = Failed ->
+                    Failed
+            end
     end.
 
 listening(Listener, Channel) ->

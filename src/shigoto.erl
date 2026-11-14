@@ -205,14 +205,14 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
             put(?TXN_KEY, {Pool, []}),
             try
                 Result = shigoto_db:transaction(Pool, Fun),
-                lists:foreach(fun shigoto_telemetry:job_inserted/1, take_deferred()),
+                _ = [shigoto_telemetry:job_inserted(Job) || Job <- take_deferred()],
                 Result
             catch
                 Class:Reason:Stack ->
                     _ = take_deferred(),
                     erlang:raise(Class, Reason, Stack)
             end;
-        {Pool, _} ->
+        {Pool, _} when is_atom(Pool) ->
             %% Nested: inherit the outer pool; the outermost transaction owns
             %% commit and the telemetry flush.
             shigoto_db:transaction(Pool, Fun)
@@ -319,10 +319,11 @@ paused_queues() ->
     case whereis(shigoto_queue_sup) of
         undefined ->
             [];
-        Sup ->
+        Sup when is_pid(Sup) ->
             [
                 Queue
              || {{shigoto_queue, Queue}, Pid, worker, _} <- supervisor:which_children(Sup),
+                is_binary(Queue),
                 is_pid(Pid),
                 shigoto_queue:is_paused(Pid)
             ]
@@ -409,8 +410,8 @@ add_queue(Queue, Concurrency) ->
                     shigoto_queue_sup, shigoto_queue_sup:queue_spec(Queue, Concurrency)
                 )
             of
-                {ok, Pid} -> {ok, Pid};
-                {error, {already_started, Pid}} -> {ok, Pid};
+                {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+                {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
                 {error, _} = Err -> Err
             end
     end.
@@ -477,15 +478,17 @@ emit_or_defer(Job) ->
     case get(?TXN_KEY) of
         undefined ->
             shigoto_telemetry:job_inserted(Job);
-        {Pool, Deferred} ->
+        {Pool, Deferred} when is_list(Deferred) ->
             put(?TXN_KEY, {Pool, [Job | Deferred]}),
             ok
     end.
 
 take_deferred() ->
     case erase(?TXN_KEY) of
-        undefined -> [];
-        {_Pool, Deferred} -> lists:reverse(Deferred)
+        undefined ->
+            [];
+        {_Pool, Deferred} when is_list(Deferred) ->
+            [Job || Job <- lists:reverse(Deferred), is_map(Job)]
     end.
 
 with_queue_pid(Queue, Fun) ->

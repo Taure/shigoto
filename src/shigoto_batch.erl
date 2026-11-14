@@ -149,7 +149,7 @@ is rolled back, `shigoto_batch_settle_failed` is logged and the answer is
 -spec settle(atom(), integer()) -> ok | {error, settle_failed}.
 settle(Pool, BatchId) ->
     try shigoto:transaction(fun() -> settled(Pool, BatchId) end, #{pool => Pool}) of
-        {settled, Batch} ->
+        {settled, Batch} when is_map(Batch) ->
             _ = shigoto_telemetry:batch_completed(Batch),
             ok;
         unsettled ->
