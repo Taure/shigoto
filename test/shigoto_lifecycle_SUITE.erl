@@ -43,7 +43,9 @@ the application does with it.
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1,
-    a_workers_gates_are_set_up_once/1
+    a_workers_gates_are_set_up_once/1,
+    a_declared_gate_is_not_skipped_without_seki/1,
+    a_result_that_looks_like_a_frame_reaches_its_dependent/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -57,7 +59,9 @@ the application does with it.
     stage_interval,
     notifier,
     fanout_queues,
-    shutdown_timeout
+    shutdown_timeout,
+    encryption_key,
+    encryption_write_format
 ]).
 
 all() ->
@@ -93,7 +97,9 @@ all() ->
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete,
-        a_workers_gates_are_set_up_once
+        a_workers_gates_are_set_up_once,
+        a_declared_gate_is_not_skipped_without_seki,
+        a_result_that_looks_like_a_frame_reaches_its_dependent
     ].
 
 init_per_suite(Config) ->
@@ -162,6 +168,8 @@ overrides(stopping_the_application_stops_a_running_worker) ->
     #{shutdown_timeout => 200};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
+overrides(a_result_that_looks_like_a_frame_reaches_its_dependent) ->
+    #{encryption_key => binary:copy(<<7>>, 32), encryption_write_format => v1};
 overrides(_TestCase) ->
     #{}.
 
@@ -426,6 +434,31 @@ a_workers_gates_are_set_up_once(_Config) ->
     instruct(performing(~"gates-second"), {return, ok}),
     _ = await(Second, ~"completed").
 
+a_declared_gate_is_not_skipped_without_seki(_Config) ->
+    ok = telemetry:attach(
+        ?MODULE, [shigoto, resilience, gate_failed], fun ?MODULE:forward/4, self()
+    ),
+    ok = application:stop(seki),
+    Gated = enqueue(~"gated", #{worker => shigoto_gated_worker}),
+    receive
+        {telemetry, [shigoto, resilience, gate_failed], #{count := 1}, Meta} ->
+            ?assertMatch(#{worker := shigoto_gated_worker, gate := setup}, Meta)
+    after 2000 -> ct:fail(gate_failure_not_reported)
+    end,
+    ok = idle(~"gated", 500),
+    %% Snoozed, which gives the attempt back and records no error.
+    ?assertMatch(
+        #{state := ~"available", attempt := 1, max_attempts := 4, errors := ~"[]"}, row(Gated)
+    ),
+    %% A worker that declares no gate has none to lose.
+    Plain = enqueue(~"ungated"),
+    instruct(performing(~"ungated"), {return, ok}),
+    _ = await(Plain, ~"completed"),
+    {ok, _} = application:ensure_all_started(seki),
+    ok = due(Gated),
+    instruct(performing(~"gated"), {return, ok}),
+    ?assertMatch(#{attempt := 2}, await(Gated, ~"completed")).
+
 %%----------------------------------------------------------------------
 %% Waking up
 %%----------------------------------------------------------------------
@@ -499,7 +532,7 @@ an_unknown_worker_fails_the_job_not_the_queue(_Config) ->
     Id = insert_row(~"shigoto_no_such_worker_module", ~"{}", 2),
     Failed = await(Id, ~"retryable"),
     ?assertMatch(
-        [#{~"error" := ~"unknown_worker:<<\"shigoto_no_such_worker_module\">>"}], errors(Failed)
+        [#{~"error" := ~"{unknown_worker,<<\"shigoto_no_such_worker_module\">>}"}], errors(Failed)
     ),
     %% No worker module, so the default backoff applies: up to half a minute.
     ok = due(Id),
@@ -514,7 +547,7 @@ an_unknown_worker_fails_the_job_not_the_queue(_Config) ->
 a_module_that_is_not_a_worker_fails_the_job(_Config) ->
     Id = insert_row(~"lists", ~"{\"ssn\": \"191212121212\"}", 1),
     Row = await(Id, ~"discarded"),
-    ?assertMatch([#{~"error" := ~"unknown_worker:<<\"lists\">>"}], errors(Row)),
+    ?assertMatch([#{~"error" := ~"{unknown_worker,<<\"lists\">>}"}], errors(Row)),
     ?assertEqual(nomatch, binary:match(maps:get(errors, Row), ~"191212121212")).
 
 %%----------------------------------------------------------------------
@@ -573,6 +606,19 @@ a_child_runs_after_its_parent_with_the_result(_Config) ->
     instruct(ChildWorker, {return, ok}),
     _ = await(Child, ~"completed").
 
+a_result_that_looks_like_a_frame_reaches_its_dependent(_Config) ->
+    Parent = enqueue(~"framelike-parent"),
+    Child = enqueue(~"framelike-child", #{depends_on => [Parent]}),
+    instruct(performing(~"framelike-parent"), {return, {ok, ~"enc:hello"}}),
+    {ChildWorker, Args} = performing_with_args(~"framelike-child"),
+    ?assertEqual(#{Parent => ~"enc:hello"}, maps:get(deps_results, Args)),
+    instruct(ChildWorker, {return, {ok, ~"enc:v2:world"}}),
+    _ = await(Child, ~"completed"),
+    {ok, #{result := ParentResult}} = shigoto:get_job(Parent),
+    {ok, #{result := ChildResult}} = shigoto:get_job(Child),
+    ?assertEqual(~"enc:hello", json:decode(ParentResult)),
+    ?assertEqual(~"enc:v2:world", json:decode(ChildResult)).
+
 a_discarded_parent_follows_each_childs_policy(_Config) ->
     Parent = enqueue(~"policy-parent", #{max_attempts => 1}),
     Runs = enqueue(~"policy-run", #{depends_on => [Parent]}),
@@ -627,10 +673,13 @@ enqueue(Tag) ->
     enqueue(Tag, #{}).
 
 enqueue(Tag, Extra) ->
-    Params = Extra#{
-        worker => shigoto_lifecycle_worker,
-        args => #{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag}
-    },
+    Params = maps:merge(
+        #{
+            worker => shigoto_lifecycle_worker,
+            args => #{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag}
+        },
+        Extra
+    ),
     {ok, #{id := Id}} = shigoto:insert(Params),
     Id.
 
