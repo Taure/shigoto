@@ -174,10 +174,14 @@ writes. See [Testing](guides/testing.md#with-kura_sandbox).
 
 ```
 available → executing → completed
-                     ↘ retryable → available (retry with backoff)
+                     ↘ retryable → executing (claimed again once the backoff is over)
                      ↘ discarded (max attempts reached)
                      ↘ snoozed → available (rescheduled, the attempt given back)
 ```
+
+A failed job with attempts left is `retryable`, with `scheduled_at` set to the
+end of its backoff. The queue claims `retryable` jobs exactly as it claims
+`available` ones, so the retry needs nothing but the polling loop.
 
 Jobs can also be `cancelled` via `shigoto:cancel/2` and retried via `shigoto:retry/2`.
 

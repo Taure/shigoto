@@ -51,7 +51,7 @@ rebar3 ex_doc               # fix every new warning
 ```
 
 Migrations are not hand-written. `shigoto_migration:up/Pool` runs the versioned,
-idempotent statement sets (`v1..v6`) against a minato pool and answers
+idempotent statement sets (`v1..v7`) against a minato pool and answers
 `{error, Reason}` for the first one that fails. A new version is a new
 `vN_statements/0` plus a bump of `?SCHEMA_VERSION`, which `up/1` records as the
 comment on `shigoto_jobs` and checks to skip a current schema (a CT case fails
@@ -111,7 +111,9 @@ shigoto_sup (one_for_one)
   job under `shigoto_executor_sup`. Weighted / fair (partition-key) claiming and
   pause/resume live here.
 - **Retry / backoff.** On error, timeout, or crash the executor records a
-  structured failure and reschedules: `retryable -> available`. Delay is the
+  structured failure and leaves the job `retryable` with `scheduled_at` at the
+  end of its backoff; the claim takes due `available` and `retryable` jobs
+  alike, so nothing has to promote it. Delay is the
   worker's `backoff/2` or the default `min(round(Attempt^4) + jitter(1..30),
   1800)` seconds. At `max_attempts` the job is `discarded` and `on_discard/2`
   fires. `{snooze, Secs}` reschedules and raises `max_attempts` by one, giving

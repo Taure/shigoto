@@ -13,7 +13,7 @@ Migrations are idempotent and safe to run multiple times.
 -define(LOCK_ID, 839274630).
 %% The newest vN_statements/0. A CT case fails when a version is added without
 %% raising this.
--define(SCHEMA_VERSION, 6).
+-define(SCHEMA_VERSION, 7).
 
 -doc """
 Create or update the shigoto tables.
@@ -21,16 +21,24 @@ Create or update the shigoto tables.
 Runs in one transaction that first takes an advisory lock, so nodes booting at
 the same time migrate one after the other rather than racing on
 `CREATE ... IF NOT EXISTS`. The last statement records the schema version as
-the comment on `shigoto_jobs` (`shigoto 6`), replacing any comment set there.
+the comment on `shigoto_jobs` (`shigoto 7`), replacing any comment set there.
 A schema that already records this version or a newer one (written by a newer
 shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
 taken, so a running system is not blocked. A comment that is not `shigoto <N>`
 (with `N` a positive number of at most 9 digits) counts as no version, and is
 overwritten. A schema with no comment at all that already has the newest
-version's columns (one migrated by shigoto 1.9.x) is also current: `up/1` logs
-`shigoto_schema_unstamped` once and answers `ok` without DDL, so a role that may
-only read and write rows can run it. Run `up/1` once as the table owner to
-record the version.
+version's index is also current: `up/1` logs `shigoto_schema_unstamped` once and
+answers `ok` without DDL, so a role that may only read and write rows can run
+it. Run `up/1` once as the table owner to record the version. A schema migrated
+by shigoto 1.9.x has no comment and not that index, so it is migrated like any
+older one, which takes the table owner.
+
+Version 7 builds one partial index on `shigoto_jobs` and drops the one it
+replaces, holding the table lock while it does: the build reads the whole table
+and indexes only the rows waiting to run. On a table of many millions of rows,
+run `CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx ON
+shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')`
+by hand first; the migration then finds it and skips the build.
 
 Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
 `shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
@@ -80,7 +88,7 @@ locked(Pool) ->
                             Pool,
                             v1_statements() ++ v2_statements() ++ v3_statements() ++
                                 v4_statements() ++ v5_statements() ++ v6_statements() ++
-                                [version_statement()]
+                                v7_statements() ++ [version_statement()]
                         )
                     )
             end
@@ -119,18 +127,16 @@ current(Pool) ->
             throw({?MODULE, Reason})
     end.
 
-%% A schema migrated before the version comment existed (1.9.x) has none. When
-%% it already has v6's last column it is current: a DML-only role could not
-%% record the version anyway, and would otherwise never get past boot.
+%% A schema whose version comment was removed has none. When it already has
+%% the newest version's index it is current: a DML-only role could not record
+%% the version anyway, and would otherwise never get past boot.
 unstamped(Pool) ->
     SQL =
         ~"""
         SELECT count(*) AS found
-        FROM pg_attribute a
-        JOIN pg_class c ON c.oid = a.attrelid
+        FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relname = 'shigoto_jobs_archive' AND n.nspname = current_schema()
-          AND a.attname = 'deps_results' AND NOT a.attisdropped
+        WHERE c.relname = 'shigoto_jobs_claimable_idx' AND n.nspname = current_schema()
         """,
     case shigoto_db:query(Pool, SQL, []) of
         #{rows := [#{found := 1}]} ->
@@ -244,11 +250,6 @@ v1_statements() ->
           errors JSONB NOT NULL DEFAULT '[]',
           meta JSONB NOT NULL DEFAULT '{}'
         )
-        """,
-        ~"""
-        CREATE INDEX IF NOT EXISTS shigoto_jobs_queue_state_idx
-        ON shigoto_jobs (queue, state, scheduled_at)
-        WHERE state = 'available'
         """,
         ~"""
         CREATE INDEX IF NOT EXISTS shigoto_jobs_state_idx
@@ -377,4 +378,18 @@ v6_statements() ->
         ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'",
         ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS result JSONB",
         ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'"
+    ].
+
+v7_statements() ->
+    [
+        %% The claim reads jobs that are due in either waiting state. A claim
+        %% for `state = 'available'` alone, from a node still on the previous
+        %% version, implies this predicate and uses the same index, so the
+        %% index v1 created for it goes.
+        ~"""
+        CREATE INDEX IF NOT EXISTS shigoto_jobs_claimable_idx
+        ON shigoto_jobs (queue, scheduled_at)
+        WHERE state IN ('available', 'retryable')
+        """,
+        ~"DROP INDEX IF EXISTS shigoto_jobs_queue_state_idx"
     ].

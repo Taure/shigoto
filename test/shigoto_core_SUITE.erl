@@ -46,6 +46,9 @@
     test_snooze_does_not_use_up_attempts/1,
     test_claim_never_exceeds_limit/1,
     test_max_attempts_discards/1,
+    test_retryable_job_is_claimed_once_due/1,
+    test_retryable_job_is_claimed_fairly_once_due/1,
+    test_retry_frees_a_unique_key/1,
     test_concurrent_claim_no_double_execute/1,
     test_cancel_by_no_match/1,
     test_insert_minimal_params/1,
@@ -84,6 +87,9 @@ all() ->
         test_snooze_does_not_use_up_attempts,
         test_claim_never_exceeds_limit,
         test_max_attempts_discards,
+        test_retryable_job_is_claimed_once_due,
+        test_retryable_job_is_claimed_fairly_once_due,
+        test_retry_frees_a_unique_key,
         test_concurrent_claim_no_double_execute,
         test_cancel_by_no_match,
         test_insert_minimal_params,
@@ -588,6 +594,35 @@ test_max_attempts_discards(_Config) ->
     {ok, Failed} = shigoto_repo:get_job(?POOL, JobId),
     ?assertEqual(<<"discarded">>, maps:get(state, Failed)).
 
+test_retryable_job_is_claimed_once_due(_Config) ->
+    JobId = failed_once(#{}),
+    ?assertMatch({ok, #{state := ~"retryable", attempt := 1}}, shigoto_repo:get_job(?POOL, JobId)),
+    %% The backoff is not over: the job waits.
+    ?assertEqual({ok, []}, shigoto_repo:claim_jobs(?POOL, ~"default", 10)),
+    make_due(JobId),
+    {ok, [Retried]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertMatch(#{id := JobId, state := ~"executing", attempt := 2}, Retried).
+
+test_retryable_job_is_claimed_fairly_once_due(_Config) ->
+    JobId = failed_once(#{partition_key => ~"tenant"}),
+    ?assertEqual({ok, []}, shigoto_repo:claim_jobs_fair(?POOL, ~"default", 10)),
+    make_due(JobId),
+    {ok, [Retried]} = shigoto_repo:claim_jobs_fair(?POOL, ~"default", 10),
+    ?assertMatch(#{id := JobId, state := ~"executing", attempt := 2}, Retried).
+
+test_retry_frees_a_unique_key(_Config) ->
+    Unique = #{unique => #{keys => [worker, args]}},
+    Params = #{worker => shigoto_test_worker, args => #{~"action" => ~"fail"}},
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(?POOL, Params, Unique),
+    {ok, [First]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:fail_job(?POOL, First, boom, 60),
+    ?assertMatch({ok, {conflict, #{id := JobId}}}, shigoto_repo:insert_job(?POOL, Params, Unique)),
+    make_due(JobId),
+    {ok, [Second]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:complete_job(?POOL, maps:get(id, Second)),
+    {ok, #{id := NextId}} = shigoto_repo:insert_job(?POOL, Params, Unique),
+    ?assertNotEqual(JobId, NextId).
+
 test_concurrent_claim_no_double_execute(_Config) ->
     {ok, _} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
@@ -647,6 +682,14 @@ test_debounce_resets_scheduled_at(_Config) ->
 %%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
+
+failed_once(Extra) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, Extra#{worker => shigoto_test_worker, args => #{~"action" => ~"fail"}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 3600),
+    JobId.
 
 make_due(JobId) ->
     #{} = shigoto_db:query(

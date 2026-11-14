@@ -76,7 +76,7 @@ queues_wait_for_the_migration(_Config) ->
     ok = wait_for(fun() -> whereis(shigoto_migrator) =:= undefined end, 50),
     ?assertEqual(not_running, shigoto_migrator:retry_now()),
     ?assertMatch(
-        #{rows := [#{version := ~"shigoto 6"}]},
+        #{rows := [#{version := ~"shigoto 7"}]},
         shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
 

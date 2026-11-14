@@ -124,7 +124,12 @@ insert_all(Pool, JobParamsList, Opts) ->
     end.
 
 -doc """
-Claim up to `Limit` available jobs from a queue using `FOR UPDATE SKIP LOCKED`.
+Claim up to `Limit` due jobs from a queue using `FOR UPDATE SKIP LOCKED`.
+
+A job is due when it is `available` or `retryable`, its `scheduled_at` has
+passed and it waits on no dependency. A failed job is `retryable` until the
+backoff written to its `scheduled_at` is over, and is then claimed like any
+other.
 
 Never answers more than `Limit` jobs. The locking select runs once, as an
 uncorrelated `ARRAY(...)` subquery, because `WHERE id IN (SELECT ... LIMIT ...
@@ -134,22 +139,22 @@ subquery for every outer row, and each rescan locks and returns more rows.
 -spec claim_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 claim_jobs(Pool, Queue, Limit) ->
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET\n"
-            "state = 'executing',\n"
-            "attempted_at = now(),\n"
-            "attempt = attempt + 1\n"
-            "WHERE id = ANY(ARRAY(\n"
-            "  SELECT id FROM shigoto_jobs\n"
-            "  WHERE queue = $1\n"
-            "  AND state = 'available'\n"
-            "  AND scheduled_at <= now()\n"
-            "  AND depends_on = '{}'\n"
-            "  ORDER BY priority DESC, scheduled_at ASC\n"
-            "  LIMIT $2\n"
-            "  FOR UPDATE SKIP LOCKED\n"
-            ")) RETURNING *"
-        >>,
+        ~"""
+        UPDATE shigoto_jobs SET
+          state = 'executing',
+          attempted_at = now(),
+          attempt = attempt + 1
+        WHERE id = ANY(ARRAY(
+          SELECT id FROM shigoto_jobs
+          WHERE queue = $1
+          AND state IN ('available', 'retryable')
+          AND scheduled_at <= now()
+          AND depends_on = '{}'
+          ORDER BY priority DESC, scheduled_at ASC
+          LIMIT $2
+          FOR UPDATE SKIP LOCKED
+        )) RETURNING *
+        """,
     case query(Pool, SQL, [Queue, Limit]) of
         #{rows := Rows} ->
             DecryptedRows = [decrypt_job_args(R) || R <- Rows],
@@ -158,32 +163,32 @@ claim_jobs(Pool, Queue, Limit) ->
             Err
     end.
 
--doc "Claim jobs with fair partition interleaving. One job per partition first, then fill.".
+-doc "Claim due jobs with fair partition interleaving. One job per partition first, then fill.".
 -spec claim_jobs_fair(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 claim_jobs_fair(Pool, Queue, Limit) ->
     %% Two-phase: first get fair-ordered IDs via window function, then lock and update.
     %% The CTE selects IDs in fair order, outer query locks them.
     SQL =
-        <<
-            "WITH ranked AS (\n"
-            "  SELECT id,\n"
-            "    ROW_NUMBER() OVER (\n"
-            "      PARTITION BY COALESCE(partition_key, 'null_' || id::text)\n"
-            "      ORDER BY priority DESC, scheduled_at ASC\n"
-            "    ) as rn\n"
-            "  FROM shigoto_jobs\n"
-            "  WHERE queue = $1 AND state = 'available' AND scheduled_at <= now()\n"
-            "  AND depends_on = '{}'\n"
-            "),\n"
-            "to_claim AS (\n"
-            "  SELECT id FROM ranked ORDER BY rn, id LIMIT $2\n"
-            ")\n"
-            "UPDATE shigoto_jobs SET\n"
-            "state = 'executing', attempted_at = now(), attempt = attempt + 1\n"
-            "WHERE id IN (SELECT id FROM to_claim)\n"
-            "AND state = 'available'\n"
-            "RETURNING *"
-        >>,
+        ~"""
+        WITH ranked AS (
+          SELECT id,
+            ROW_NUMBER() OVER (
+              PARTITION BY COALESCE(partition_key, 'null_' || id::text)
+              ORDER BY priority DESC, scheduled_at ASC
+            ) as rn
+          FROM shigoto_jobs
+          WHERE queue = $1 AND state IN ('available', 'retryable') AND scheduled_at <= now()
+          AND depends_on = '{}'
+        ),
+        to_claim AS (
+          SELECT id FROM ranked ORDER BY rn, id LIMIT $2
+        )
+        UPDATE shigoto_jobs SET
+          state = 'executing', attempted_at = now(), attempt = attempt + 1
+        WHERE id IN (SELECT id FROM to_claim)
+        AND state IN ('available', 'retryable')
+        RETURNING *
+        """,
     case query(Pool, SQL, [Queue, Limit]) of
         #{rows := Rows} ->
             DecryptedRows = [decrypt_job_args(R) || R <- Rows],

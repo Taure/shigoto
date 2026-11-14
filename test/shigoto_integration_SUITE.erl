@@ -69,6 +69,7 @@
     test_global_concurrency_admits_two_of_three/1,
     test_stager_surfaces_due_queue/1,
     test_stager_ignores_not_yet_due/1,
+    test_stager_surfaces_a_due_retry/1,
     test_stager_stage_once_fails_soft/1,
     test_result_stored_on_ok_tuple/1,
     test_plain_ok_stores_null/1,
@@ -141,6 +142,7 @@ all() ->
         test_global_concurrency_admits_two_of_three,
         test_stager_surfaces_due_queue,
         test_stager_ignores_not_yet_due,
+        test_stager_surfaces_a_due_retry,
         test_stager_stage_once_fails_soft,
         test_result_stored_on_ok_tuple,
         test_plain_ok_stores_null,
@@ -246,7 +248,7 @@ test_migration_behind_a_reader_times_out(_Config) ->
         ok = shigoto_migration:up(?POOL)
     end,
     ?assertMatch(
-        #{rows := [#{version := ~"shigoto 6"}]},
+        #{rows := [#{version := ~"shigoto 7"}]},
         shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
 
@@ -263,7 +265,7 @@ test_newer_schema_is_left_alone(_Config) ->
         )
     end,
     ok = shigoto_migration:up(?POOL),
-    ?assertEqual(~"shigoto 6", schema_comment()).
+    ?assertEqual(~"shigoto 7", schema_comment()).
 
 test_huge_schema_comment_is_not_a_version(_Config) ->
     #{} = shigoto_db:query(
@@ -272,7 +274,7 @@ test_huge_schema_comment_is_not_a_version(_Config) ->
         []
     ),
     ?assertEqual(ok, shigoto_migration:up(?POOL)),
-    ?assertEqual(~"shigoto 6", schema_comment()).
+    ?assertEqual(~"shigoto 7", schema_comment()).
 
 %% A migration that cannot take its table locks at once gives up at once,
 %% rather than queueing an ACCESS EXCLUSIVE request that claims wait behind.
@@ -308,7 +310,7 @@ test_migration_succeeds_under_steady_writes(_Config) ->
         [unlink(Writer) || Writer <- Writers],
         timer:sleep(300)
     end,
-    ?assertEqual(~"shigoto 6", schema_comment()).
+    ?assertEqual(~"shigoto 7", schema_comment()).
 
 write_until(Stop) ->
     case atomics:get(Stop, 1) of
@@ -327,10 +329,10 @@ write_until(Stop) ->
     end.
 
 test_comment_with_a_trailing_newline_is_not_a_version(_Config) ->
-    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS E'shigoto 6\\n'", []),
-    ?assertEqual(<<"shigoto 6\n">>, schema_comment()),
+    #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS E'shigoto 7\\n'", []),
+    ?assertEqual(<<"shigoto 7\n">>, schema_comment()),
     ?assertEqual(ok, shigoto_migration:up(?POOL)),
-    ?assertEqual(~"shigoto 6", schema_comment()).
+    ?assertEqual(~"shigoto 7", schema_comment()).
 
 schema_comment() ->
     #{rows := [#{version := Version}]} =
@@ -1057,6 +1059,22 @@ test_stager_surfaces_due_queue(_Config) ->
     ),
     {ok, After} = shigoto_stager:due_queues(?POOL),
     ?assert(lists:member(~"soon", After)).
+
+test_stager_surfaces_a_due_retry(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => ~"retried"}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"retried", 1),
+    ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 3600),
+    {ok, Waiting} = shigoto_stager:due_queues(?POOL),
+    ?assertNot(lists:member(~"retried", Waiting)),
+    #{command := update} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_jobs SET scheduled_at = now() - interval '1 second' WHERE id = $1",
+        [JobId]
+    ),
+    {ok, Due} = shigoto_stager:due_queues(?POOL),
+    ?assert(lists:member(~"retried", Due)).
 
 test_stager_ignores_not_yet_due(_Config) ->
     {ok, _} = shigoto_repo:insert_job(

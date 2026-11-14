@@ -16,6 +16,10 @@ the application does with it.
     a_notification_wakes_the_queue/1,
     a_scheduled_job_runs_when_due/1,
     a_snoozed_job_runs_again_later/1,
+    a_failed_job_runs_again_after_its_backoff/1,
+    a_retry_is_woken_by_the_stager/1,
+    a_job_out_of_attempts_is_discarded/1,
+    a_killed_worker_process_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
     the_pruner_archives_old_finished_jobs/1,
     a_batch_callback_runs_after_its_jobs/1,
@@ -40,6 +44,10 @@ all() ->
         a_notification_wakes_the_queue,
         a_scheduled_job_runs_when_due,
         a_snoozed_job_runs_again_later,
+        a_failed_job_runs_again_after_its_backoff,
+        a_retry_is_woken_by_the_stager,
+        a_job_out_of_attempts_is_discarded,
+        a_killed_worker_process_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
         the_pruner_archives_old_finished_jobs,
         a_batch_callback_runs_after_its_jobs,
@@ -98,6 +106,8 @@ overrides(a_notification_wakes_the_queue) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_scheduled_job_runs_when_due) ->
     #{poll_interval => 60000, notifier => connection()};
+overrides(a_retry_is_woken_by_the_stager) ->
+    #{poll_interval => 60000, notifier => connection()};
 overrides(_TestCase) ->
     #{}.
 
@@ -139,6 +149,52 @@ a_snoozed_job_runs_again_later(_Config) ->
     ?assertMatch(#{attempt := 1, max_attempts := 4, errors := ~"[]"}, Snoozed),
     instruct(performing(~"snoozed"), {return, ok}),
     ?assertMatch(#{attempt := 2, max_attempts := 4}, await(Id, ~"completed")).
+
+%%----------------------------------------------------------------------
+%% Failing and retrying
+%%----------------------------------------------------------------------
+
+a_failed_job_runs_again_after_its_backoff(_Config) ->
+    Id = enqueue(~"retried"),
+    instruct(performing(~"retried"), {return, {error, first_try}}),
+    Failed = await(Id, ~"retryable"),
+    ?assertMatch(#{attempt := 1}, Failed),
+    ?assertMatch([#{~"attempt" := 1, ~"error" := ~"first_try"}], errors(Failed)),
+    instruct(performing(~"retried"), {return, ok}),
+    Done = await(Id, ~"completed"),
+    ?assertMatch(#{attempt := 2}, Done),
+    ?assertMatch([_], errors(Done)).
+
+a_retry_is_woken_by_the_stager(_Config) ->
+    Id = enqueue(~"staged"),
+    instruct(performing(~"staged"), {return, {error, first_try}}),
+    _ = await(Id, ~"retryable"),
+    instruct(performing(~"staged"), {return, ok}),
+    ?assertMatch(#{attempt := 2}, await(Id, ~"completed")).
+
+a_job_out_of_attempts_is_discarded(_Config) ->
+    Id = enqueue(~"exhausted", #{max_attempts => 2}),
+    instruct(performing(~"exhausted"), {return, {error, first_try}}),
+    instruct(performing(~"exhausted"), {return, {error, second_try}}),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch(#{attempt := 2}, Row),
+    ?assertNotEqual(null, maps:get(discarded_at, Row)),
+    ?assertMatch(
+        [#{~"error" := ~"first_try"}, #{~"error" := ~"second_try"}], errors(Row)
+    ),
+    receive
+        {discarded, ~"exhausted", [_, _]} -> ok
+    after 2000 -> ct:fail(on_discard_not_called)
+    end,
+    ok = idle(~"exhausted", 1500).
+
+a_killed_worker_process_is_a_failure(_Config) ->
+    Id = enqueue(~"killed"),
+    instruct(performing(~"killed"), die),
+    Failed = await(Id, ~"retryable"),
+    ?assertMatch([#{~"error" := ~"killed"}], errors(Failed)),
+    instruct(performing(~"killed"), {return, ok}),
+    _ = await(Id, ~"completed").
 
 %%----------------------------------------------------------------------
 %% Cancelling
@@ -288,6 +344,9 @@ row(Id) ->
 
 select_job() ->
     ~"SELECT * FROM shigoto_jobs WHERE id = $1".
+
+errors(#{errors := Errors}) ->
+    json:decode(Errors).
 
 archived(Id) ->
     #{rows := Rows} = shigoto_db:query(

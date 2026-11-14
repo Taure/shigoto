@@ -2,7 +2,7 @@
 -moduledoc """
 Latency accelerator for delayed jobs. On a short interval it finds
 queues with work due to run now (a job's `scheduled_at` has elapsed,
-including a failed job rescheduled after its backoff) and issues a
+including a `retryable` job whose backoff is over) and issues a
 `pg_notify('shigoto_jobs_insert', Queue)` so the existing notifier
 wakes the matching queue immediately instead of waiting up to
 `poll_interval`.
@@ -140,7 +140,7 @@ due_queues(Pool) ->
     SQL =
         ~"""
         SELECT DISTINCT queue FROM shigoto_jobs
-        WHERE state = 'available'
+        WHERE state IN ('available', 'retryable')
         AND scheduled_at <= now()
         AND depends_on = '{}'
         """,
