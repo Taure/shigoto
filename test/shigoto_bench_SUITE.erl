@@ -67,32 +67,32 @@ end_per_testcase(_TestCase, _Config) ->
 %% Insert benchmarks
 %%----------------------------------------------------------------------
 
-bench_insert_single(_Config) ->
+bench_insert_single(Config) ->
     N = 1000,
     {Time, _} = timer:tc(fun() ->
         insert_n(N)
     end),
-    report(~"insert_single", N, Time).
+    report(Config, ~"insert_single", N, Time).
 
-bench_insert_bulk_100(_Config) ->
+bench_insert_bulk_100(Config) ->
     Batches = 100,
     BatchSize = 100,
     N = Batches * BatchSize,
     {Time, _} = timer:tc(fun() ->
         insert_bulk(Batches, BatchSize)
     end),
-    report(~"insert_bulk_100", N, Time).
+    report(Config, ~"insert_bulk_100", N, Time).
 
-bench_insert_bulk_1000(_Config) ->
+bench_insert_bulk_1000(Config) ->
     Batches = 10,
     BatchSize = 1000,
     N = Batches * BatchSize,
     {Time, _} = timer:tc(fun() ->
         insert_bulk(Batches, BatchSize)
     end),
-    report(~"insert_bulk_1000", N, Time).
+    report(Config, ~"insert_bulk_1000", N, Time).
 
-bench_insert_unique(_Config) ->
+bench_insert_unique(Config) ->
     N = 1000,
     Unique = #{keys => [worker, args], states => [available]},
     {Time, _} = timer:tc(fun() ->
@@ -107,9 +107,9 @@ bench_insert_unique(_Config) ->
             lists:seq(1, N)
         )
     end),
-    report(~"insert_unique", N, Time).
+    report(Config, ~"insert_unique", N, Time).
 
-bench_insert_with_encryption(_Config) ->
+bench_insert_with_encryption(Config) ->
     Key = crypto:strong_rand_bytes(32),
     application:set_env(shigoto, encryption_key, Key),
     N = 1000,
@@ -117,28 +117,28 @@ bench_insert_with_encryption(_Config) ->
         insert_n(N)
     end),
     application:set_env(shigoto, encryption_key, undefined),
-    report(~"insert_encrypted", N, Time).
+    report(Config, ~"insert_encrypted", N, Time).
 
-bench_insert_with_deps(_Config) ->
+bench_insert_with_deps(Config) ->
     N = 500,
     {Time, _} = timer:tc(fun() ->
         insert_chain(N)
     end),
-    report(~"insert_with_deps", N, Time).
+    report(Config, ~"insert_with_deps", N, Time).
 
 %%----------------------------------------------------------------------
 %% Claim + complete benchmarks
 %%----------------------------------------------------------------------
 
-bench_claim_and_complete(_Config) ->
+bench_claim_and_complete(Config) ->
     N = 1000,
     insert_n(N),
     {Time, _} = timer:tc(fun() ->
         claim_and_complete_loop(N)
     end),
-    report(~"claim_complete", N, Time).
+    report(Config, ~"claim_complete", N, Time).
 
-bench_claim_and_complete_concurrent(_Config) ->
+bench_claim_and_complete_concurrent(Config) ->
     N = 2000,
     Workers = 4,
     PerWorker = N div Workers,
@@ -154,21 +154,21 @@ bench_claim_and_complete_concurrent(_Config) ->
         ],
         wait_all(Pids)
     end),
-    report(~"claim_complete_4x", N, Time).
+    report(Config, ~"claim_complete_4x", N, Time).
 
 %%----------------------------------------------------------------------
 %% Full lifecycle benchmarks
 %%----------------------------------------------------------------------
 
-bench_full_lifecycle(_Config) ->
+bench_full_lifecycle(Config) ->
     N = 500,
     {Time, _} = timer:tc(fun() ->
         insert_n(N),
         drain_all(~"default", N)
     end),
-    report(~"full_lifecycle", N, Time).
+    report(Config, ~"full_lifecycle", N, Time).
 
-bench_full_lifecycle_10_queues(_Config) ->
+bench_full_lifecycle_10_queues(Config) ->
     N = 1000,
     Queues = [<<"q", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 10)],
     {Time, _} = timer:tc(fun() ->
@@ -188,13 +188,13 @@ bench_full_lifecycle_10_queues(_Config) ->
             Queues
         )
     end),
-    report(~"lifecycle_10_queues", N, Time).
+    report(Config, ~"lifecycle_10_queues", N, Time).
 
 %%----------------------------------------------------------------------
 %% Global concurrency benchmark
 %%----------------------------------------------------------------------
 
-bench_global_concurrency_check(_Config) ->
+bench_global_concurrency_check(Config) ->
     N = 1000,
     lists:foreach(
         fun(I) ->
@@ -215,7 +215,7 @@ bench_global_concurrency_check(_Config) ->
             Jobs
         )
     end),
-    report(~"global_conc_check", length(Jobs), Time).
+    report(Config, ~"global_conc_check", length(Jobs), Time).
 
 %%----------------------------------------------------------------------
 %% Helpers
@@ -309,7 +309,7 @@ wait_all([Pid | Rest]) ->
         ct:fail(timeout)
     end.
 
-report(Name, N, TimeMicros) ->
+report(Config, Name, N, TimeMicros) ->
     TimeMs = TimeMicros / 1000,
     TimeSec = TimeMicros / 1_000_000,
     OpsPerSec = round(N / TimeSec),
@@ -321,7 +321,8 @@ report(Name, N, TimeMicros) ->
         [Name, TotalStr, N, AvgStr, OpsPerSec]
     ),
     ct:pal("~ts", [Line]),
-    file:write_file("/tmp/shigoto_bench.txt", [Line, "\n"], [append]).
+    File = filename:join(proplists:get_value(priv_dir, Config), "shigoto_bench.txt"),
+    ok = file:write_file(File, [Line, "\n"], [append]).
 
 cleanup() ->
     shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),
