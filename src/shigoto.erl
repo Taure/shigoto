@@ -44,9 +44,15 @@ shigoto:insert_all([
     callback_args => #{<<\"report\">> => 1}
 }),
 BatchId = maps:get(id, Batch),
-shigoto:insert(#{worker => step1, args => #{}, batch => BatchId}),
-shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
+shigoto:insert_all([
+    #{worker => step1, args => #{}, batch => BatchId},
+    #{worker => step2, args => #{}, batch => BatchId}
+]).
 ```
+
+Insert a batch's jobs in one `insert_all/1,2` or one `transaction/1`: a batch
+only knows the jobs inserted so far, so its callback can run before a job
+that is inserted later. See `m:shigoto_batch`.
 
 ## Transactional Enqueue
 

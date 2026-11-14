@@ -13,9 +13,11 @@ completion and discard callbacks.
 }),
 BatchId = maps:get(id, Batch),
 
-%% Insert jobs into the batch
-shigoto:insert(#{worker => step_one, args => #{}, batch => BatchId}),
-shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
+%% Insert the batch's jobs, all in one call
+{ok, _Jobs} = shigoto:insert_all([
+    #{worker => step_one, args => #{}, batch => BatchId},
+    #{worker => step_two, args => #{}, batch => BatchId}
+]),
 
 %% When all jobs have finished, my_batch_callback:perform/1 is called
 %% with the callback_args. If any job was discarded or cancelled, the
@@ -28,6 +30,14 @@ shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
 A batch finishes when `completed_jobs + discarded_jobs` reaches `total_jobs`.
 `discarded_jobs` counts every job that ended without completing: discarded
 after its last attempt, discarded by hand, or cancelled.
+
+`total_jobs` is the number of jobs inserted so far, so a batch's jobs have to
+be inserted together: in one `shigoto:insert_all/1,2`, or inside one
+`shigoto:transaction/1`. Inserted one statement at a time, the first job can
+finish while it is the only one in the batch, and the callback runs before the
+others exist. A job inserted after the batch has left `active` runs, and the
+callback does not run again. A job for a fanout queue is refused: it never
+ends.
 
 ## The callback
 

@@ -83,6 +83,15 @@ Every push to `main` runs release.yml.
   format strings.
 - JSON: OTP `json` module, never thoas/jiffy.
 - Docs: OTP `-moduledoc` / `-doc`; ex_doc guides under `guides/`.
+- A documented export is API for the rest of 1.x. Plumbing is hidden:
+  `-moduledoc false` on `shigoto_job`, `shigoto_error`, `shigoto_lock`,
+  `shigoto_reencrypt`, `shigoto_callbacks`, `shigoto_rescuer`, and `-doc false`
+  on a helper another shigoto module calls. A new export is hidden unless a
+  user is meant to call it; what it does goes in a comment under `-doc false`.
+  `rebar3 ex_doc` warns when a doc links to something hidden.
+- `meta` keys and batch `callback_args` keys that start with `_shigoto` are
+  shigoto's own (`_shigoto_carrier` so far, and `_batch_event`). Put the next
+  internal key under that prefix.
 - `{vsn, "git"}` in `shigoto.app.src` - version derives from git tags, never
   hand-edited. Do not publish to Hex (the maintainer does that manually).
 
@@ -104,6 +113,11 @@ The start order is the stop order reversed, and it is load-bearing: the
 heartbeat has to outlive the queues' drain and the executors, or another node
 rescues jobs that are still running here.
 
+- **Bulk enqueue.** `insert_all` is one statement for jobs that are not unique.
+  With a unique job in the list it is one transaction: every unique lock is
+  taken first (ascending, `unique_locks/2`), then runs of plain jobs keep their
+  statement and each unique job goes through `placed_unique/5`, the path a
+  single unique insert uses.
 - **Enqueue.** `shigoto:insert/1,2` -> `shigoto_repo:insert_job` on the
   configured minato pool. With `{repo, Repo}` that is the pool kura_postgres
   started for the repo, and `shigoto_db` joins a kura transaction open in the
@@ -138,6 +152,14 @@ rescues jobs that are still running here.
   (`shigoto_repo:release_job/2`, `available` with the attempt returned, the
   snooze rule), so a deploy never uses up an attempt. Fanout jobs run
   unclaimed and never write to their row.
+- **A job this node cannot run.** An unknown worker, or a gate that gave no
+  answer, is not the job's fault: the executor puts the job back without an
+  attempt (`shigoto_repo:put_back_job/4`) and the reason goes into `errors` as
+  an entry marked `snoozed`. Those entries are the count: after
+  `unrunnable_snooze_limit` in a row (`shigoto_error:put_backs/1`) the attempt
+  fails instead. Nothing may put a job back without a bound; a new cause goes
+  through the same path. `errors` keeps 50 entries, which is why the limit
+  stops at 50.
 - **Notify + polling fallback.** `shigoto_notifier` LISTENs via a
   minato listener, pokes the matching queue to `poll`, and reconnects on drop;
   the timed poll loop always runs underneath it. A payload only names a queue;
@@ -146,7 +168,10 @@ rescues jobs that are still running here.
 - **Batches.** `shigoto_batch` groups jobs and runs a callback worker when the
   last one ends. Counting is part of the job's own statement; `settle/2` then
   finishes a batch with a full count, and `settle_finished/1` on the rescuer's
-  tick settles one a stopped node left `active`. A retried job is taken out of
+  tick settles one a stopped node left `active`. `settle/2` locks the batch row
+  and checks the callback (worker known here, args readable) before it writes:
+  a node that cannot run the callback leaves the batch `active` for one that
+  can, so `callback_*` always means the callback job exists. A retried job is taken out of
   `discarded_jobs` (`retrying/1` in `shigoto_repo`).
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
   `pg_try_advisory_xact_lock`, so one node schedules at a time, and stores each
@@ -165,7 +190,9 @@ rescues jobs that are still running here.
   create a cycle (no id yet), so there is no cycle check. A statement only
   sees the dependents committed before it began, so the rescuer's pass also runs
   `shigoto_repo:release_stuck_dependents/1` for jobs waiting on a job that has
-  ended or is gone.
+  ended or is gone. A job cancelled or discarded for a failed dependency keeps
+  the id in `depends_on` (only a job released to run loses it), so a retried
+  job waits on it again and that pass re-applies its policy.
 - **Context propagation.** `shigoto_propagator` is a behaviour (`inject/0`,
   `attach/1`, `detach/1`) named by the `propagator` setting; shigoto has no
   tracing dependency. The carrier is stamped into `meta` under
@@ -187,7 +214,8 @@ rescues jobs that are still running here.
 - **Resilience** (via seki): per-worker rate limit, circuit breaker, local +
   global (Postgres advisory) bulkhead concurrency, and CoDel load shedding.
   `shigoto_resilience:admit/2` runs the gates; a gate that raises or cannot
-  take its lock snoozes the job. No gate fails open.
+  take its lock answers `gate_failed` and the job is put back (see above). No
+  gate fails open.
 - **Rows are untrusted.** A row is data that anyone with write access to the
   table could have put there. `shigoto_job:worker/1` checks the worker name
   (existing atom, `workers` allow-list, exports `perform/1`) before
@@ -226,6 +254,16 @@ rescues jobs that are still running here.
   are read through the typed readers in `shigoto_config`.
 - `insert` returns `{ok, {conflict, Job}}` for unique-conflict debounce/replace,
   not an error. Handle the conflict tuple.
+- No node ends a fanout job. Nothing may wait for one: a job with `batch` for
+  a fanout queue is refused at insert, and the stager leaves fanout queues
+  out.
+- Settings fail in one shape, `{shigoto_config, {invalid, Setting, Value}}`,
+  and `shigoto_config:check/0` reads every one of them at boot. A new setting
+  gets a reader there and a line in `check/0`.
+- A failure reason is a class and a reason only with its stacktrace
+  (`{Class, Reason, Stack}`). Pass a caught exception to `shigoto_error` that
+  way, with `[]` when there is no stack; a two-tuple is a term `perform/1`
+  answered.
 
 ## Tests
 

@@ -14,9 +14,11 @@ batch finish, a callback worker is automatically invoked.
 }),
 BatchId = maps:get(id, Batch),
 
-%% Add jobs to the batch
-shigoto:insert(#{worker => step_one, args => #{<<"n">> => 1}, batch => BatchId}),
-shigoto:insert(#{worker => step_two, args => #{<<"n">> => 2}, batch => BatchId}).
+%% Add the batch's jobs, all in one call
+{ok, _Jobs} = shigoto:insert_all([
+    #{worker => step_one, args => #{<<"n">> => 1}, batch => BatchId},
+    #{worker => step_two, args => #{<<"n">> => 2}, batch => BatchId}
+]).
 ```
 
 ### Elixir
@@ -28,9 +30,33 @@ shigoto:insert(#{worker => step_two, args => #{<<"n">> => 2}, batch => BatchId})
 })
 batch_id = batch.id
 
-:shigoto.insert(%{worker: StepOne, args: %{"n" => 1}, batch: batch_id})
-:shigoto.insert(%{worker: StepTwo, args: %{"n" => 2}, batch: batch_id})
+{:ok, _jobs} =
+  :shigoto.insert_all([
+    %{worker: StepOne, args: %{"n" => 1}, batch: batch_id},
+    %{worker: StepTwo, args: %{"n" => 2}, batch: batch_id}
+  ])
 ```
+
+### Insert a batch's jobs together
+
+A batch knows only the jobs inserted so far: `total_jobs` goes up in the
+statement that inserts a job. So the jobs of a batch have to arrive together,
+in one `shigoto:insert_all/1,2` or inside one `shigoto:transaction/1`:
+
+```erlang
+shigoto:transaction(fun() ->
+    {ok, _} = shigoto:insert(#{worker => step_one, args => #{}, batch => BatchId}),
+    {ok, _} = shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId})
+end).
+```
+
+Two `shigoto:insert/1` calls on their own are two statements. The first job can
+finish while it is still the only one in the batch, and the callback then runs
+before the second job exists. Nothing can be added to a batch once it has left
+`active`: a job inserted later runs, and the callback does not run again.
+
+A job for a [fanout queue](fanout-queues.md) cannot be in a batch
+(`{error, {fanout_job_in_batch, Queue}}`): it never ends.
 
 ## Batch Callbacks
 
@@ -68,12 +94,6 @@ A discarded or cancelled job that is retried (`shigoto:retry/1`,
 ends. Retrying a job of a batch that has already run its callback does not run
 it again.
 
-`total_jobs` goes up in the statement that inserts a job, so a batch only knows
-about the jobs inserted so far. **Insert a batch's jobs together**, with
-`shigoto:insert_all/1` or inside one `shigoto:transaction/1`. Inserted one
-statement at a time, the first job can finish while it is still the only one in
-the batch, and the callback fires before the rest exist.
-
 With `encryption_write_format` `v2`, `callback_args` are encrypted like job
 args. With `v1`, the default, they are stored in the clear, as in 1.10.
 
@@ -105,15 +125,4 @@ A batch no node can settle (its worker was removed, its key is gone) stays
 ```erlang
 {ok, Batch} = shigoto:get_batch(BatchId).
 %% #{total_jobs => 10, completed_jobs => 7, discarded_jobs => 1, state => <<"active">>}
-```
-
-## Bulk Insert into Batches
-
-```erlang
-{ok, Batch} = shigoto:new_batch(#{callback_worker => report_worker}),
-BatchId = maps:get(id, Batch),
-shigoto:insert_all([
-    #{worker => process_item, args => #{<<"id">> => I}, batch => BatchId}
- || I <- lists:seq(1, 1000)
-]).
 ```
