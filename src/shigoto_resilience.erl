@@ -74,8 +74,10 @@ check, inside its own transaction).
 """.
 -spec admit(module(), map()) -> ok | {snooze, pos_integer()} | {snoozed, pos_integer()}.
 admit(Worker, Job) ->
+    %% Load shedding is asked last. Its admission is a count that only the
+    %% end of the run gives back, so no gate may refuse the job after it.
     admitted(
-        [setup, load, rate_limit, global_concurrency, bulkhead, circuit], Worker, Job
+        [setup, rate_limit, global_concurrency, bulkhead, circuit, load], Worker, Job
     ).
 
 admitted([], _Worker, _Job) ->
@@ -321,7 +323,10 @@ check_load(Job) ->
             end
     end.
 
--doc "Report load shedder completion.".
+-doc """
+Give back the place `check_load/1` took, with how long the run was. Called for
+every job the gates admitted, whatever came of it.
+""".
 -spec complete_load(map(), non_neg_integer()) -> ok.
 complete_load(_Job = #{}, DurationMs) ->
     case shigoto_config:load_shedding() of

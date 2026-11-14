@@ -118,11 +118,11 @@ Low-priority jobs are shed first. Shigoto maps job priorities to seki levels:
 The full resilience pipeline for each job:
 
 ```
-1. Load shedding check (system-level)
-2. Rate limit check (per-worker)
-3. Global concurrency check (per-worker, across nodes)
-4. Bulkhead check (per-worker concurrency)
-5. Circuit breaker check (per-worker health)
+1. Rate limit check (per-worker)
+2. Global concurrency check (per-worker, across nodes)
+3. Bulkhead check (per-worker concurrency)
+4. Circuit breaker check (per-worker health)
+5. Load shedding check (system-level)
 6. Global middleware chain
 7. Worker middleware chain
 8. Worker:perform/1

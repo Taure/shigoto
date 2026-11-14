@@ -213,7 +213,7 @@ performed_by(Worker, Job, Opened, Pool, Timeout, Run) ->
         Outcome = outcome(Opened, Worker, Timeout, caller(Run)),
         Duration = erlang:monotonic_time(native) - T0,
         Answer = concluded(Run, Outcome, Job, Pool, Worker, Duration),
-        ok = gates_told(Outcome, Job, Worker, Duration, Run),
+        ok = gates_told(Outcome, Worker, Run),
         Answer
     after
         shigoto_resilience:release_bulkhead(Worker),
@@ -328,19 +328,14 @@ recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
             unrecorded(failed, Job, Reason)
     end.
 
-%% The load shedder and the circuit breaker hear how the run went, whether or
-%% not its outcome could be written.
--spec gates_told(outcome(), map(), module(), integer(), run()) -> ok.
-gates_told({completed, _Result}, Job, Worker, Duration, Run) ->
-    _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
+%% The circuit breaker hears how the run went, whether or not its outcome
+%% could be written.
+-spec gates_told(outcome(), module(), run()) -> ok.
+gates_told({completed, _Result}, Worker, Run) ->
     breaker_told(Run, Worker, ok);
-gates_told({failed, _Stored, _Reported}, Job, Worker, Duration, Run) ->
-    _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
+gates_told({failed, _Stored, _Reported}, Worker, Run) ->
     breaker_told(Run, Worker, {error, job_failed});
-gates_told({stopped, _Why}, Job, _Worker, Duration, _Run) ->
-    _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
-    ok;
-gates_told(_Snoozed, _Job, _Worker, _Duration, _Run) ->
+gates_told(_SnoozedOrStopped, _Worker, _Run) ->
     ok.
 
 milliseconds(Duration) ->
@@ -377,10 +372,21 @@ unrecorded(Transition, Job, Reason) ->
 %% Internal: resilience + middleware
 %%----------------------------------------------------------------------
 
+%% An admitted job holds a place in the load shedder until its run is over,
+%% however it ends: returned, snoozed, raised or stopped.
 run_with_resilience(Job, Worker, Args, Timeout, Caller) ->
     case shigoto_resilience:admit(Worker, Job) of
-        ok -> run_middleware_chain(Job, Worker, Args, Timeout, Caller);
-        Snooze -> Snooze
+        ok ->
+            T0 = erlang:monotonic_time(native),
+            try
+                run_middleware_chain(Job, Worker, Args, Timeout, Caller)
+            after
+                shigoto_resilience:complete_load(
+                    Job, milliseconds(erlang:monotonic_time(native) - T0)
+                )
+            end;
+        Snooze ->
+            Snooze
     end.
 
 -doc """
