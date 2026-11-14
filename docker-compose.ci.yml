@@ -4,6 +4,8 @@ services:
     environment:
       POSTGRES_DB: shigoto_test
       POSTGRES_PASSWORD: root
+      # Under the tmpfs on every major: 18 moved the image's data directory.
+      PGDATA: /var/lib/postgresql/pgdata
     ports:
       - "5556:5432"
     tmpfs:
