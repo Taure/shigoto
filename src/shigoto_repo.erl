@@ -1367,7 +1367,10 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
             ok ->
                 case find_existing_job(Pool, UniqueOpts, UniqueKeys) of
                     {ok, Existing} ->
-                        maybe_replace(Pool, Existing, JobParams, UniqueOpts);
+                        case maybe_replace(Pool, Existing, JobParams, UniqueOpts) of
+                            gone -> do_insert(Pool, JobParams, Opts, UniqueKey);
+                            Answer -> Answer
+                        end;
                     not_found ->
                         do_insert(Pool, JobParams, Opts, UniqueKey);
                     {error, _} = Err ->
@@ -1453,27 +1456,25 @@ states_in_clause(States) ->
     Quoted = [<<"'", (atom_to_binary(S))/binary, "'">> || S <- States],
     joined(~", ", Quoted).
 
-maybe_replace(Pool, Existing, _JobParams, #{replace := [], debounce := Seconds}) when
+%% The existing job was found without a lock on its row. It may have left the
+%% unique states since (claimed and finished, cancelled), and a write to it
+%% then would be lost: the caller would be told its job is waiting when the
+%% job has already run without the new values. `gone` says so, and the new job
+%% is inserted instead.
+-spec maybe_replace(atom(), map(), map(), map()) ->
+    {ok, {conflict, map()}} | gone | {error, term()}.
+maybe_replace(Pool, Existing, _JobParams, #{replace := [], debounce := Seconds} = UniqueOpts) when
     is_integer(Seconds), Seconds > 0
 ->
-    %% Debounce: reset scheduled_at to now() + Seconds
-    IBin = ~"2",
-    SQL = iolist_to_binary([
-        ~"UPDATE shigoto_jobs SET scheduled_at = now() + make_interval(secs => $",
-        IBin,
-        ~") WHERE id = $1 RETURNING *"
-    ]),
-    case query(Pool, SQL, [maps:get(id, Existing), Seconds]) of
-        #{rows := [Updated]} -> {ok, {conflict, Updated}};
-        {error, _} = Err -> Err
-    end;
+    rewritten(
+        Pool, Existing, [~"scheduled_at = now() + make_interval(secs => $2)"], [Seconds], UniqueOpts
+    );
 maybe_replace(_Pool, Existing, _JobParams, #{replace := []}) ->
     {ok, {conflict, Existing}};
-maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Debounce}) ->
+maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Debounce} = UniqueOpts) ->
     Replaced = [replace_field_value(Field, JobParams, Existing) || Field <- Fields],
     Sets0 = assignments(Replaced, 2),
-    Params0 = [maps:get(id, Existing) | [Value || {_Column, Value} <- Replaced]],
-    %% Append debounce scheduled_at reset if configured
+    Params0 = [Value || {_Column, Value} <- Replaced],
     {Sets, Params} =
         case is_integer(Debounce) andalso Debounce > 0 of
             true ->
@@ -1483,14 +1484,21 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
             false ->
                 {Sets0, Params0}
         end,
-    SetClause = joined(~", ", Sets),
+    rewritten(Pool, Existing, Sets, Params, UniqueOpts).
+
+-spec rewritten(atom(), map(), [binary()], [term()], map()) ->
+    {ok, {conflict, map()}} | gone | {error, term()}.
+rewritten(Pool, #{id := Id}, Sets, Params, #{states := States}) ->
     SQL = iolist_to_binary([
         ~"UPDATE shigoto_jobs SET ",
-        SetClause,
-        ~" WHERE id = $1 RETURNING *"
+        joined(~", ", Sets),
+        ~" WHERE id = $1 AND state IN (",
+        states_in_clause(States),
+        ~") RETURNING *"
     ]),
-    case query(Pool, SQL, Params) of
+    case query(Pool, SQL, [Id | Params]) of
         #{rows := [Updated]} -> {ok, {conflict, Updated}};
+        #{rows := []} -> gone;
         {error, _} = Err -> Err
     end.
 

@@ -40,6 +40,7 @@
     test_unique_period_expiry/1,
     test_unique_states_filter/1,
     test_unique_replace_fields/1,
+    test_replace_leaves_a_job_that_finished_meanwhile/1,
     test_unique_worker_callback/1,
     test_unique_opts_override/1,
     test_unique_different_queues_allowed/1,
@@ -115,6 +116,7 @@ all() ->
         test_unique_period_expiry,
         test_unique_states_filter,
         test_unique_replace_fields,
+        test_replace_leaves_a_job_that_finished_meanwhile,
         test_unique_worker_callback,
         test_unique_opts_override,
         test_unique_different_queues_allowed,
@@ -630,6 +632,59 @@ test_unique_replace_fields(_Config) ->
     {ok, {conflict, Updated}} = shigoto_repo:insert_job(?POOL, Params2, #{unique => Unique}),
     ?assertEqual(maps:get(id, Job1), maps:get(id, Updated)),
     ?assertEqual(10, maps:get(priority, Updated)).
+
+%% The replace finds the job while it is still waiting, then waits for its row:
+%% the job completes in a transaction that holds the row until the replace has
+%% run into it.
+test_replace_leaves_a_job_that_finished_meanwhile(_Config) ->
+    Unique = #{keys => [worker], replace => [args]},
+    Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
+    {ok, #{id := Id}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    Self = self(),
+    shigoto_db:transaction(?POOL, fun() ->
+        #{num_rows := 1} = shigoto_db:query(
+            ?POOL, ~"UPDATE shigoto_jobs SET state = 'completed' WHERE id = $1", [Id]
+        ),
+        _ = spawn_link(fun() ->
+            Self !
+                {inserted,
+                    shigoto_repo:insert_job(?POOL, Params#{args => #{~"x" => 2}}, #{
+                        unique => Unique
+                    })}
+        end),
+        ok = wait_until(fun() -> lock_waiters() >= 1 end)
+    end),
+    Inserted =
+        receive
+            {inserted, Answer} -> Answer
+        after 5000 -> ct:fail(insert_never_answered)
+        end,
+    ?assertMatch({ok, #{state := ~"available"}}, Inserted),
+    {ok, #{id := NewId, args := NewArgs}} = Inserted,
+    ?assertNotEqual(Id, NewId),
+    ?assertEqual(#{~"x" => 2}, json:decode(NewArgs)),
+    {ok, #{state := ~"completed", args := OldArgs}} = shigoto_repo:get_job(?POOL, Id),
+    ?assertEqual(#{~"x" => 1}, json:decode(OldArgs)).
+
+lock_waiters() ->
+    #{rows := [#{waiting := Waiting}]} = shigoto_db:query(
+        ?POOL, ~"SELECT count(*) AS waiting FROM pg_locks WHERE NOT granted", []
+    ),
+    Waiting.
+
+wait_until(Check) ->
+    wait_until(Check, 200).
+
+wait_until(_Check, 0) ->
+    ct:fail(condition_not_met);
+wait_until(Check, Tries) ->
+    case Check() of
+        true ->
+            ok;
+        false ->
+            timer:sleep(25),
+            wait_until(Check, Tries - 1)
+    end.
 
 test_unique_worker_callback(_Config) ->
     %% shigoto_unique_worker defines unique/0
