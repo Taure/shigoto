@@ -505,9 +505,10 @@ test_a_crash_is_recorded_as_class_and_reason(_Config) ->
     ?assertMatch({error, {error, _}}, shigoto_executor:execute_sync(Claimed, ?POOL, 5000)),
     [Error] = json:decode(stored_errors(JobId)),
     ?assertMatch(#{~"error" := <<"error:", _/binary>>, ~"attempt" := 1}, Error),
-    ?assertNotEqual(
-        nomatch, binary:match(maps:get(~"stacktrace", Error), ~"shigoto_test_worker")
-    ).
+    case Error of
+        #{~"stacktrace" := Stack} when is_binary(Stack) ->
+            ?assertNotEqual(nomatch, binary:match(Stack, ~"shigoto_test_worker"))
+    end.
 
 -doc false.
 forward(Event, Measurements, Metadata, Owner) ->
@@ -515,7 +516,7 @@ forward(Event, Measurements, Metadata, Owner) ->
     ok.
 
 test_cancel_job(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -527,7 +528,7 @@ test_cancel_job(_Config) ->
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 1).
 
 test_retry_job(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -581,18 +582,18 @@ test_prune_old_jobs(_Config) ->
 test_unique_prevents_duplicate(_Config) ->
     Unique = #{keys => [worker, args], states => [available, executing]},
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     {ok, {conflict, Job2}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
 test_unique_different_args_allowed(_Config) ->
     Unique = #{keys => [worker, args]},
-    {ok, Job1} = shigoto_repo:insert_job(
+    {ok, #{} = Job1} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"x" => 1}},
         #{unique => Unique}
     ),
-    {ok, Job2} = shigoto_repo:insert_job(
+    {ok, #{} = Job2} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"x" => 2}},
         #{unique => Unique}
@@ -602,27 +603,27 @@ test_unique_different_args_allowed(_Config) ->
 test_unique_period_expiry(_Config) ->
     Unique = #{keys => [worker, args], period => 1},
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     timer:sleep(1500),
-    {ok, Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
 test_unique_states_filter(_Config) ->
     %% Only check available state
     Unique = #{keys => [worker, args], states => [available]},
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     %% Complete the job so it's no longer in 'available' state
     {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
     shigoto_repo:complete_job(?POOL, maps:get(id, Claimed)),
     %% Now insert again — should succeed since completed is not in states
-    {ok, Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
 test_unique_replace_fields(_Config) ->
     Unique = #{keys => [worker, args], replace => [priority]},
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}, priority => 1},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertEqual(1, maps:get(priority, Job1)),
     %% Insert again with different priority — should update
     Params2 = Params#{priority => 10},
@@ -633,7 +634,7 @@ test_unique_replace_fields(_Config) ->
 test_unique_worker_callback(_Config) ->
     %% shigoto_unique_worker defines unique/0
     Params = #{worker => shigoto_unique_worker, args => #{~"a" => 1}},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{}),
     {ok, {conflict, Job2}} = shigoto_repo:insert_job(?POOL, Params, #{}),
     ?assertEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
@@ -642,23 +643,23 @@ test_unique_opts_override(_Config) ->
     %% Override with period=1 via opts
     Params = #{worker => shigoto_unique_worker, args => #{~"a" => 1}},
     Unique = #{keys => [worker, args], period => 1},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     timer:sleep(1500),
-    {ok, Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job2} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
 test_unique_different_queues_allowed(_Config) ->
     %% shigoto_unique_queue_worker uses keys => [worker, queue]
     Params1 = #{worker => shigoto_unique_queue_worker, args => #{}, queue => ~"queue_a"},
     Params2 = #{worker => shigoto_unique_queue_worker, args => #{}, queue => ~"queue_b"},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params1, #{}),
-    {ok, Job2} = shigoto_repo:insert_job(?POOL, Params2, #{}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params1, #{}),
+    {ok, #{} = Job2} = shigoto_repo:insert_job(?POOL, Params2, #{}),
     ?assertNotEqual(maps:get(id, Job1), maps:get(id, Job2)).
 
 test_unique_key_stored(_Config) ->
     Unique = #{keys => [worker, args]},
     Params = #{worker => shigoto_test_worker, args => #{~"x" => 1}},
-    {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ?assertNotEqual(null, maps:get(unique_key, Job)).
 
 test_replace_args_stay_encrypted(_Config) ->
@@ -666,7 +667,7 @@ test_replace_args_stay_encrypted(_Config) ->
     Unique = #{keys => [worker], replace => [args]},
     Params = #{worker => shigoto_test_worker, args => #{~"ssn" => Secret}},
     with_encryption(fun() ->
-        {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+        {ok, #{} = Job} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
         ?assertMatch(<<"\"enc:", _/binary>>, stored_args(maps:get(id, Job))),
         %% The conflict path rewrites args; it must not write them in the clear.
         {ok, {conflict, _}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
@@ -679,7 +680,7 @@ test_error_stacktrace_redacts_args(_Config) ->
     Secret = ~"191212121212",
     Args = #{~"ssn" => Secret},
     with_encryption(fun() ->
-        {ok, Job} = shigoto_repo:insert_job(
+        {ok, #{} = Job} = shigoto_repo:insert_job(
             ?POOL, #{worker => shigoto_test_worker, args => Args}, #{}
         ),
         {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
@@ -727,7 +728,7 @@ test_unique_concurrent_insert(_Config) ->
 test_non_unique_has_null_key(_Config) ->
     %% Non-unique jobs should have null unique_key
     Params = #{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}},
-    {ok, Job} = shigoto_repo:insert_job(?POOL, Params, #{}),
+    {ok, #{} = Job} = shigoto_repo:insert_job(?POOL, Params, #{}),
     ?assertEqual(null, maps:get(unique_key, Job)).
 
 %%----------------------------------------------------------------------
@@ -752,7 +753,7 @@ test_snooze_job(_Config) ->
 test_cancel_executing_job(_Config) ->
     %% Create ETS table and start executor supervisor for this test
     {ok, SupPid} = shigoto_executor_sup:start_link(),
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_timeout_worker, args => #{}},
         #{}
@@ -789,7 +790,7 @@ test_job_timeout(_Config) ->
 
 test_worker_defaults_applied(_Config) ->
     %% shigoto_configured_worker defines max_attempts=7, queue=priority_queue, priority=5
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_configured_worker, args => #{}},
         #{}
@@ -800,7 +801,7 @@ test_worker_defaults_applied(_Config) ->
 
 test_worker_defaults_overridden(_Config) ->
     %% Per-insert params override worker defaults
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_configured_worker,
@@ -817,7 +818,7 @@ test_worker_defaults_overridden(_Config) ->
 
 test_worker_defaults_partial(_Config) ->
     %% Worker without optional callbacks uses system defaults
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}},
         #{}
@@ -850,7 +851,7 @@ test_transaction_telemetry_deferred(_Config) ->
     ok = telemetry:attach(
         Handler,
         [shigoto, job, inserted],
-        fun(_Event, _Measure, Meta, Pid) -> Pid ! {job_inserted, Meta} end,
+        fun(_Event, _Measure, Meta, Pid) when is_pid(Pid) -> Pid ! {job_inserted, Meta} end,
         self()
     ),
     try
@@ -899,7 +900,7 @@ test_transaction_commit_rollback_no_telemetry(_Config) ->
     ok = telemetry:attach(
         Handler,
         [shigoto, job, inserted],
-        fun(_Event, _Measure, Meta, Pid) -> Pid ! {job_inserted, Meta} end,
+        fun(_Event, _Measure, Meta, Pid) when is_pid(Pid) -> Pid ! {job_inserted, Meta} end,
         self()
     ),
     try
@@ -928,7 +929,7 @@ test_transaction_nested(_Config) ->
     ok = telemetry:attach(
         Handler,
         [shigoto, job, inserted],
-        fun(_Event, _Measure, _Meta, Pid) -> Pid ! job_inserted end,
+        fun(_Event, _Measure, _Meta, Pid) when is_pid(Pid) -> Pid ! job_inserted end,
         self()
     ),
     try
@@ -991,7 +992,9 @@ test_prune_archive(_Config) ->
 %%----------------------------------------------------------------------
 
 test_cancel_no_pool(_Config) ->
-    {ok, Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    {ok, #{} = Job} = shigoto:insert(#{
+        worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}
+    }),
     ok = shigoto:cancel(maps:get(id, Job)),
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 1).
 
@@ -1003,7 +1006,9 @@ test_cancel_by_no_pool(_Config) ->
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 10).
 
 test_retry_no_pool(_Config) ->
-    {ok, Job} = shigoto:insert(#{worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}}),
+    {ok, #{} = Job} = shigoto:insert(#{
+        worker => shigoto_test_worker, args => #{~"action" => ~"succeed"}
+    }),
     JobId = maps:get(id, Job),
     ok = shigoto:cancel(JobId),
     ok = shigoto:retry(JobId),
@@ -1088,7 +1093,7 @@ test_global_concurrency_admits_two_of_three(_Config) ->
 %%----------------------------------------------------------------------
 
 test_stager_surfaces_due_queue(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -1159,7 +1164,7 @@ test_stager_stage_once_fails_soft(_Config) ->
 %%----------------------------------------------------------------------
 
 test_result_stored_on_ok_tuple(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 42}},
         #{}
@@ -1170,7 +1175,7 @@ test_result_stored_on_ok_tuple(_Config) ->
 
 test_plain_ok_stores_null(_Config) ->
     %% A worker returning plain `ok` must still complete and store a null result.
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"plain_ok"}},
         #{}
@@ -1181,13 +1186,13 @@ test_plain_ok_stores_null(_Config) ->
     {ok, []} = shigoto_repo:claim_jobs(?POOL, ~"default", 1).
 
 test_deps_results_passed_to_dependent(_Config) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 7}},
         #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_result_worker,
@@ -1208,13 +1213,13 @@ test_deps_results_passed_to_dependent(_Config) ->
     ?assertEqual(#{~"got" => #{~"produced" => 7}}, get_result(ChildId)).
 
 test_deps_results_null_for_plain_ok_predecessor(_Config) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"plain_ok"}},
         #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_result_worker,
@@ -1232,13 +1237,13 @@ test_deps_results_null_for_plain_ok_predecessor(_Config) ->
     ?assertEqual(#{~"got" => null}, get_result(ChildId)).
 
 test_deps_results_integer_key(_Config) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 9}},
         #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_result_worker,
@@ -1256,19 +1261,19 @@ test_deps_results_integer_key(_Config) ->
     ?assertEqual(#{~"got" => #{~"produced" => 9}}, get_result(ChildId)).
 
 test_deps_results_fan_in(_Config) ->
-    {ok, P1} = shigoto_repo:insert_job(
+    {ok, #{} = P1} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 1}},
         #{}
     ),
-    {ok, P2} = shigoto_repo:insert_job(
+    {ok, #{} = P2} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_result_worker, args => #{~"action" => ~"produce", ~"value" => 2}},
         #{}
     ),
     P1Id = maps:get(id, P1),
     P2Id = maps:get(id, P2),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_result_worker,
@@ -1290,16 +1295,14 @@ test_deps_results_fan_in(_Config) ->
 %%----------------------------------------------------------------------
 
 stored_args(JobId) ->
-    #{rows := [#{args := Args}]} = shigoto_db:query(
-        ?POOL, ~"SELECT args FROM shigoto_jobs WHERE id = $1", [JobId]
-    ),
-    iolist_to_binary(Args).
+    case shigoto_db:query(?POOL, ~"SELECT args FROM shigoto_jobs WHERE id = $1", [JobId]) of
+        #{rows := [#{args := Args}]} when is_binary(Args) -> Args
+    end.
 
 stored_errors(JobId) ->
-    #{rows := [#{errors := Errors}]} = shigoto_db:query(
-        ?POOL, ~"SELECT errors::text FROM shigoto_jobs WHERE id = $1", [JobId]
-    ),
-    iolist_to_binary(Errors).
+    case shigoto_db:query(?POOL, ~"SELECT errors::text FROM shigoto_jobs WHERE id = $1", [JobId]) of
+        #{rows := [#{errors := Errors}]} when is_binary(Errors) -> Errors
+    end.
 
 with_encryption(Fun) ->
     Saved = application:get_env(shigoto, encryption_key),

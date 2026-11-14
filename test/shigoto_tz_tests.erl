@@ -57,7 +57,7 @@ invalid_zone_rejected_test() ->
 %% A file whose magic is "TZif" but whose body is truncated/garbage must return
 %% {error, _}, not crash the caller (cron relies on this to fall back to UTC).
 malformed_tzfile_returns_error_test() ->
-    Dir = filename:join(["/tmp", "shigoto_tz_test", integer_to_list(erlang:phash2(make_ref()))]),
+    Dir = "/tmp/shigoto_tz_test/" ++ integer_to_list(erlang:phash2(make_ref())),
     File = filename:join([Dir, "Broken", "Zone"]),
     ok = filelib:ensure_dir(File),
     ok = file:write_file(File, <<"TZif2", 0:120, "garbage">>),

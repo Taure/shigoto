@@ -196,17 +196,17 @@ test_dependency_on_a_finished_job_is_not_waited_for(_Config) ->
     ?assertEqual([Pending, Free], lists:sort([Id || #{id := Id} <- Claimed])).
 
 test_dependency_valid_chain_accepted(_Config) ->
-    {ok, A} = shigoto_repo:insert_job(
+    {ok, #{} = A} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     AId = maps:get(id, A),
-    {ok, B} = shigoto_repo:insert_job(
+    {ok, #{} = B} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, depends_on => [AId]},
         #{}
     ),
     BId = maps:get(id, B),
-    {ok, C} = shigoto_repo:insert_job(
+    {ok, #{} = C} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, depends_on => [BId]},
         #{}
@@ -224,16 +224,16 @@ test_dependency_self_reference_safe(_Config) ->
     ?assertMatch({error, {missing_dependencies, _}}, Result).
 
 test_dependency_multiple_parents(_Config) ->
-    {ok, A} = shigoto_repo:insert_job(
+    {ok, #{} = A} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
-    {ok, B} = shigoto_repo:insert_job(
+    {ok, #{} = B} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     AId = maps:get(id, A),
     BId = maps:get(id, B),
     %% C depends on both A and B (fan-in)
-    {ok, C} = shigoto_repo:insert_job(
+    {ok, #{} = C} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, depends_on => [AId, BId]},
         #{}
@@ -257,10 +257,10 @@ test_dependency_multiple_parents(_Config) ->
 %%----------------------------------------------------------------------
 
 test_retry_by_worker(_Config) ->
-    {ok, J1} = shigoto_repo:insert_job(
+    {ok, #{} = J1} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
-    {ok, J2} = shigoto_repo:insert_job(
+    {ok, #{} = J2} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_tagged_worker, args => #{}}, #{}
     ),
     ok = shigoto_repo:discard_job(?POOL, maps:get(id, J1)),
@@ -275,10 +275,10 @@ test_retry_by_worker(_Config) ->
     ?assertEqual(<<"discarded">>, maps:get(state, J2Updated)).
 
 test_retry_by_queue(_Config) ->
-    {ok, J1} = shigoto_repo:insert_job(
+    {ok, #{} = J1} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => <<"q1">>}, #{}
     ),
-    {ok, J2} = shigoto_repo:insert_job(
+    {ok, #{} = J2} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}, queue => <<"q2">>}, #{}
     ),
     ok = shigoto_repo:cancel_job(?POOL, maps:get(id, J1)),
@@ -288,12 +288,12 @@ test_retry_by_queue(_Config) ->
     ?assertEqual(<<"available">>, maps:get(state, J1U)).
 
 test_retry_by_tags(_Config) ->
-    {ok, J1} = shigoto_repo:insert_job(
+    {ok, #{} = J1} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, tags => [<<"urgent">>]},
         #{}
     ),
-    {ok, J2} = shigoto_repo:insert_job(
+    {ok, #{} = J2} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, tags => [<<"low">>]},
         #{}
@@ -307,10 +307,10 @@ test_retry_by_tags(_Config) ->
     ?assertEqual(<<"discarded">>, maps:get(state, J2U)).
 
 test_retry_by_empty_filter(_Config) ->
-    {ok, J1} = shigoto_repo:insert_job(
+    {ok, #{} = J1} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
-    {ok, J2} = shigoto_repo:insert_job(
+    {ok, #{} = J2} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     ok = shigoto_repo:discard_job(?POOL, maps:get(id, J1)),
@@ -437,7 +437,7 @@ test_health_ok(_Config) ->
 %%----------------------------------------------------------------------
 
 test_archive_jobs(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     JobId = maps:get(id, Job),
@@ -458,7 +458,7 @@ test_archive_jobs(_Config) ->
 %%----------------------------------------------------------------------
 
 test_search_by_state(_Config) ->
-    {ok, J1} = shigoto_repo:insert_job(
+    {ok, #{} = J1} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     {ok, _J2} = shigoto_repo:insert_job(
@@ -468,7 +468,7 @@ test_search_by_state(_Config) ->
     {ok, Results} = shigoto_dashboard:search_jobs(#{state => <<"discarded">>}),
     ?assert(length(Results) >= 1),
     lists:foreach(
-        fun(R) -> ?assertEqual(<<"discarded">>, maps:get(state, R)) end,
+        fun(#{} = R) -> ?assertEqual(<<"discarded">>, maps:get(state, R)) end,
         Results
     ).
 
@@ -481,7 +481,7 @@ test_search_by_worker(_Config) ->
     ),
     {ok, Results} = shigoto_dashboard:search_jobs(#{worker => <<"shigoto_tagged_worker">>}),
     ?assertEqual(1, length(Results)),
-    ?assertEqual(<<"shigoto_tagged_worker">>, maps:get(worker, hd(Results))).
+    ?assertMatch([#{worker := <<"shigoto_tagged_worker">>} | _], Results).
 
 test_search_pagination(_Config) ->
     lists:foreach(
@@ -510,7 +510,7 @@ test_search_combined_filters(_Config) ->
         #{worker => shigoto_test_worker, args => #{}, queue => <<"search_q">>},
         #{}
     ),
-    {ok, J2} = shigoto_repo:insert_job(
+    {ok, #{} = J2} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_tagged_worker, args => #{}, queue => <<"search_q">>},
         #{}
@@ -521,19 +521,19 @@ test_search_combined_filters(_Config) ->
         state => <<"discarded">>
     }),
     ?assertEqual(1, length(Results)),
-    ?assertEqual(<<"shigoto_tagged_worker">>, maps:get(worker, hd(Results))).
+    ?assertMatch([#{worker := <<"shigoto_tagged_worker">>} | _], Results).
 
 %%----------------------------------------------------------------------
 %% Edge cases
 %%----------------------------------------------------------------------
 
 test_claim_respects_priority(_Config) ->
-    {ok, Low} = shigoto_repo:insert_job(
+    {ok, #{} = Low} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"p">> => <<"low">>}, priority => 0},
         #{}
     ),
-    {ok, High} = shigoto_repo:insert_job(
+    {ok, #{} = High} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"p">> => <<"high">>}, priority => 10},
         #{}
@@ -557,7 +557,7 @@ test_claim_respects_scheduled_at(_Config) ->
     {ok, []} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10).
 
 test_snooze_preserves_attempt_count(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_snooze_worker, args => #{}}, #{}
     ),
     JobId = maps:get(id, Job),
@@ -605,7 +605,7 @@ test_claim_never_exceeds_limit(_Config) ->
     ?assertEqual(1, length(Claimed)).
 
 test_max_attempts_discards(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"action">> => <<"fail">>}, max_attempts => 1},
         #{}
@@ -755,7 +755,7 @@ test_cancel_by_releases_dependents(_Config) ->
     ?assertEqual([Kept, Child], lists:sort([Id || #{id := Id} <- Claimed])).
 
 test_insert_minimal_params(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}},
         #{}
@@ -770,7 +770,7 @@ test_insert_minimal_params(_Config) ->
 test_debounce_resets_scheduled_at(_Config) ->
     Unique = #{keys => [worker, args], debounce => 10},
     Params = #{worker => shigoto_test_worker, args => #{<<"db">> => 1}},
-    {ok, Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
+    {ok, #{} = Job1} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),
     ScheduledAt1 = maps:get(scheduled_at, Job1),
     timer:sleep(100),
     {ok, {conflict, Job2}} = shigoto_repo:insert_job(?POOL, Params, #{unique => Unique}),

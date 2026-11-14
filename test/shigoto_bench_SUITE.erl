@@ -173,7 +173,7 @@ bench_full_lifecycle_10_queues(Config) ->
     Queues = [<<"q", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 10)],
     {Time, _} = timer:tc(fun() ->
         lists:foreach(
-            fun(I) ->
+            fun(I) when is_integer(I) ->
                 Q = lists:nth((I rem 10) + 1, Queues),
                 shigoto_repo:insert_job(
                     ?POOL,
@@ -209,7 +209,7 @@ bench_global_concurrency_check(Config) ->
     {ok, Jobs} = shigoto_repo:claim_jobs(?POOL, ~"default", N),
     {Time, _} = timer:tc(fun() ->
         lists:foreach(
-            fun(Job) ->
+            fun(#{} = Job) ->
                 shigoto_resilience:check_global_concurrency(shigoto_global_conc_worker, Job)
             end,
             Jobs
@@ -251,14 +251,14 @@ insert_chain(N) ->
 insert_chain(0, _PrevId) ->
     ok;
 insert_chain(N, undefined) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"step" => N}},
         #{}
     ),
     insert_chain(N - 1, maps:get(id, Job));
 insert_chain(N, PrevId) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"step" => N}, depends_on => [PrevId]},
         #{}
@@ -273,8 +273,8 @@ claim_and_complete_loop(Remaining) ->
             ok;
         {ok, Jobs} ->
             lists:foreach(
-                fun(Job) ->
-                    shigoto_repo:complete_job(?POOL, maps:get(id, Job))
+                fun(#{id := Id}) when is_integer(Id) ->
+                    shigoto_repo:complete_job(?POOL, Id)
                 end,
                 Jobs
             ),
@@ -292,7 +292,7 @@ drain_all(Queue, Remaining, Done) ->
             ok;
         {ok, Jobs} ->
             lists:foreach(
-                fun(Job) ->
+                fun(#{} = Job) ->
                     shigoto_executor:execute_sync(Job, ?POOL, 5000)
                 end,
                 Jobs
@@ -321,8 +321,13 @@ report(Config, Name, N, TimeMicros) ->
         [Name, TotalStr, N, AvgStr, OpsPerSec]
     ),
     ct:pal("~ts", [Line]),
-    File = filename:join(proplists:get_value(priv_dir, Config), "shigoto_bench.txt"),
-    ok = file:write_file(File, [Line, "\n"], [append]).
+    ok = file:write_file(results_file(Config), [Line, "\n"], [append]).
+
+results_file(Config) ->
+    Path = io_lib:format("~ts/shigoto_bench.txt", [proplists:get_value(priv_dir, Config)]),
+    case unicode:characters_to_binary(Path) of
+        File when is_binary(File) -> File
+    end.
 
 cleanup() ->
     shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),

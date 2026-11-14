@@ -63,7 +63,7 @@ tables, trigger, and notify function. Edit the versioned statements in
 
 ## Pre-push checklist
 
-`fmt --check` -> `xref` -> `dialyzer` -> `elp lint` -> `hank` -> `eunit` ->
+`fmt --check` -> `xref` -> `dialyzer` -> `elp eqwalize-all` -> `elp lint` -> `hank` -> `eunit` ->
 `ct` (against Docker Postgres) -> `ex_doc`, all green. Lint with `elp lint`;
 there is no elvis config and no `rebar3_lint` plugin. CI (`Taure/erlang-ci`
 ci.yml `@v2.1.7`) runs ct, ex_doc, hank, coverage, elp-lint, dependency
@@ -193,8 +193,13 @@ shigoto_sup (one_for_one)
   V}]}`, never tuple rows; tuple matches silently never match.
 - CT suites need Docker Postgres (`:5556`, or set `SHIGOTO_TEST_DB_PORT`); they exercise the real locking and
   transactions - do not stub the DB out of them.
-- `enable-elp-eqwalize` is off in CI; if you add eqwalizer specs, do not let
-  OTP behaviour result types panic the checker - hand-roll local types.
+- `elp eqwalize-all` reports no errors (after `rebar3 as test compile`); keep
+  it there. It is still off in CI (`enable-elp-eqwalize`), so run it by hand.
+  No `eqwalizer:fixme`/`ignore`, no `nowarn`. `dynamic()` only where a value
+  comes from outside (kura, connection options, a configured fun). eqwalizer
+  loses the element type through `lists:foreach/usort/join/enumerate/sublist`
+  and `hd/1`: use a comprehension, a pattern or a specced recursion. Settings
+  are read through the typed readers in `shigoto_config`.
 - `insert` returns `{ok, {conflict, Job}}` for unique-conflict debounce/replace,
   not an error. Handle the conflict tuple.
 

@@ -140,7 +140,7 @@ test_bulk_insert_empty(_Config) ->
 %%----------------------------------------------------------------------
 
 test_tags_worker_default(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_tagged_worker, args => #{}},
         #{}
@@ -148,7 +148,7 @@ test_tags_worker_default(_Config) ->
     ?assertEqual([<<"email">>, <<"notifications">>], maps:get(tags, Job)).
 
 test_tags_explicit(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, tags => [<<"urgent">>, <<"api">>]},
         #{}
@@ -206,7 +206,7 @@ test_cancel_by_queue(_Config) ->
 %%----------------------------------------------------------------------
 
 test_progress_tracking(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}},
         #{}
@@ -225,7 +225,7 @@ test_progress_tracking(_Config) ->
 %%----------------------------------------------------------------------
 
 test_structured_errors(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"action">> => <<"fail">>}},
         #{}
@@ -240,7 +240,7 @@ test_structured_errors(_Config) ->
             false -> RawErrors
         end,
     ?assert(is_list(Errors)),
-    [ErrorEntry | _] = Errors,
+    [#{} = ErrorEntry | _] = Errors,
     ?assert(maps:is_key(<<"error">>, ErrorEntry)),
     ?assert(maps:is_key(<<"at">>, ErrorEntry)),
     ?assert(maps:is_key(<<"attempt">>, ErrorEntry)),
@@ -326,7 +326,7 @@ test_batch_create_and_complete(_Config) ->
     %% Execute both jobs
     {ok, Jobs} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 2),
     lists:foreach(
-        fun(Job) -> shigoto_executor:execute_sync(Job, ?POOL, 5000) end,
+        fun(#{} = Job) -> shigoto_executor:execute_sync(Job, ?POOL, 5000) end,
         Jobs
     ),
 
@@ -373,7 +373,7 @@ test_batch_with_callback(_Config) ->
 %%----------------------------------------------------------------------
 
 test_get_job(_Config) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"x">> => 1}},
         #{}
@@ -567,7 +567,7 @@ test_batch_total_is_counted_with_the_insert(_Config) ->
 
 test_heartbeat_stale_threshold(_Config) ->
     %% Insert a job and claim it
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{<<"action">> => <<"slow">>}},
         #{}
@@ -595,8 +595,8 @@ test_a_job_naming_no_module_can_be_discarded(_Config) ->
     INSERT INTO shigoto_jobs (queue, worker, args, max_attempts)
     VALUES ('default', 'shigoto_never_a_module', '{}', 1) RETURNING id
     """,
-    #{rows := [#{id := Failing}]} = shigoto_db:query(?POOL, Insert, []),
-    #{rows := [#{id := Stale}]} = shigoto_db:query(?POOL, Insert, []),
+    Failing = inserted_id(Insert),
+    Stale = inserted_id(Insert),
     {ok, [First, _]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
     ?assertMatch(#{id := Failing}, First),
     %% There is no on_discard/2 to run, and looking for one must not crash.
@@ -907,7 +907,7 @@ last_heard_from(JobId, Set) ->
 
 test_depends_on_blocks_claiming(_Config) ->
     %% Insert parent job
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     ParentId = maps:get(id, Parent),
@@ -924,15 +924,15 @@ test_depends_on_blocks_claiming(_Config) ->
     %% Only parent should be claimable
     {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed)),
-    ?assertEqual(ParentId, maps:get(id, hd(Claimed))).
+    ?assertMatch([#{id := ParentId} | _], Claimed).
 
 test_depends_on_resolved_on_complete(_Config) ->
     %% Insert parent and child
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -948,14 +948,14 @@ test_depends_on_resolved_on_complete(_Config) ->
     %% Child should now be claimable
     {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed)),
-    ?assertEqual(ChildId, maps:get(id, hd(Claimed))).
+    ?assertMatch([#{id := ChildId} | _], Claimed).
 
 test_depends_on_resolved_on_discard(_Config) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -969,14 +969,14 @@ test_depends_on_resolved_on_discard(_Config) ->
     ok = shigoto_repo:discard_job(?POOL, ParentId),
     {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed)),
-    ?assertEqual(ChildId, maps:get(id, hd(Claimed))).
+    ?assertMatch([#{id := ChildId} | _], Claimed).
 
 test_depends_on_resolved_on_cancel(_Config) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -990,7 +990,7 @@ test_depends_on_resolved_on_cancel(_Config) ->
     ok = shigoto_repo:cancel_job(?POOL, ParentId),
     {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed)),
-    ?assertEqual(ChildId, maps:get(id, hd(Claimed))).
+    ?assertMatch([#{id := ChildId} | _], Claimed).
 
 test_depends_on_resolved_when_attempts_exhausted(_Config) ->
     ChildId = insert_parent_and_child(1),
@@ -1007,13 +1007,13 @@ test_depends_on_held_while_parent_retryable(_Config) ->
     ?assertEqual({ok, []}, shigoto_repo:claim_jobs(?POOL, ~"default", 10)).
 
 insert_parent_and_child(MaxAttempts) ->
-    {ok, Parent} = shigoto_repo:insert_job(
+    {ok, #{} = Parent} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, max_attempts => MaxAttempts},
         #{}
     ),
     ParentId = maps:get(id, Parent),
-    {ok, Child} = shigoto_repo:insert_job(
+    {ok, #{} = Child} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{}, depends_on => [ParentId]},
         #{}
@@ -1022,11 +1022,11 @@ insert_parent_and_child(MaxAttempts) ->
 
 test_depends_on_chain(_Config) ->
     %% A -> B -> C chain
-    {ok, A} = shigoto_repo:insert_job(
+    {ok, #{} = A} = shigoto_repo:insert_job(
         ?POOL, #{worker => shigoto_test_worker, args => #{<<"step">> => <<"a">>}}, #{}
     ),
     AId = maps:get(id, A),
-    {ok, B} = shigoto_repo:insert_job(
+    {ok, #{} = B} = shigoto_repo:insert_job(
         ?POOL,
         #{
             worker => shigoto_test_worker,
@@ -1048,12 +1048,12 @@ test_depends_on_chain(_Config) ->
     %% Only A should be claimable
     {ok, Claimed1} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed1)),
-    ?assertEqual(AId, maps:get(id, hd(Claimed1))),
+    ?assertMatch([#{id := AId} | _], Claimed1),
     %% Complete A — B becomes claimable, C still blocked
     ok = shigoto_repo:complete_job(?POOL, AId),
     {ok, Claimed2} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
     ?assertEqual(1, length(Claimed2)),
-    ?assertEqual(BId, maps:get(id, hd(Claimed2))),
+    ?assertMatch([#{id := BId} | _], Claimed2),
     %% Complete B — C becomes claimable
     ok = shigoto_repo:complete_job(?POOL, BId),
     {ok, Claimed3} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 10),
@@ -1066,7 +1066,7 @@ test_depends_on_chain(_Config) ->
 test_on_discard_callback(_Config) ->
     %% Register self so the discard worker can find us
     register(shigoto_discard_test, self()),
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_discard_worker, args => #{<<"key">> => <<"value">>}},
         #{}
@@ -1097,3 +1097,8 @@ cleanup() ->
     shigoto_db:query(?POOL, <<"DELETE FROM shigoto_jobs">>, []),
     shigoto_db:query(?POOL, <<"DELETE FROM shigoto_batches">>, []),
     ok.
+
+inserted_id(Insert) ->
+    case shigoto_db:query(?POOL, Insert, []) of
+        #{rows := [#{id := Id}]} when is_integer(Id) -> Id
+    end.
