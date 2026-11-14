@@ -498,19 +498,19 @@ a_batch_naming_no_worker_gets_no_callback(_Config) ->
     %% The job's own outcome is recorded whatever the batch row names.
     _ = await(Id, ~"completed"),
     ok = wait_for(fun() ->
-        {ok, #{state := State}} = shigoto:get_batch(BatchId),
-        State =:= ~"callback_completing"
-    end),
-    #{rows := [#{count := 1}]} = shigoto_db:query(
-        ?POOL, ~"SELECT count(*) AS count FROM shigoto_jobs", []
-    ),
-    ?assertMatch(
-        [_ | _],
         [
             Report
          || {log, #{msg := {report, #{msg := ~"shigoto_batch_callback_unrunnable"} = Report}}} <-
                 captured()
-        ]
+        ] =/= []
+    end),
+    %% Nothing says a callback is on the way: the batch is as the job left it.
+    ?assertMatch(
+        {ok, #{state := ~"active", completed_jobs := 1, total_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ),
+    #{rows := [#{count := 1}]} = shigoto_db:query(
+        ?POOL, ~"SELECT count(*) AS count FROM shigoto_jobs", []
     ).
 
 %%----------------------------------------------------------------------

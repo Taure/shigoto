@@ -73,10 +73,21 @@ statement at a time, the first job can finish while it is still the only one in
 the batch, and the callback fires before the rest exist.
 
 With `encryption_write_format` `v2`, `callback_args` are encrypted like job
-args. The callback worker is checked like any worker before the callback is
-inserted: a batch row naming a module that is not a worker gets no callback,
-logs `shigoto_batch_callback_unrunnable`, and does not affect the outcome of
-the job that finished the batch.
+args.
+
+### A callback a node cannot run
+
+The callback worker is checked like any worker, and the `callback_args` are
+read, before the batch is touched. A node that cannot run the callback (it does
+not have the module, as during a rolling deploy, or cannot read the args)
+writes nothing: the batch stays `active`, the job that finished it keeps its
+own outcome, and `shigoto_batch_callback_unrunnable` is logged. Every node
+looks at the batch again each `rescue_interval`, and the first that can run the
+callback settles it. So a batch is in a `callback_*` state only together with
+its callback job, and a callback is late rather than lost.
+
+A batch no node can settle (its worker was removed, its key is gone) stays
+`active` and is reported at every sweep. Deploy the worker, or delete the row.
 
 ## Batch States
 

@@ -63,6 +63,8 @@ the application does with it.
     without_a_propagator_nothing_is_carried/1,
     an_outcome_that_cannot_be_written_is_run_again/1,
     a_batch_whose_callback_cannot_be_inserted_is_settled_later/1,
+    a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can/1,
+    batches_this_node_cannot_settle_do_not_hold_up_the_others/1,
     losing_every_connection_loses_no_job/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
@@ -150,6 +152,8 @@ all() ->
         without_a_propagator_nothing_is_carried,
         an_outcome_that_cannot_be_written_is_run_again,
         a_batch_whose_callback_cannot_be_inserted_is_settled_later,
+        a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can,
+        batches_this_node_cannot_settle_do_not_hold_up_the_others,
         losing_every_connection_loses_no_job,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
@@ -681,6 +685,74 @@ a_batch_whose_callback_cannot_be_inserted_is_settled_later(_Config) ->
         {batch_callback, _} -> ct:fail(second_batch_callback)
     after 600 -> ok
     end.
+
+a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can(_Config) ->
+    {ok, #{id := BatchId}} = shigoto:new_batch(#{
+        callback_worker => ~"shigoto_worker_of_a_later_release",
+        callback_args => #{~"test_pid" => list_to_binary(pid_to_list(self()))}
+    }),
+    Id = enqueue(~"batch-later", #{batch => BatchId}),
+    instruct(performing(~"batch-later"), {return, ok}),
+    ?assertMatch(#{attempt := 1}, await(Id, ~"completed")),
+    %% Through the job's own settling and several sweeps: the batch is not
+    %% moved to a state that says its callback is on the way.
+    timer:sleep(700),
+    ?assertMatch(
+        {ok, #{state := ~"active", completed_jobs := 1, total_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ),
+    ?assertMatch(
+        #{rows := [#{count := 1}]},
+        shigoto_db:query(?POOL, ~"SELECT count(*) AS count FROM shigoto_jobs", [])
+    ),
+    %% Stands in for a node that has the module: the name is now one this
+    %% node knows as a worker.
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_batches SET callback_worker = 'shigoto_batch_callback_worker' WHERE id = $1",
+        [BatchId]
+    ),
+    receive
+        {batch_callback, Args} -> ?assertNot(maps:is_key(~"_batch_event", Args))
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch({ok, #{state := ~"callback_completing"}}, shigoto:get_batch(BatchId)),
+    receive
+        {batch_callback, _} -> ct:fail(second_batch_callback)
+    after 600 -> ok
+    end.
+
+batches_this_node_cannot_settle_do_not_hold_up_the_others(_Config) ->
+    #{num_rows := 150} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_batches (callback_worker, total_jobs, completed_jobs)
+        SELECT 'shigoto_worker_of_a_later_release', 1, 1 FROM generate_series(1, 150)
+        """,
+        []
+    ),
+    %% Behind them, a batch a stopped node left for the sweep.
+    BatchId = new_batch(),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_batches SET total_jobs = 1, completed_jobs = 1 WHERE id = $1",
+        [BatchId]
+    ),
+    receive
+        {batch_callback, _Args} -> ok
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch(
+        #{rows := [#{count := 150}]},
+        shigoto_db:query(
+            ?POOL,
+            ~"""
+            SELECT count(*) AS count FROM shigoto_batches
+            WHERE state = 'active' AND callback_worker = 'shigoto_worker_of_a_later_release'
+            """,
+            []
+        )
+    ).
 
 losing_every_connection_loses_no_job(_Config) ->
     Running = enqueue(~"cut-off"),

@@ -32,11 +32,19 @@ after its last attempt, discarded by hand, or cancelled.
 ## The callback
 
 The callback worker is checked like the worker of any job
-(`shigoto_job:worker/1`) before its args are read: a batch row naming a module
-that is not a worker gets no callback job, `shigoto_batch_callback_unrunnable`
-is logged, and the batch stays in its `callback_*` state. `callback_args` are
-stored encrypted when an encryption key is configured and the write format is
-`v2` (`m:shigoto_crypto`), bound to the callback worker.
+(`shigoto_job:worker/1`) before its args are read, and both before the batch is
+touched. A node that cannot run the callback (it does not have the module, the
+module is outside its `workers` list, or it cannot read the `callback_args`)
+leaves the batch `active`, writes nothing and logs
+`shigoto_batch_callback_unrunnable`. Every node looks at such a batch again
+each `rescue_interval`, so the first node that can run the callback settles it:
+during a rolling deploy that is a node with the new release. A batch is only
+ever in a `callback_*` state together with its callback job. A batch no node
+can settle stays `active` and keeps being reported until the worker is deployed
+or the row is deleted.
+
+`callback_args` are stored encrypted when an encryption key is configured and
+the write format is `v2` (`m:shigoto_crypto`), bound to the callback worker.
 
 ## Counting and settling
 
@@ -139,21 +147,42 @@ jobs_discarded(Pool, BatchId, Count) ->
 -doc """
 Finish the batch if every job it knows of has ended and it is still `active`.
 
-One transaction moves it to `finished` (no callback worker),
-`callback_completing` or `callback_discarding` (a job was discarded or
+One transaction locks the batch row, moves it to `finished` (no callback
+worker), `callback_completing` or `callback_discarding` (a job was discarded or
 cancelled) and inserts the callback job. Only one caller makes the move, so
-the callback is enqueued once. When the callback cannot be enqueued the move
-is rolled back, `shigoto_batch_settle_failed` is logged and the answer is
-`{error, settle_failed}`; `settle_finished/1` tries again.
+the callback is enqueued once.
+
+When this node cannot run the callback, nothing is written:
+`shigoto_batch_callback_unrunnable` is logged, the batch stays `active` and the
+answer is `ok`. When the callback job cannot be inserted the move is rolled
+back, `shigoto_batch_settle_failed` is logged and the answer is
+`{error, settle_failed}`. Either way `settle_finished/1` tries again.
 """.
 -spec settle(atom(), integer()) -> ok | {error, settle_failed}.
 settle(Pool, BatchId) ->
+    case attempted(Pool, BatchId) of
+        failed ->
+            {error, settle_failed};
+        {unrunnable, Why} ->
+            ?LOG_ERROR(Why#{
+                msg => ~"shigoto_batch_callback_unrunnable",
+                note => ~"the batch stays active until a node that can run its callback settles it"
+            }),
+            ok;
+        _Settled ->
+            ok
+    end.
+
+-spec attempted(atom(), integer()) -> settled | unsettled | failed | {unrunnable, map()}.
+attempted(Pool, BatchId) ->
     try shigoto:transaction(fun() -> settled(Pool, BatchId) end, #{pool => Pool}) of
         {settled, Batch} when is_map(Batch) ->
             _ = shigoto_telemetry:batch_completed(Batch),
-            ok;
+            settled;
         unsettled ->
-            ok
+            unsettled;
+        {unrunnable, Why} when is_map(Why) ->
+            {unrunnable, Why}
     catch
         Class:Reason ->
             ?LOG_ERROR(#{
@@ -162,30 +191,67 @@ settle(Pool, BatchId) ->
                 reason => shigoto_error:shape({Class, Reason}),
                 note => ~"the batch stays active; the next sweep settles it"
             }),
-            {error, settle_failed}
+            failed
     end.
 
 -doc """
 Settle the batches that are still `active` although every job has ended: what
 a node that stopped between counting a batch's last job and settling it left
-behind. Answers how many it looked at.
+behind, and what a node that could not run the callback left for another.
+Answers how many it looked at.
+
+It goes through all of them, a hundred at a time in id order, so batches this
+node cannot settle do not keep it from the ones behind them. Those are
+reported in one `shigoto_batch_callback_unrunnable` log per call, with their
+number and the first ten.
 """.
 -spec settle_finished(atom()) -> {ok, non_neg_integer()} | {error, term()}.
 settle_finished(Pool) ->
+    settle_finished(Pool, 0, 0, {0, []}).
+
+settle_finished(Pool, After, Looked, Unrunnable) ->
     SQL =
         ~"""
         SELECT id FROM shigoto_batches
         WHERE state = 'active' AND total_jobs > 0
         AND completed_jobs + discarded_jobs >= total_jobs
+        AND id > $1
         ORDER BY id LIMIT 100
         """,
-    case query(Pool, SQL, []) of
+    case query(Pool, SQL, [After]) of
         #{rows := Rows} ->
-            _ = [settle(Pool, BatchId) || #{id := BatchId} <- Rows, is_integer(BatchId)],
-            {ok, length(Rows)};
+            case [BatchId || #{id := BatchId} <- Rows, is_integer(BatchId)] of
+                [] ->
+                    ok = report_unrunnable(Unrunnable),
+                    {ok, Looked};
+                BatchIds ->
+                    Left = [
+                        Why
+                     || BatchId <- BatchIds, {unrunnable, Why} <- [attempted(Pool, BatchId)]
+                    ],
+                    settle_finished(
+                        Pool,
+                        lists:max(BatchIds),
+                        Looked + length(BatchIds),
+                        counted(Left, Unrunnable)
+                    )
+            end;
         {error, _} = Err ->
             Err
     end.
+
+counted(Left, {Count, Sample}) ->
+    {Count + length(Left), lists:sublist(Sample ++ Left, 10)}.
+
+report_unrunnable({0, []}) ->
+    ok;
+report_unrunnable({Count, Sample}) ->
+    ?LOG_ERROR(#{
+        msg => ~"shigoto_batch_callback_unrunnable",
+        batches => Count,
+        first => Sample,
+        note => ~"these batches stay active until a node that can run their callbacks settles them"
+    }).
 
 -doc "Get a batch by ID, with its `callback_args` decrypted for reading.".
 -spec get(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
@@ -201,10 +267,41 @@ get(Pool, BatchId) ->
 %% Internal
 %%----------------------------------------------------------------------
 
-%% Runs inside the transaction `settle/2` opened. Anything that keeps the
-%% callback from being enqueued raises, which rolls the move back.
--spec settled(atom(), integer()) -> {settled, map()} | unsettled.
+%% Runs inside the transaction `settle/2` opened. The batch row is locked and
+%% its callback checked before anything is written, so a node that cannot run
+%% the callback has nothing to undo, also when the transaction is one the
+%% caller opened. After that, anything that keeps the callback from being
+%% enqueued raises, which rolls the move back.
+-spec settled(atom(), integer()) -> {settled, map()} | unsettled | {unrunnable, map()}.
 settled(Pool, BatchId) ->
+    SQL =
+        ~"""
+        SELECT * FROM shigoto_batches
+        WHERE id = $1 AND state = 'active' AND total_jobs > 0
+        AND completed_jobs + discarded_jobs >= total_jobs
+        FOR UPDATE
+        """,
+    case query(Pool, SQL, [BatchId]) of
+        #{rows := [Batch]} ->
+            case callback(Batch) of
+                {error, Reason} ->
+                    {unrunnable, #{
+                        batch_id => BatchId,
+                        callback_worker => maps:get(callback_worker, Batch, undefined),
+                        reason => Reason
+                    }};
+                Callback ->
+                    Moved = moved(Pool, BatchId),
+                    ok = enqueued(Callback),
+                    {settled, Moved}
+            end;
+        #{rows := []} ->
+            unsettled;
+        {error, Reason} ->
+            error({?MODULE, shigoto_db:reduced(Reason)})
+    end.
+
+moved(Pool, BatchId) ->
     SQL =
         ~"""
         UPDATE shigoto_batches SET
@@ -214,26 +311,22 @@ settled(Pool, BatchId) ->
             ELSE 'callback_completing'
           END,
           completed_at = CASE WHEN callback_worker IS NULL THEN now() ELSE completed_at END
-        WHERE id = $1 AND state = 'active' AND total_jobs > 0
-        AND completed_jobs + discarded_jobs >= total_jobs
+        WHERE id = $1
         RETURNING *
         """,
     case query(Pool, SQL, [BatchId]) of
-        #{rows := [Batch]} ->
-            ok = called_back(Batch),
-            {settled, Batch};
-        #{rows := []} ->
-            unsettled;
-        {error, Reason} ->
-            error({?MODULE, shigoto_db:reduced(Reason)})
+        #{rows := [Batch]} -> Batch;
+        {error, Reason} -> error({?MODULE, shigoto_db:reduced(Reason)})
     end.
 
-%% The event is `discard` when any job of the batch was discarded or
-%% cancelled, whichever job happened to finish last. The worker is checked
-%% before the args are opened, as for a job.
-called_back(#{callback_worker := null}) ->
-    ok;
-called_back(#{callback_worker := Name, discarded_jobs := Discarded} = Batch) ->
+%% The callback job of a batch, when this node can run it. The event is
+%% `discard` when any job of the batch was discarded or cancelled, whichever
+%% job happened to finish last. The worker is checked before the args are
+%% opened, as for a job.
+-spec callback(map()) -> none | {job, map()} | {error, term()}.
+callback(#{callback_worker := null}) ->
+    none;
+callback(#{callback_worker := Name, discarded_jobs := Discarded} = Batch) ->
     Event =
         case Discarded > 0 of
             true -> discard;
@@ -243,30 +336,26 @@ called_back(#{callback_worker := Name, discarded_jobs := Discarded} = Batch) ->
         {ok, Worker} ->
             case callback_args(Batch) of
                 {ok, Args} when is_map(Args) ->
-                    enqueued(shigoto:insert(#{worker => Worker, args => with_event(Args, Event)}));
+                    {job, #{worker => Worker, args => with_event(Args, Event)}};
                 {ok, _NotAMap} ->
-                    callback_unrunnable(Batch, invalid_callback_args);
+                    {error, invalid_callback_args};
                 {error, Reason} ->
-                    callback_unrunnable(Batch, Reason)
+                    {error, Reason}
             end;
         {error, {unknown_worker, _Name}} ->
-            callback_unrunnable(Batch, unknown_worker)
+            {error, unknown_worker}
     end.
 
-enqueued({ok, _JobOrConflict}) -> ok;
-enqueued({error, _Reason}) -> error({?MODULE, callback_not_enqueued}).
+enqueued(none) ->
+    ok;
+enqueued({job, JobParams}) ->
+    case shigoto:insert(JobParams) of
+        {ok, _JobOrConflict} -> ok;
+        {error, _Reason} -> error({?MODULE, callback_not_enqueued})
+    end.
 
 with_event(Args, complete) -> Args;
 with_event(Args, discard) -> Args#{~"_batch_event" => ~"discard"}.
-
-callback_unrunnable(Batch, Reason) ->
-    ?LOG_ERROR(#{
-        msg => ~"shigoto_batch_callback_unrunnable",
-        batch_id => maps:get(id, Batch, undefined),
-        callback_worker => maps:get(callback_worker, Batch, undefined),
-        reason => Reason
-    }),
-    ok.
 
 -spec callback_args(map()) -> {ok, term()} | {error, term()}.
 callback_args(#{callback_args := Args}) when is_map(Args) ->
