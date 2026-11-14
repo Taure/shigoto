@@ -46,6 +46,7 @@ the application does with it.
     the_pruner_archives_old_finished_jobs/1,
     every_fanout_consumer_runs_a_job/1,
     a_fanout_job_cannot_join_a_batch/1,
+    the_stager_wakes_no_fanout_queue/1,
     an_unknown_worker_fails_the_job_not_the_queue/1,
     a_module_that_is_not_a_worker_fails_the_job/1,
     a_worker_unknown_here_is_put_back_before_it_uses_an_attempt/1,
@@ -145,6 +146,7 @@ all() ->
         the_pruner_archives_old_finished_jobs,
         every_fanout_consumer_runs_a_job,
         a_fanout_job_cannot_join_a_batch,
+        the_stager_wakes_no_fanout_queue,
         an_unknown_worker_fails_the_job_not_the_queue,
         a_module_that_is_not_a_worker_fails_the_job,
         a_worker_unknown_here_is_put_back_before_it_uses_an_attempt,
@@ -287,6 +289,12 @@ overrides(TestCase) when
     TestCase =:= a_fanout_job_cannot_join_a_batch
 ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
+overrides(the_stager_wakes_no_fanout_queue) ->
+    #{
+        fanout_queues => [{?FANOUT, 5, #{window => 60}}],
+        poll_interval => 60000,
+        notifier => connection()
+    };
 overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
     #{load_shedding => #{target => 60000, max_in_flight => 100}};
 overrides(a_backlog_drains_without_waiting_for_the_poll_timer) ->
@@ -1244,6 +1252,34 @@ a_fanout_job_cannot_join_a_batch(_Config) ->
     ),
     ?assertMatch({ok, #{total_jobs := 0}}, shigoto:get_batch(BatchId)),
     ?assertMatch({ok, #{id := _}}, shigoto:insert(Job#{queue => ~"elsewhere"})).
+
+the_stager_wakes_no_fanout_queue(_Config) ->
+    {ok, _} = shigoto:insert(#{
+        worker => shigoto_lifecycle_worker, args => #{}, queue => ~"elsewhere"
+    }),
+    _ = enqueue(~"broadcast", #{queue => ?FANOUT}),
+    %% Both rows are due and stay `available`: nothing serves the one queue
+    %% and the other is fanout. From here on only the stager notifies, every
+    %% 200 ms.
+    {ok, _} = shigoto_db:start_listener(shigoto_test_listener, connection()),
+    try
+        ok = minato:listen(shigoto_test_listener, shigoto_config:notify_channel()),
+        Woken = notified(1000),
+        ?assert(lists:member(~"elsewhere", Woken)),
+        ?assertNot(lists:member(?FANOUT, Woken))
+    after
+        minato:stop_listener(shigoto_test_listener)
+    end.
+
+notified(Ms) ->
+    timer:sleep(Ms),
+    notified().
+
+notified() ->
+    receive
+        {minato_notification, _Channel, Queue, _From} -> [Queue | notified()]
+    after 0 -> []
+    end.
 
 %%----------------------------------------------------------------------
 %% Workers that cannot run

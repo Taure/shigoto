@@ -5,7 +5,8 @@ queues with work due to run now (a job's `scheduled_at` has elapsed,
 including a `retryable` job whose backoff is over) and issues a
 `pg_notify(Channel, Queue)` on `shigoto_config:notify_channel/0` so the notifier
 wakes the matching queue immediately instead of waiting up to
-`poll_interval`.
+`poll_interval`. Fanout queues are left out: their jobs stay due for the whole
+window, and the notifier wakes no fanout queue.
 
 Uses `pg_try_advisory_xact_lock` so only one node stages in a
 multi-node deployment; the notification still reaches every node.
@@ -128,7 +129,11 @@ stage() ->
     Pool = shigoto_config:pool(),
     case due_queues(Pool) of
         {ok, Queues} ->
-            lists:foreach(fun(Queue) -> notify(Pool, Queue) end, Queues);
+            %% A fanout job stays due for as long as its window, and the
+            %% notifier wakes no fanout queue.
+            Fanout = [Name || {Name, _Concurrency, _Opts} <- shigoto_config:fanout_queues()],
+            _ = [notify(Pool, Queue) || Queue <- Queues, not lists:member(Queue, Fanout)],
+            ok;
         {error, _} ->
             ok
     end.
