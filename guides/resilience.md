@@ -137,3 +137,9 @@ raises, or the global concurrency check cannot take its advisory lock within
 `shigoto_resilience_gate_failed` is logged and
 `[shigoto, resilience, gate_failed]` is emitted with the `gate` and a `reason`.
 No gate admits a job it could not check.
+
+That includes seki not running (stopped on its own, or a queue drained with
+`shigoto:drain_queue/1,2` in a node where it was never started): a worker
+that declares `rate_limit/0`, `concurrency/0` or `circuit_breaker/0` is
+snoozed with the reason `seki_not_running` instead of running without its
+gates. A worker that declares none of them is not affected.

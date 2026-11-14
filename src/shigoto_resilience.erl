@@ -36,6 +36,13 @@ job: the job is snoozed for 5 seconds, `shigoto_resilience_gate_failed` is
 logged and `[shigoto, resilience, gate_failed]` is emitted. A snooze is not an
 attempt, so a job behind a gate that stays broken waits rather than being
 discarded; alert on the event.
+
+seki is one of shigoto's applications and runs whenever shigoto does. A job
+can still meet a node without it: seki stopped on its own, or a queue drained
+with `shigoto:drain_queue/1,2` while neither is started. There a worker that
+declares `rate_limit/0`, `concurrency/0` or `circuit_breaker/0` is not run
+ungated: its jobs are snoozed like any other gate failure, with the reason
+`seki_not_running`. A worker that declares none of them runs as it always has.
 """.
 
 -export([
@@ -83,7 +90,11 @@ asked(Gate, Worker, Job) ->
     try
         checked(Gate, Worker, Job)
     catch
-        Class:Reason -> gate_failed(Gate, Worker, shigoto_error:shape({Class, Reason}))
+        Class:Reason ->
+            %% What was set up for the worker may be gone (seki restarted):
+            %% its next job sets it up again.
+            _ = forget(Worker),
+            gate_failed(Gate, Worker, shigoto_error:shape({Class, Reason}))
     end.
 
 checked(setup, Worker, _Job) ->
@@ -136,9 +147,34 @@ drained while the application is not running) they are ensured every time.
 """.
 -spec ensure_worker_primitives(module()) -> ok.
 ensure_worker_primitives(Worker) ->
-    case is_seki_running() andalso not is_remembered(Worker) of
-        true -> do_ensure(Worker);
-        false -> ok
+    case is_seki_running() of
+        true ->
+            case is_remembered(Worker) of
+                true -> ok;
+                false -> do_ensure(Worker)
+            end;
+        false ->
+            _ = code:ensure_loaded(Worker),
+            ungated([
+                Gate
+             || Gate <- [rate_limit, concurrency, circuit_breaker], declares(Worker, Gate)
+            ])
+    end.
+
+%% Without seki a worker that asks for a gate has none.
+-spec ungated([atom()]) -> ok.
+ungated([]) -> ok;
+ungated([_ | _]) -> error({?MODULE, seki_not_running}).
+
+declares(Worker, Gate) ->
+    erlang:function_exported(Worker, Gate, 0).
+
+-spec gated(module(), atom()) -> boolean().
+gated(Worker, Gate) ->
+    _ = code:ensure_loaded(Worker),
+    case declares(Worker, Gate) of
+        true -> is_seki_running() orelse error({?MODULE, seki_not_running});
+        false -> false
     end.
 
 is_remembered(Worker) ->
@@ -155,49 +191,44 @@ remember(Worker) ->
         error:badarg -> true
     end.
 
+forget(Worker) ->
+    try
+        ets:delete(?INIT_TABLE, Worker)
+    catch
+        error:badarg -> true
+    end.
+
 -doc "Check per-worker rate limit. Returns ok or {snooze, Seconds}.".
 -spec check_rate_limit(module(), map()) -> ok | {snooze, pos_integer()}.
 check_rate_limit(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    case gated(Worker, rate_limit) of
         false ->
             ok;
         true ->
-            _ = code:ensure_loaded(Worker),
-            case erlang:function_exported(Worker, rate_limit, 0) of
-                false ->
+            LimiterName = limiter_name(Worker),
+            case seki:check(LimiterName, Worker) of
+                {allow, _} ->
                     ok;
-                true ->
-                    LimiterName = limiter_name(Worker),
-                    case seki:check(LimiterName, Worker) of
-                        {allow, _} ->
-                            ok;
-                        {deny, #{retry_after := Ms}} ->
-                            shigoto_telemetry:resilience_rate_limited(Worker, Ms),
-                            {snooze, max(1, Ms div 1000)}
-                    end
+                {deny, #{retry_after := Ms}} ->
+                    shigoto_telemetry:resilience_rate_limited(Worker, Ms),
+                    {snooze, max(1, Ms div 1000)}
             end
     end.
 
 -doc "Check per-worker bulkhead. Returns ok or {snooze, 5}.".
 -spec check_bulkhead(module(), map()) -> ok | {snooze, pos_integer()}.
 check_bulkhead(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    case gated(Worker, concurrency) of
         false ->
             ok;
         true ->
-            _ = code:ensure_loaded(Worker),
-            case erlang:function_exported(Worker, concurrency, 0) of
-                false ->
+            BulkheadName = bulkhead_name(Worker),
+            case seki_bulkhead:acquire(BulkheadName) of
+                ok ->
                     ok;
-                true ->
-                    BulkheadName = bulkhead_name(Worker),
-                    case seki_bulkhead:acquire(BulkheadName) of
-                        ok ->
-                            ok;
-                        {error, bulkhead_full} ->
-                            shigoto_telemetry:resilience_bulkhead_full(Worker),
-                            {snooze, 5}
-                    end
+                {error, bulkhead_full} ->
+                    shigoto_telemetry:resilience_bulkhead_full(Worker),
+                    {snooze, 5}
             end
     end.
 
@@ -254,7 +285,9 @@ check_global_concurrency(Worker, Job = #{}) ->
 -doc "Check circuit breaker for a worker. Returns ok or {snooze, 10}.".
 -spec check_circuit(module(), map()) -> ok | {snooze, pos_integer()}.
 check_circuit(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    %% Every worker has a breaker with the defaults; one that sets its own
+    %% asked for it.
+    case is_seki_running() orelse gated(Worker, circuit_breaker) of
         false ->
             ok;
         true ->
