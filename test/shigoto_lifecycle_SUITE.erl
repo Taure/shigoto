@@ -22,10 +22,15 @@ the application does with it.
     a_crash_in_perform_is_recorded_without_its_args/1,
     a_killed_worker_process_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
+    cancelling_a_running_job_stops_its_worker/1,
+    a_cancel_from_another_node_stops_the_worker/1,
+    a_killed_executor_takes_its_worker_down/1,
+    stopping_the_application_stops_a_running_worker/1,
     a_dead_nodes_job_is_rescued_and_rerun/1,
     a_rescued_job_is_not_rescued_again_while_it_runs/1,
     a_job_that_kills_its_node_is_discarded_at_max_attempts/1,
     a_stale_executor_cannot_complete_a_reclaimed_job/1,
+    a_superseded_run_is_stopped_at_the_next_heartbeat/1,
     a_heartbeat_keeps_a_live_job_from_rescue/1,
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
@@ -45,7 +50,8 @@ the application does with it.
     rescue_interval,
     stage_interval,
     notifier,
-    fanout_queues
+    fanout_queues,
+    shutdown_timeout
 ]).
 
 all() ->
@@ -60,10 +66,15 @@ all() ->
         a_crash_in_perform_is_recorded_without_its_args,
         a_killed_worker_process_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
+        cancelling_a_running_job_stops_its_worker,
+        a_cancel_from_another_node_stops_the_worker,
+        a_killed_executor_takes_its_worker_down,
+        stopping_the_application_stops_a_running_worker,
         a_dead_nodes_job_is_rescued_and_rerun,
         a_rescued_job_is_not_rescued_again_while_it_runs,
         a_job_that_kills_its_node_is_discarded_at_max_attempts,
         a_stale_executor_cannot_complete_a_reclaimed_job,
+        a_superseded_run_is_stopped_at_the_next_heartbeat,
         a_heartbeat_keeps_a_live_job_from_rescue,
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
@@ -129,8 +140,14 @@ overrides(a_retry_is_woken_by_the_stager) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_burst_of_notifications_leaves_one_poll_timer) ->
     #{poll_interval => 200, notifier => connection()};
+overrides(a_cancel_from_another_node_stops_the_worker) ->
+    #{heartbeat_interval => 300};
+overrides(a_superseded_run_is_stopped_at_the_next_heartbeat) ->
+    #{heartbeat_interval => 300};
 overrides(a_heartbeat_keeps_a_live_job_from_rescue) ->
     #{heartbeat_interval => 300};
+overrides(stopping_the_application_stops_a_running_worker) ->
+    #{shutdown_timeout => 200};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(_TestCase) ->
@@ -251,9 +268,46 @@ cancelling_a_waiting_job_keeps_it_from_running(_Config) ->
     ?assertMatch(#{state := ~"cancelled", attempt := 0}, Row),
     ?assertNotEqual(null, maps:get(cancelled_at, Row)).
 
+cancelling_a_running_job_stops_its_worker(_Config) ->
+    Id = enqueue(~"cancelled-running"),
+    Worker = performing(~"cancelled-running"),
+    ok = shigoto:cancel(Id),
+    ok = stopped(Worker, 2000),
+    ok = wait_for(fun() -> executors_of(Id) =:= [] end),
+    timer:sleep(300),
+    ?assertMatch(#{state := ~"cancelled", attempt := 1, errors := ~"[]"}, row(Id)),
+    %% The slot the cancelled job held is free again.
+    [enqueue(Tag) || Tag <- slots()],
+    [instruct(performing(Tag), {return, ok}) || Tag <- slots()],
+    ok.
+
+a_cancel_from_another_node_stops_the_worker(_Config) ->
+    Id = enqueue(~"cancelled-elsewhere"),
+    Worker = performing(~"cancelled-elsewhere"),
+    %% What a cancel on another node amounts to here: the row changes and
+    %% nothing on this node is told.
+    ok = shigoto_repo:cancel_job(?POOL, Id),
+    ok = stopped(Worker, 2000),
+    ok = wait_for(fun() -> executors_of(Id) =:= [] end),
+    ?assertMatch(#{state := ~"cancelled", errors := ~"[]"}, row(Id)).
+
+stopping_the_application_stops_a_running_worker(_Config) ->
+    Id = enqueue(~"shut-down"),
+    Worker = performing(~"shut-down"),
+    ok = application:stop(shigoto),
+    ok = stopped(Worker, 2000),
+    %% Nothing was recorded: the row waits for the stale-job rescue.
+    ?assertMatch(#{state := ~"executing", attempt := 1, errors := ~"[]"}, row(Id)).
+
 %%----------------------------------------------------------------------
 %% A node that dies
 %%----------------------------------------------------------------------
+
+a_killed_executor_takes_its_worker_down(_Config) ->
+    Id = enqueue(~"orphaned"),
+    Worker = performing(~"orphaned"),
+    [exit(Executor, kill) || Executor <- executors_of(Id)],
+    ok = stopped(Worker, 2000).
 
 a_dead_nodes_job_is_rescued_and_rerun(_Config) ->
     Id = enqueue(~"rescued"),
@@ -311,6 +365,21 @@ a_stale_executor_cannot_complete_a_reclaimed_job(_Config) ->
     instruct(Second, {return, {ok, ~"current"}}),
     Row = await(Id, ~"completed"),
     ?assertEqual(~"current", json:decode(maps:get(result, Row))).
+
+a_superseded_run_is_stopped_at_the_next_heartbeat(_Config) ->
+    Id = enqueue(~"superseded"),
+    First = performing(~"superseded"),
+    %% What a rescue on another node does to the row.
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET state = 'available', heartbeat_at = NULL WHERE id = $1", [
+            Id
+        ]
+    ),
+    Second = performing(~"superseded"),
+    ok = stopped(First, 2000),
+    ?assert(is_process_alive(Second)),
+    instruct(Second, {return, ok}),
+    ?assertMatch(#{attempt := 2, errors := ~"[]"}, await(Id, ~"completed")).
 
 a_heartbeat_keeps_a_live_job_from_rescue(_Config) ->
     Id = enqueue(~"alive"),
@@ -501,6 +570,12 @@ stopped(Pid, Ms) ->
         demonitor(Ref, [flush]),
         ct:fail({still_running, Pid})
     end.
+
+slots() ->
+    [iolist_to_binary([~"slot-", integer_to_binary(N)]) || N <- lists:seq(1, 5)].
+
+%% The node running the job goes away: its queue and the job's executor die
+%% with nothing written, and the row's heartbeat ages past the stale threshold.
 
 node_dies(Id) ->
     exit(queue_pid(), kill),

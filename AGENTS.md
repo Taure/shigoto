@@ -118,6 +118,11 @@ shigoto_sup (one_for_one)
   1800)` seconds. At `max_attempts` the job is `discarded` and `on_discard/2`
   fires. `{snooze, Secs}` reschedules and raises `max_attempts` by one, giving
   back the attempt the claim counted.
+- **Executor.** One `shigoto_executor` per running job. It traps exits and
+  runs `perform/1` in a linked process, so neither outlives the other.
+  `shigoto_executor:stop/2` ends a run early (local cancel, or the heartbeat
+  finding the claim gone); the supervisor's shutdown does the same. A stopped
+  run writes nothing. Fanout jobs run unclaimed and never write to their row.
 - **Notify + polling fallback.** `shigoto_notifier` LISTENs via a
   minato listener, pokes the matching queue to `poll` immediately, and
   reconnects on drop; the timed poll loop always runs underneath it.

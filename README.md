@@ -184,6 +184,9 @@ end of its backoff. The queue claims `retryable` jobs exactly as it claims
 `available` ones, so the retry needs nothing but the polling loop.
 
 Jobs can also be `cancelled` via `shigoto:cancel/2` and retried via `shigoto:retry/2`.
+Cancelling a job that is running stops its worker process: at once on the node
+running it, and within `heartbeat_interval` when the cancel was made on another
+node.
 
 ## Worker Callbacks
 

@@ -37,10 +37,12 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
 | `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
 
-`lost` fires when a run finished but its claim no longer held, so its outcome
-(`transition`: `completed`, `failed` or `snoozed`) was not written: the job had
-been rescued and claimed again, or cancelled, while this run was going. No
-`completed`, `failed` or `snoozed` event fires for that run. It comes with a
+`lost` fires when a run's claim no longer held: the job had been rescued and
+claimed again, or cancelled on another node, while this run was going. Either
+the run finished and its outcome (`transition`: `completed`, `failed` or
+`snoozed`) was not written, or the heartbeat noticed first and the run was
+stopped (`transition`: `stopped`). No `completed`, `failed` or `snoozed` event
+fires for that run. It comes with a
 `shigoto_job_transition_lost` warning. A steady rate of it means jobs outlive
 the stale threshold (`heartbeat_interval * 2`) without a heartbeat, and each of
 them ran twice.

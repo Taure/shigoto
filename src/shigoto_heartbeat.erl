@@ -8,7 +8,9 @@ default); claiming a job counts as its first.
 
 A heartbeat is written under the claim the job is running under, so a run whose
 job has since been rescued and claimed again, or cancelled, does not keep the
-row alive.
+row alive. Such a run is stopped (`shigoto_executor:stop/2`): this is how a
+`shigoto:cancel/1,2` made on another node reaches a job running here, within
+one heartbeat interval.
 """.
 -behaviour(gen_server).
 
@@ -54,10 +56,26 @@ update_heartbeats() ->
             Running = ets:tab2list(shigoto_executors),
             Alive = [Entry || {_Claim, Pid} = Entry <- Running, is_process_alive(Pid)],
             ok = forget(Running -- Alive),
-            Claims = [Claim || {{_JobId, Attempt} = Claim, _Pid} <- Alive, is_integer(Attempt)],
-            _ = shigoto_repo:heartbeat(shigoto_config:pool(), Claims),
-            ok
+            Claimed = [Entry || {{_JobId, Attempt}, _Pid} = Entry <- Alive, is_integer(Attempt)],
+            Claims = [Claim || {Claim, _Pid} <- Claimed],
+            case shigoto_repo:heartbeat(shigoto_config:pool(), Claims) of
+                {ok, Held} -> stop_lost(Claimed, Claims -- Held);
+                {error, _} -> ok
+            end
     end.
+
+%% A claim the heartbeat did not find was cancelled on another node, or
+%% rescued. Nothing this run does can be recorded any more, so it is stopped.
+stop_lost(Claimed, Lost) ->
+    lists:foreach(
+        fun({Claim, Pid}) ->
+            case lists:member(Claim, Lost) of
+                true -> shigoto_executor:stop(Pid, lost);
+                false -> ok
+            end
+        end,
+        Claimed
+    ).
 
 %% An executor that was killed never took its own entry out. Left in, its job
 %% would be kept alive by heartbeats nobody is running it for.

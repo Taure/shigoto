@@ -217,7 +217,14 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
     end.
 
 -doc """
-Cancel a job by ID. Stops the job if it is executing on this node.
+Cancel a job by ID.
+
+A job that is waiting will not run. A job that is running is stopped: its
+worker process is shut down (`shutdown`, then `kill` after five seconds if it
+traps exits and has not gone) and nothing it did is recorded. On the node that
+runs it this happens at once; from another node it happens at that node's next
+heartbeat, so within `heartbeat_interval`. `perform/1` may be cut off at any
+point, like any other crash, and the job is not retried.
 
 Not transaction-aware: the process stop and `job_cancelled` telemetry fire
 immediately, so this always uses the configured pool rather than an enclosing
@@ -227,13 +234,16 @@ immediately, so this always uses the configured pool rather than an enclosing
 cancel(JobId) ->
     cancel(shigoto_config:pool(), JobId).
 
--doc "Cancel a job by ID. Also stops executing jobs on this node.".
+-doc "Cancel a job by ID on the given pool. See `cancel/1`.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.
 cancel(Pool, JobId) ->
-    _ = [exit(Executor, shutdown) || Executor <- shigoto_executor:running(JobId)],
     Result = shigoto_repo:cancel_job(Pool, JobId),
     case Result of
         ok ->
+            _ = [
+                shigoto_executor:stop(Executor, cancelled)
+             || Executor <- shigoto_executor:running(JobId)
+            ],
             shigoto_telemetry:job_cancelled(#{id => JobId, worker => unknown, queue => unknown});
         _ ->
             ok
