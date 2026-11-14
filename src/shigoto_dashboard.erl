@@ -183,20 +183,33 @@ batch_stats() ->
 query(SQL, Params) ->
     shigoto_db:query(?POOL, SQL, Params).
 
+%% A row whose state is none of shigoto's is counted under `other`: the
+%% state column is text anyone with write access can set, so it is never
+%% turned into an atom.
 pivot_queue_stats(Rows, Paused) ->
-    GroupedByQueue = lists:foldl(
-        fun(#{queue := Queue, state := State, count := Count}, Acc) ->
-            QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
-            StateAtom = binary_to_existing_atom(State, utf8),
-            Acc#{Queue => QueueMap#{StateAtom => Count}}
-        end,
-        #{},
-        Rows
-    ),
+    Queues = lists:usort([Queue || #{queue := Queue} <- Rows]),
     [
-        Stats#{is_paused => lists:member(Queue, Paused)}
-     || #{queue := Queue} = Stats <- maps:values(GroupedByQueue)
+        maps:from_list(
+            [{queue, Queue}, {is_paused, lists:member(Queue, Paused)}] ++
+                counts_by_state([Row || #{queue := Q} = Row <- Rows, Q =:= Queue])
+        )
+     || Queue <- Queues
     ].
+
+counts_by_state(Rows) ->
+    Counted = [{state_name(State), Count} || #{state := State, count := Count} <- Rows],
+    [
+        {Name, lists:sum([Count || {N, Count} <- Counted, N =:= Name])}
+     || Name <- lists:usort([Name || {Name, _Count} <- Counted])
+    ].
+
+state_name(~"available") -> available;
+state_name(~"executing") -> executing;
+state_name(~"retryable") -> retryable;
+state_name(~"completed") -> completed;
+state_name(~"discarded") -> discarded;
+state_name(~"cancelled") -> cancelled;
+state_name(_Other) -> other.
 
 build_search_clauses(Filters, StartIdx) ->
     maps:fold(
