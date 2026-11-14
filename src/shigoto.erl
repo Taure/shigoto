@@ -114,6 +114,8 @@ row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
     get_batch/1,
     report_progress/2,
     get_job/1,
+    reencrypt/0,
+    reencrypt/1,
     health/0
 ]).
 
@@ -348,6 +350,33 @@ decrypted; a column that does not open is the JSON string of the reason
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).
+
+-doc """
+Rewrite stored job data in the form the current encryption settings write:
+under the newest key, in the configured `encryption_write_format`, and
+encrypted where it is still plaintext. Safe to run while the queue is live,
+and to run again. See `m:shigoto_reencrypt`.
+""".
+-spec reencrypt() ->
+    {ok, #{
+        jobs := shigoto_reencrypt:counts(),
+        archive := shigoto_reencrypt:counts(),
+        batches := shigoto_reencrypt:counts()
+    }}
+    | {error, term()}.
+reencrypt() ->
+    reencrypt(#{}).
+
+-doc "Like `reencrypt/0` with options: `pool`, and `batch_size` (rows read per statement, default 500).".
+-spec reencrypt(map()) ->
+    {ok, #{
+        jobs := shigoto_reencrypt:counts(),
+        archive := shigoto_reencrypt:counts(),
+        batches := shigoto_reencrypt:counts()
+    }}
+    | {error, term()}.
+reencrypt(Opts) ->
+    shigoto_reencrypt:run(maps:get(pool, Opts, shigoto_config:pool()), Opts).
 
 -doc "Retry discarded or cancelled jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
