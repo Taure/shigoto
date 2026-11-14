@@ -1,54 +1,44 @@
 -module(shigoto_reencrypt).
--moduledoc """
-Rewrites stored job data in the form the current settings write
-(`shigoto:reencrypt/0,1`).
+-moduledoc false.
 
-Run it after changing what is written: after setting
-`encryption_write_format` to `v2`, after putting a new key first in
-`encryption_keys`, or after configuring a key for a table that already holds
-plaintext jobs. It walks `shigoto_jobs`, `shigoto_jobs_archive` and
-`shigoto_batches` by id and, for every value that is not already in the
-current form (`shigoto_crypto:reseal/2`), decrypts it and encrypts it again:
-`args`, `meta`, `result`, each entry of `deps_results`, and a batch's
-`callback_args`.
-
-It also moves the `unique_key` of every row in `shigoto_jobs` to the digest
-under the current key (`shigoto_crypto:unique_rekey/2`): a key stored in the
-clear before encryption was turned on, and one stored under an older key. A
-unique insert looks for a job under every listed key, and in the clear while
-`require_encrypted` is not set, so duplicates are found before, during and
-after the run. Once it reports `failed => 0` and `skipped => 0` an old key can
-be removed and `require_encrypted` set. A `unique_key` written under a key that
-is no longer listed cannot be moved and is counted as `failed`. Archived jobs
-are not looked up by a unique insert, and their keys are left as they are.
-
-It is safe while the queue runs. Rows are read in batches without a lock, and
-each value is written back with a compare-and-swap (`UPDATE ... WHERE id = $1
-AND column = <the value read>`), so a row that changed in the meantime is left
-alone and counted as `skipped`; run it again to pick those up. A running job
-is not affected by its row being rewritten. It can be stopped and started again
-at any point, and running it twice changes nothing the second time.
-
-A v1 ciphertext is bound to nothing, so this is also the moment a v1 value
-that was moved between rows gets bound to the row it was moved to. Run it soon
-after the upgrade, then drop `v1` from `encryption_read_formats`.
-""".
+%% Rewrites stored job data in the form the current settings write
+%% (`shigoto:reencrypt/0,1`).
+%%
+%% Run it after changing what is written: after setting
+%% `encryption_write_format` to `v2`, after putting a new key first in
+%% `encryption_keys`, or after configuring a key for a table that already holds
+%% plaintext jobs. It walks `shigoto_jobs`, `shigoto_jobs_archive` and
+%% `shigoto_batches` by id and, for every value that is not already in the
+%% current form (`shigoto_crypto:reseal/2`), decrypts it and encrypts it again:
+%% `args`, `meta`, `result`, each entry of `deps_results`, and a batch's
+%% `callback_args`.
+%%
+%% It also moves the `unique_key` of every row in `shigoto_jobs` to the digest
+%% under the current key (`shigoto_crypto:unique_rekey/2`): a key stored in the
+%% clear before encryption was turned on, and one stored under an older key. A
+%% unique insert looks for a job under every listed key, and in the clear while
+%% `require_encrypted` is not set, so duplicates are found before, during and
+%% after the run. Once it reports `failed => 0` and `skipped => 0` an old key can
+%% be removed and `require_encrypted` set. A `unique_key` written under a key that
+%% is no longer listed cannot be moved and is counted as `failed`. Archived jobs
+%% are not looked up by a unique insert, and their keys are left as they are.
+%%
+%% It is safe while the queue runs. Rows are read in batches without a lock, and
+%% each value is written back with a compare-and-swap (`UPDATE ... WHERE id = $1
+%% AND column = <the value read>`), so a row that changed in the meantime is left
+%% alone and counted as `skipped`; run it again to pick those up. A running job
+%% is not affected by its row being rewritten. It can be stopped and started again
+%% at any point, and running it twice changes nothing the second time.
+%%
+%% A v1 ciphertext is bound to nothing, so this is also the moment a v1 value
+%% that was moved between rows gets bound to the row it was moved to. Run it soon
+%% after the upgrade, then drop `v1` from `encryption_read_formats`.
 
 -export([run/2]).
 
 -export_type([counts/0]).
 
--doc """
-What happened to the values of one table: `rewritten` in the current form,
-`skipped` because the row changed while it was read, `failed` because the
-value does not open under any configured key. `scanned` counts rows.
-""".
--type counts() :: #{
-    scanned := non_neg_integer(),
-    rewritten := non_neg_integer(),
-    skipped := non_neg_integer(),
-    failed := non_neg_integer()
-}.
+-type counts() :: shigoto:reencrypt_counts().
 
 -define(TABLES, [
     {jobs, ~"shigoto_jobs", ~"id, worker, queue, unique_key, args, meta, result, deps_results"},

@@ -8,7 +8,7 @@ default); claiming a job counts as its first.
 
 A heartbeat is written under the claim the job is running under, so a run whose
 job has since been rescued and claimed again, or cancelled, does not keep the
-row alive. Such a run is stopped (`shigoto_executor:stop/2`): this is how a
+row alive. Such a run is stopped: this is how a
 `shigoto:cancel/1,2` made on another node reaches a job running here, within
 one heartbeat interval.
 """.

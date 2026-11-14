@@ -1,29 +1,29 @@
 -module(shigoto_lock).
--moduledoc """
-The PostgreSQL advisory locks shigoto takes: one per unique key while a unique
-job is inserted, one per worker for the global concurrency check, and one each
-for the cron pass, the stager pass and the migration.
+-moduledoc false.
 
-Advisory locks are shared by the whole database. Any role that can connect can
-take any key, so a lock here can be held by something that is not shigoto. Two
-things follow:
-
-- shigoto never waits for one without a bound. Every lock is taken with
-  `pg_try_advisory_xact_lock`, and `acquire_xact/2` tries again for at most
-  `shigoto_config:advisory_lock_timeout/0` milliseconds before it answers
-  `{error, lock_timeout}`. What the caller does then is the caller's to say:
-  a unique insert answers the error, the global concurrency check snoozes the
-  job, a cron or stager pass is skipped, a migration is retried.
-- With `shigoto_config:instance/0` set, the keys are this installation's own:
-  the two-integer form of the lock, with the first integer derived from the
-  instance name. Two installations in one database then never share a key.
-  Without an instance the keys are the single integers earlier releases take,
-  so nodes of both releases exclude each other during a rolling deploy. A node
-  with an instance and one without do not, so name the instance on every node
-  at once.
-
-All locks are transaction-scoped: call these inside `shigoto_db:transaction/2`.
-""".
+%% The PostgreSQL advisory locks shigoto takes: one per unique key while a unique
+%% job is inserted, one per worker for the global concurrency check, and one each
+%% for the cron pass, the stager pass and the migration.
+%%
+%% Advisory locks are shared by the whole database. Any role that can connect can
+%% take any key, so a lock here can be held by something that is not shigoto. Two
+%% things follow:
+%%
+%% - shigoto never waits for one without a bound. Every lock is taken with
+%%   `pg_try_advisory_xact_lock`, and `acquire_xact/2` tries again for at most
+%%   `shigoto_config:advisory_lock_timeout/0` milliseconds before it answers
+%%   `{error, lock_timeout}`. What the caller does then is the caller's to say:
+%%   a unique insert answers the error, the global concurrency check snoozes the
+%%   job, a cron or stager pass is skipped, a migration is retried.
+%% - With `shigoto_config:instance/0` set, the keys are this installation's own:
+%%   the two-integer form of the lock, with the first integer derived from the
+%%   instance name. Two installations in one database then never share a key.
+%%   Without an instance the keys are the single integers earlier releases take,
+%%   so nodes of both releases exclude each other during a rolling deploy. A node
+%%   with an instance and one without do not, so name the instance on every node
+%%   at once.
+%%
+%% All locks are transaction-scoped: call these inside `shigoto_db:transaction/2`.
 
 -export([try_xact/2, acquire_xact/2, acquire_xact/3]).
 

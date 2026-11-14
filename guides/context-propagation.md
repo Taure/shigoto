@@ -52,7 +52,8 @@ exporting all three.
 The carrier is stored in the job's `meta` under `<<"_shigoto_carrier">>`, and
 encrypted with it when an encryption key is configured. A job inserted with
 that key already in its `meta` keeps it, which is how to hand over a context
-by hand.
+by hand. Every other `meta` key that starts with `_shigoto` is reserved for
+shigoto: do not set one.
 
 During an attempt the context is attached in the executor process, where
 middleware and `backoff/2` run, and in the process that runs `perform/1`. It

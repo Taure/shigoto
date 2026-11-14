@@ -338,8 +338,9 @@ backoff written to its `scheduled_at` is over, and is then claimed like any
 other.
 
 The jobs are answered as they are stored: with an encryption key configured
-their `args` and `meta` are still ciphertext. `shigoto_job:opened/1` decrypts
-them, once it has checked the worker the row names.
+their `args` and `meta` are still ciphertext. They are decrypted for the run
+of the job, once the worker the row names has been checked, and for reading by
+`get_job/2`.
 
 Never answers more than `Limit` jobs. The locking select runs once, as an
 uncorrelated `ARRAY(...)` subquery, because `WHERE id IN (SELECT ... LIMIT ...
@@ -464,8 +465,8 @@ complete_job(Pool, Claim, Result) ->
 Record the failure of a claimed job, with a structured error and the backoff
 before its next attempt. At `max_attempts` the job is discarded instead.
 
-The error is written by `shigoto_error:entry/2`, which keeps job args out of
-it, and the job keeps its 50 newest errors.
+The error is written without the job's args (see the Security guide), and the
+job keeps its 50 newest errors.
 
 Like `complete_job/3`, the write only applies while the claim in `Job` still
 holds, and answers `{error, lost}` otherwise.
@@ -566,10 +567,9 @@ cancel_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
--doc """
-`cancel_job/2`, answering what it did: `{cancelled, Job}` with the row as it is
-now, or `unchanged` when there is no such job or it had already finished.
-""".
+-doc false.
+%% `cancel_job/2`, answering what it did: `{cancelled, Job}` with the row as it is
+%% now, or `unchanged` when there is no such job or it had already finished.
 -spec cancelled_job(atom(), integer()) -> {ok, {cancelled, map()} | unchanged} | {error, term()}.
 cancelled_job(Pool, JobId) ->
     SQL = with_dependents(
@@ -659,15 +659,14 @@ snooze_job(Pool, Claim, Seconds) ->
         {error, _} = Err -> Err
     end.
 
--doc """
-Give a claimed job back without anything having come of the run: the node is
-stopping and the run was stopped with it. The job is `available` again at
-once and keeps its place, and `max_attempts` goes up by one, as for a snooze,
-so the interrupted run does not use up an attempt.
-
-Like `complete_job/3`, the write only applies while the claim still holds, and
-answers `{error, lost}` otherwise.
-""".
+-doc false.
+%% Give a claimed job back without anything having come of the run: the node is
+%% stopping and the run was stopped with it. The job is `available` again at
+%% once and keeps its place, and `max_attempts` goes up by one, as for a snooze,
+%% so the interrupted run does not use up an attempt.
+%%
+%% Like `complete_job/3`, the write only applies while the claim still holds, and
+%% answers `{error, lost}` otherwise.
 -spec release_job(atom(), claim()) -> ok | {error, lost | term()}.
 release_job(Pool, Claim) ->
     {JobId, Attempt} = fence(Claim),
@@ -824,13 +823,12 @@ rescued(_Pool, Job) ->
     _ = shigoto_telemetry:job_rescued(Job),
     ok.
 
--doc """
-Record a heartbeat for the claims this node is running, each `{JobId, Attempt}`.
-
-Answers the claims that still hold. One that is missing was rescued and claimed
-again, or cancelled: its row is no longer `executing` under that attempt, and it
-gets no heartbeat.
-""".
+-doc false.
+%% Record a heartbeat for the claims this node is running, each `{JobId, Attempt}`.
+%%
+%% Answers the claims that still hold. One that is missing was rescued and claimed
+%% again, or cancelled: its row is no longer `executing` under that attempt, and it
+%% gets no heartbeat.
 -spec heartbeat(atom(), [{integer(), integer()}]) ->
     {ok, [{integer(), integer()}]} | {error, term()}.
 heartbeat(_Pool, []) ->
@@ -901,21 +899,20 @@ resolve_dependencies(Pool, FinishedJobId) ->
         {error, _} = Err -> Err
     end.
 
--doc """
-Release the jobs that wait on a job that has already ended.
-
-A finished job releases its dependents in the statement that finishes it, and
-that statement only sees the dependents committed before it began. A job
-inserted with `depends_on` just as its dependency finishes can be missed: the
-insert saw the dependency still running, and the dependency's last statement
-did not see the insert. This finds what such a race left behind, and jobs
-waiting on a job that no longer exists, and does for them what the dependency
-would have done: a completed (or missing) dependency is removed and its result
-handed over; a discarded or cancelled one is followed by each waiting job's
-`on_dependency_failure`. Each node runs it every `rescue_interval`.
-
-Answers how many dependencies it resolved.
-""".
+-doc false.
+%% Release the jobs that wait on a job that has already ended.
+%%
+%% A finished job releases its dependents in the statement that finishes it, and
+%% that statement only sees the dependents committed before it began. A job
+%% inserted with `depends_on` just as its dependency finishes can be missed: the
+%% insert saw the dependency still running, and the dependency's last statement
+%% did not see the insert. This finds what such a race left behind, and jobs
+%% waiting on a job that no longer exists, and does for them what the dependency
+%% would have done: a completed (or missing) dependency is removed and its result
+%% handed over; a discarded or cancelled one is followed by each waiting job's
+%% `on_dependency_failure`. Each node runs it every `rescue_interval`.
+%%
+%% Answers how many dependencies it resolved.
 -spec release_stuck_dependents(atom()) -> {ok, non_neg_integer()} | {error, term()}.
 release_stuck_dependents(Pool) ->
     SQL =
@@ -978,8 +975,8 @@ update_progress(Pool, JobId, Progress) ->
     end.
 
 -doc """
-Get a job by ID, with its encrypted columns decrypted for reading
-(`shigoto_job:readable/1`).
+Get a job by ID, with its encrypted columns decrypted for reading. A column
+that does not open is replaced by the reason.
 """.
 -spec get_job(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
 get_job(Pool, JobId) ->
@@ -1169,8 +1166,8 @@ Take a transaction-scoped advisory lock without waiting.
 
 `true` when this transaction holds the lock, `false` when another one does. Call
 it inside `shigoto_db:transaction/2`: the lock is released when that ends. The
-key is this installation's own when an `instance` is configured
-(`m:shigoto_lock`).
+key is this installation's own when an `instance` is configured (see the
+Security guide).
 """.
 -spec try_advisory_xact_lock(atom(), integer()) -> boolean() | {error, term()}.
 try_advisory_xact_lock(Pool, Key) ->
@@ -1508,13 +1505,12 @@ unique_part(worker, Worker, _ArgsJson, _Queue) -> Worker;
 unique_part(args, _Worker, ArgsJson, _Queue) -> ArgsJson;
 unique_part(queue, _Worker, _ArgsJson, Queue) -> Queue.
 
--doc """
-Everything a job's `unique_key` could have been made from: one material per
-choice of unique `keys`. `ArgsJson` is the job's args as they were encoded at
-insert, or `undefined` when they cannot be read, which leaves out the choices
-that include them. `shigoto:reencrypt/0,1` uses it to move a stored key to the
-current encryption key.
-""".
+-doc false.
+%% Everything a job's `unique_key` could have been made from: one material per
+%% choice of unique `keys`. `ArgsJson` is the job's args as they were encoded at
+%% insert, or `undefined` when they cannot be read, which leaves out the choices
+%% that include them. `shigoto:reencrypt/0,1` uses it to move a stored key to the
+%% current encryption key.
 -spec unique_materials(binary(), binary() | undefined, binary()) -> [binary()].
 unique_materials(Worker, ArgsJson, Queue) ->
     [

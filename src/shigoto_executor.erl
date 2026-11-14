@@ -18,7 +18,7 @@ written for a run stopped that way.
 
 When the node stops, the executor supervisor stops the runs the queues did not
 see finish within `shutdown_timeout`. Such a run did not fail, so its claim is
-given back (`shigoto_repo:release_job/2`): the job is `available` again with
+given back: the job is `available` again with
 the attempt returned, and any node runs it next. If that write does not get
 through, the row stays `executing` and the stale-job rescue takes it.
 
@@ -36,12 +36,12 @@ with `[shigoto, job, transition_failed]`; the row stays `executing` and the
 stale-job rescue returns it to the queue.
 
 The job is held as it was claimed, with its encrypted columns still encrypted.
-`shigoto_job:opened/1` checks the worker the row names and only then decrypts
-them, for the run alone: a row naming a module that is not a worker, or whose
+The worker the row names is checked, and only then are they decrypted, for the
+run alone: a row naming a module that is not a worker, or whose
 args do not open, fails the attempt (`unknown_worker`, `decrypt_failed`,
 `format_refused`, `plaintext_refused`) without `perform/1` being called. The
 state `sys:get_state/1` and a crash report show is the job without its data
-columns (`shigoto_job:redact/1`).
+columns.
 """.
 -behaviour(gen_server).
 
@@ -95,7 +95,8 @@ instead: `{error, lost}` when the claim no longer held, or the database error.
 execute_sync(Job, Pool, Timeout) ->
     executed(Job, Pool, Timeout, drained).
 
--doc "The executor processes running a job on this node.".
+-doc false.
+%% The executor processes running a job on this node.
 -spec running(integer()) -> [pid()].
 running(JobId) ->
     case ets:whereis(shigoto_executors) of
@@ -106,11 +107,10 @@ running(JobId) ->
 executors_of(JobId) ->
     ets:match_object(shigoto_executors, {{JobId, '_'}, '_'}).
 
--doc """
-Stop a run before it finishes: its worker process is shut down and nothing is
-written for it. `Why` is `cancelled`, or `lost` when the run's claim no longer
-holds. A run that has already finished is not affected.
-""".
+-doc false.
+%% Stop a run before it finishes: its worker process is shut down and nothing is
+%% written for it. `Why` is `cancelled`, or `lost` when the run's claim no longer
+%% holds. A run that has already finished is not affected.
 -spec stop(pid(), cancelled | lost) -> ok.
 stop(Executor, Why) ->
     Executor ! {stop_job, Why},

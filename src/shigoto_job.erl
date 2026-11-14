@@ -1,22 +1,22 @@
 -module(shigoto_job).
--moduledoc """
-What may be done with a job row read from the database: which module runs it,
-and when its encrypted columns are opened.
+-moduledoc false.
 
-A row is data anyone with write access to the table could have put there. So
-the worker it names is checked before anything else (`worker/1`), and only for
-a row that passes are `args`, `meta` and `deps_results` decrypted (`opened/1`).
-A row naming a module that is not a worker, or one outside the configured
-`workers`, is never decrypted and nothing in that module is called.
-
-Rows are passed around as they were read, still encrypted: the queue, the
-executor's state and the telemetry events hold ciphertext. The plaintext exists
-in the process that runs `perform/1` and in the executor while it waits for it.
-
-`readable/1` is for showing a job (`shigoto:get_job/1`, `m:shigoto_dashboard`),
-and `redact/1` is the one way a job map goes into a log, a crash report or an
-error term.
-""".
+%% What may be done with a job row read from the database: which module runs it,
+%% and when its encrypted columns are opened.
+%%
+%% A row is data anyone with write access to the table could have put there. So
+%% the worker it names is checked before anything else (`worker/1`), and only for
+%% a row that passes are `args`, `meta` and `deps_results` decrypted (`opened/1`).
+%% A row naming a module that is not a worker, or one outside the configured
+%% `workers`, is never decrypted and nothing in that module is called.
+%%
+%% Rows are passed around as they were read, still encrypted: the queue, the
+%% executor's state and the telemetry events hold ciphertext. The plaintext exists
+%% in the process that runs `perform/1` and in the executor while it waits for it.
+%%
+%% `readable/1` is for showing a job (`shigoto:get_job/1`, `m:shigoto_dashboard`),
+%% and `redact/1` is the one way a job map goes into a log, a crash report or an
+%% error term.
 
 -export([worker/1, opened/1, readable/1, redact/1, new_table/0]).
 

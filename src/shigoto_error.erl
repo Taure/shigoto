@@ -1,24 +1,24 @@
 -module(shigoto_error).
--moduledoc """
-How a job's failure is written down: the entry added to its `errors` column,
-and the `reason` in logs and telemetry.
+-moduledoc false.
 
-`errors` is never encrypted, and logs and telemetry leave the node, so nothing
-written here may carry job args.
-
-- A stack frame keeps its module, function, arity, file and line. The argument
-  list of a `function_clause` or `undef` frame, which for `perform/1` is the
-  args map, becomes its length, and `error_info` is dropped.
-- With an encryption key configured the reason is cut down to its shape
-  (`shape/1`): atoms stay, every other value becomes `'_'`, and the errors that
-  embed the value they failed on (`{badmatch, V}`, `{case_clause, V}`,
-  `{badkey, K}`, ...) keep their tag only. That goes for what `perform/1`
-  returns in `{error, Reason}` too.
-- Without a key the reason is written as it is. The args are in the clear in
-  the same row then.
-- Either way the reason is cut at 1024 bytes, the stack at 16 frames and 4096
-  bytes, and a job keeps its 50 newest entries.
-""".
+%% How a job's failure is written down: the entry added to its `errors` column,
+%% and the `reason` in logs and telemetry.
+%%
+%% `errors` is never encrypted, and logs and telemetry leave the node, so nothing
+%% written here may carry job args.
+%%
+%% - A stack frame keeps its module, function, arity, file and line. The argument
+%%   list of a `function_clause` or `undef` frame, which for `perform/1` is the
+%%   args map, becomes its length, and `error_info` is dropped.
+%% - With an encryption key configured the reason is cut down to its shape
+%%   (`shape/1`): atoms stay, every other value becomes `'_'`, and the errors that
+%%   embed the value they failed on (`{badmatch, V}`, `{case_clause, V}`,
+%%   `{badkey, K}`, ...) keep their tag only. That goes for what `perform/1`
+%%   returns in `{error, Reason}` too.
+%% - Without a key the reason is written as it is. The args are in the clear in
+%%   the same row then.
+%% - Either way the reason is cut at 1024 bytes, the stack at 16 frames and 4096
+%%   bytes, and a job keeps its 50 newest entries.
 
 -export([entry/2, text/1, shape/1, stack/1, appended/2]).
 

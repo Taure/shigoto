@@ -32,6 +32,7 @@ detach(Token) ->
   call, so every job of one `insert_all` shares a carrier). What it answers,
   the carrier, is stored in the job's `meta` under the one key
   `<<"_shigoto_carrier">>`. A job whose `meta` already has that key keeps it.
+  Every `meta` key that starts with `_shigoto` is reserved for shigoto.
   The carrier is encrypted with the rest of `meta` when a key is configured.
 - **Run.** Before each attempt `attach/1` is called with the carrier, in the
   executor process (middleware, `backoff/2`, `on_discard/2`) and in the process
@@ -83,7 +84,8 @@ metadata carries.
 -spec key() -> binary().
 key() -> ?KEY.
 
--doc "The carrier of the calling process: `#{}` without a propagator, or when it has nothing to say.".
+-doc false.
+%% The carrier of the calling process: `#{}` without a propagator, or when it has nothing to say.
 -spec injected() -> carrier().
 injected() ->
     case shigoto_config:propagator() of
@@ -97,7 +99,8 @@ injected() ->
             end
     end.
 
--doc "Job params with the carrier in their `meta`, unless they bring their own or there is none.".
+-doc false.
+%% Job params with the carrier in their `meta`, unless they bring their own or there is none.
 -spec stamped(map(), carrier()) -> map().
 stamped(JobParams, Carrier) when map_size(Carrier) =:= 0 ->
     JobParams;
@@ -108,10 +111,9 @@ stamped(JobParams, Carrier) ->
         _NotAMap -> JobParams
     end.
 
--doc """
-The carrier of a job whose `meta` has been opened: `#{}` when it has none, or
-when what is stored is not a carrier.
-""".
+-doc false.
+%% The carrier of a job whose `meta` has been opened: `#{}` when it has none, or
+%% when what is stored is not a carrier.
 -spec carrier(map()) -> carrier().
 carrier(#{meta := Meta}) when is_binary(Meta) ->
     try json:decode(Meta) of
@@ -124,10 +126,9 @@ carrier(#{meta := Meta}) ->
 carrier(_Job) ->
     #{}.
 
--doc """
-Attach the carrier to the calling process. Nothing is attached, and `none` is
-the answer, without a propagator or a carrier, or when `attach/1` raises.
-""".
+-doc false.
+%% Attach the carrier to the calling process. Nothing is attached, and `none` is
+%% the answer, without a propagator or a carrier, or when `attach/1` raises.
 -spec attached(carrier()) -> attachment().
 attached(Carrier) when map_size(Carrier) =:= 0 ->
     none;
@@ -147,7 +148,8 @@ attached(Carrier) ->
             end
     end.
 
--doc "Undo `attached/1`.".
+-doc false.
+%% Undo `attached/1`.
 -spec detached(attachment()) -> ok.
 detached(none) ->
     ok;
@@ -161,7 +163,8 @@ detached({attached, Module, Token}) ->
             ok
     end.
 
--doc "The carrier `attached/1` attached to the calling process, for a process it starts.".
+-doc false.
+%% The carrier `attached/1` attached to the calling process, for a process it starts.
 -spec current() -> carrier().
 current() ->
     case get(?CURRENT) of
@@ -169,7 +172,8 @@ current() ->
         _None -> #{}
     end.
 
--doc "Whether a `propagator` setting names a module that implements the behaviour.".
+-doc false.
+%% Whether a `propagator` setting names a module that implements the behaviour.
 -spec check(term()) -> ok | {error, {invalid_propagator, term()}}.
 check(undefined) ->
     ok;

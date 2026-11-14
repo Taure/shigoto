@@ -2,8 +2,8 @@
 -moduledoc """
 AES-256-GCM encryption for the columns that carry job data.
 
-With a key configured, `seal/2` encrypts a value before it is written and
-`open/2` decrypts it when a job is run or read. Workers never see ciphertext:
+With a key configured, a value is encrypted before it is written and
+decrypted when a job is run or read. Workers never see ciphertext:
 a value that cannot be opened fails the job (`decrypt_failed`) instead of
 reaching `perform/1`.
 
@@ -15,8 +15,8 @@ reaching `perform/1`.
 ```
 
 A key is exactly 32 bytes. New values are written under the first key and read
-under whichever key wrote them. `check_keys/0` runs at boot and stops the
-application for a key of another size or a key listed twice.
+under whichever key wrote them. The keys are checked at boot: the application
+does not start with a key of another size or a key listed twice.
 
 ## Frames
 
@@ -27,7 +27,7 @@ A ciphertext is stored as a JSON string, so it fits the JSONB columns.
 a v1 ciphertext copied into another row or column decrypts there.
 
 **v2**, `"enc:v2:" ++ base64(KeyId:4, IV:12, Tag:16, CipherText)`, is bound to
-its `t:context/0`: the column, and the worker the row names (or, for a result,
+where it is stored: the column, and the worker the row names (or, for a result,
 the id of the job that produced it). Both go into the associated data and into
 the derivation of the key the value is encrypted under, a subkey of the
 configured key (HKDF-SHA256). A v2 ciphertext moved to another column, or to a
@@ -71,10 +71,14 @@ result), so the bound applies to each of those separately.
 
 ## Failures
 
-`open/2` answers `{error, Reason}` and `seal/2` raises
-`error({shigoto_crypto, Reason})`. `Reason` is an atom: no key, plaintext or
-ciphertext is ever part of it, since it ends up in logs and in the `errors`
-column.
+A value that is not opened fails its job with a `t:failure/0`, and a value
+that cannot be encrypted raises `error({shigoto_crypto, Reason})`. The reason
+is an atom: no key, plaintext or ciphertext is ever part of it, since it ends
+up in logs and in the `errors` column.
+
+The functions shigoto encrypts and decrypts with are internal. The frame is
+described here so that what is in the table can be understood, not as an
+interface to write against.
 """.
 
 -export([
@@ -121,13 +125,12 @@ Why a value was not opened: it does not decrypt under any configured key
 -define(TAG_BYTES, 16).
 -define(KEY_ID_BYTES, 4).
 
--doc """
-Encrypt `Plain`, the JSON text of a value, for the column `Context`.
-
-Answers the JSON text to store. That is `Plain` itself when no key is
-configured, and for a result or batch callback args while the write format is
-`v1`, which does not cover them.
-""".
+-doc false.
+%% Encrypt `Plain`, the JSON text of a value, for the column `Context`.
+%%
+%% Answers the JSON text to store. That is `Plain` itself when no key is
+%% configured, and for a result or batch callback args while the write format is
+%% `v1`, which does not cover them.
 -spec seal(binary(), context()) -> binary().
 seal(Plain, Context) when is_binary(Plain) ->
     case keys() of
@@ -147,14 +150,13 @@ sealed(v1, Key, Plain, _Context) ->
 sealed(v2, Key, Plain, Context) ->
     json_string([~"enc:v2:", base64:encode(sealed_v2(Key, Plain, Context))]).
 
--doc """
-Decrypt a stored value of the column `Context`.
-
-A value that is not a frame is plaintext, and is answered as it is unless
-`require_encrypted` is set and the configured write format would have
-encrypted that column. An empty `meta` is always accepted: it is the column's
-default.
-""".
+-doc false.
+%% Decrypt a stored value of the column `Context`.
+%%
+%% A value that is not a frame is plaintext, and is answered as it is unless
+%% `require_encrypted` is set and the configured write format would have
+%% encrypted that column. An empty `meta` is always accepted: it is the column's
+%% default.
 -spec open(binary(), context()) -> {ok, binary()} | {error, failure()}.
 open(Stored, Context) when is_binary(Stored) ->
     case {frame(Stored, Context), keys()} of
@@ -222,10 +224,9 @@ opened_v1([Key | Rest], <<IV:?IV_BYTES/binary, Tag:?TAG_BYTES/binary, Cipher/bin
 opened_v1(_Keys, _Frame) ->
     {error, decrypt_failed}.
 
--doc """
-`open/2` for a value already decoded from JSON, such as one entry of a job's
-`deps_results`. Answers the decoded plaintext.
-""".
+-doc false.
+%% `open/2` for a value already decoded from JSON, such as one entry of a job's
+%% `deps_results`. Answers the decoded plaintext.
 -spec open_term(term(), context()) -> {ok, term()} | {error, failure()}.
 open_term(null, _Context) ->
     {ok, null};
@@ -256,13 +257,12 @@ plain_term(Term, {Column, _Bound}) ->
         false -> {ok, Term}
     end.
 
--doc """
-A stored value as the current settings would write it, when it is not already:
-a v1 frame while the write format is `v2`, a value under an older key, or
-plaintext in a column the write format encrypts.
-
-`current` when there is nothing to do, including when no key is configured.
-""".
+-doc false.
+%% A stored value as the current settings would write it, when it is not already:
+%% a v1 frame while the write format is `v2`, a value under an older key, or
+%% plaintext in a column the write format encrypts.
+%%
+%% `current` when there is nothing to do, including when no key is configured.
 -spec reseal(binary(), context()) -> current | {resealed, binary()} | {error, failure()}.
 reseal(Stored, Context) when is_binary(Stored) ->
     case keys() of
@@ -313,42 +313,40 @@ is_under(v1, Frame, Key) ->
 is_under(_Version, _Frame, _Key) ->
     false.
 
--doc """
-Whether a stored value has the form of a ciphertext frame: a JSON string that
-starts with `enc:`. `is_frame/2` says whether it is read as one in its column.
-""".
+-doc false.
+%% Whether a stored value has the form of a ciphertext frame: a JSON string that
+%% starts with `enc:`. `is_frame/2` says whether it is read as one in its column.
 -spec is_frame(binary()) -> boolean().
 is_frame(Stored) when is_binary(Stored) ->
     frame(Stored) =/= plaintext.
 
--doc "Whether a stored value of the column `Context` is read as a ciphertext frame.".
+-doc false.
+%% Whether a stored value of the column `Context` is read as a ciphertext frame.
 -spec is_frame(binary(), context()) -> boolean().
 is_frame(Stored, Context) when is_binary(Stored) ->
     frame(Stored, Context) =/= plaintext.
 
--doc """
-The `unique_key` stored for a unique job, built from `Material`.
-
-With an encryption key configured this is a hex HMAC-SHA256 of `Material`, so
-the key carries no arg values; its HMAC key is derived from the current
-encryption key for this use alone. Without one it is `Material` as it is.
-""".
+-doc false.
+%% The `unique_key` stored for a unique job, built from `Material`.
+%%
+%% With an encryption key configured this is a hex HMAC-SHA256 of `Material`, so
+%% the key carries no arg values; its HMAC key is derived from the current
+%% encryption key for this use alone. Without one it is `Material` as it is.
 -spec unique_key(binary()) -> binary().
 unique_key(Material) ->
     [Current | _Older] = unique_keys(Material),
     Current.
 
--doc """
-Every `unique_key` a job with this `Material` may have been stored under: one
-per configured key, the current key's first. A unique insert looks for all of
-them, so rotating to a new key does not hide the jobs inserted before it.
-
-While plaintext rows are accepted (`require_encrypted` is not set) the last
-one is `Material` itself, the form a job inserted before a key was configured
-has. It is looked for and never stored. `shigoto:reencrypt/0,1` moves every
-stored key to the current key's digest, after which neither the raw form nor
-an older key is needed.
-""".
+-doc false.
+%% Every `unique_key` a job with this `Material` may have been stored under: one
+%% per configured key, the current key's first. A unique insert looks for all of
+%% them, so rotating to a new key does not hide the jobs inserted before it.
+%%
+%% While plaintext rows are accepted (`require_encrypted` is not set) the last
+%% one is `Material` itself, the form a job inserted before a key was configured
+%% has. It is looked for and never stored. `shigoto:reencrypt/0,1` moves every
+%% stored key to the current key's digest, after which neither the raw form nor
+%% an older key is needed.
 -spec unique_keys(binary()) -> [binary(), ...].
 unique_keys(Material) ->
     case keys() of
@@ -360,16 +358,15 @@ unique_keys(Material) ->
             [unique_digest(Current, Material) | Digests ++ Raw]
     end.
 
--doc """
-A stored `unique_key` as the current key writes it, for `shigoto:reencrypt/0,1`.
-
-A digest does not say what it was made from, so the caller names the
-`Materials` it could have been: the stored key is moved when one of them gives
-it under a configured key. A stored key that is no digest is the raw form
-written before a key was configured, and is its own material. A digest that
-none of the materials gives under any configured key was written under a key
-that is no longer listed: `{error, unknown_key}`.
-""".
+-doc false.
+%% A stored `unique_key` as the current key writes it, for `shigoto:reencrypt/0,1`.
+%%
+%% A digest does not say what it was made from, so the caller names the
+%% `Materials` it could have been: the stored key is moved when one of them gives
+%% it under a configured key. A stored key that is no digest is the raw form
+%% written before a key was configured, and is its own material. A digest that
+%% none of the materials gives under any configured key was written under a key
+%% that is no longer listed: `{error, unknown_key}`.
 -spec unique_rekey(binary(), [binary()]) -> current | {rekeyed, binary()} | {error, unknown_key}.
 unique_rekey(Stored, Materials) when is_binary(Stored) ->
     case keys() of
@@ -406,12 +403,11 @@ unique_digest(Key, Material) ->
 is_enabled() ->
     keys() =/= [].
 
--doc """
-Check the configured keys: each exactly 32 bytes, none listed twice.
-
-The answer names the setting, the position of the key and what is wrong with
-it, never the key.
-""".
+-doc false.
+%% Check the configured keys: each exactly 32 bytes, none listed twice.
+%%
+%% The answer names the setting, the position of the key and what is wrong with
+%% it, never the key.
 -spec check_keys() -> ok | {error, term()}.
 check_keys() ->
     Single = application:get_env(shigoto, encryption_key, undefined),
@@ -451,7 +447,7 @@ key_problem(_Key) -> not_a_binary.
 
 -doc """
 Encrypt a binary as a v1 frame, which is bound to nothing. Kept for callers of
-earlier releases; shigoto itself uses `seal/2`.
+earlier releases; shigoto itself does not use it.
 """.
 -spec encrypt(binary()) -> binary().
 encrypt(Plain) when is_binary(Plain) ->
@@ -463,7 +459,8 @@ encrypt(Plain) when is_binary(Plain) ->
 -doc """
 Decrypt a v1 frame; anything else is answered as it is. Raises
 `error({shigoto_crypto, decrypt_failed})` for a frame that does not open, where
-earlier releases answered the ciphertext. shigoto itself uses `open/2`.
+earlier releases answered the ciphertext. Kept for callers of earlier releases;
+shigoto itself does not use it.
 """.
 -spec decrypt(binary()) -> binary().
 decrypt(Stored) when is_binary(Stored) ->

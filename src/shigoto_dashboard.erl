@@ -97,8 +97,8 @@ job_counts() ->
 Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.
 
 The jobs are answered like `shigoto:get_job/1` answers one: with an encryption
-key configured their `args`, `meta`, `result` and `deps_results` are decrypted
-(`shigoto_job:readable/1`), and a column that does not open is replaced by the
+key configured their `args`, `meta`, `result` and `deps_results` are decrypted,
+and a column that does not open is replaced by the
 reason. Encrypted args cannot be searched: the database only holds ciphertext,
 so there is no `args` filter.
 """.

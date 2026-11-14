@@ -82,6 +82,13 @@ Jobs returned by `insert/1,2`, `insert_all/1,2` and `get_job/1` are the stored
 row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
 `deps_results`) are JSON text binaries; decode them with `json:decode/1`.
 `perform/1` always gets `args` decoded.
+
+## Reserved keys
+
+In a job's `meta` and in a batch's `callback_args`, every key that starts with
+`_shigoto` belongs to shigoto, as does `_batch_event` in `callback_args`. Do
+not set them, apart from handing over a carrier by hand (`m:shigoto_propagator`),
+and do not rely on ones that are not documented.
 """.
 
 -define(TXN_KEY, '$shigoto_txn').
@@ -119,12 +126,26 @@ row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
     health/0
 ]).
 
+-export_type([reencrypt_counts/0]).
+
+-doc """
+What `reencrypt/0,1` did to the values of one table: `rewritten` in the current
+form, `skipped` because the row changed while it was read, `failed` because the
+value does not open under any configured key. `scanned` counts rows.
+""".
+-type reencrypt_counts() :: #{
+    scanned := non_neg_integer(),
+    rewritten := non_neg_integer(),
+    skipped := non_neg_integer(),
+    failed := non_neg_integer()
+}.
+
 -doc "Insert a job with default options.".
 -spec insert(map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams) ->
     insert(JobParams, #{}).
 
--doc "Insert a job with options. Params: worker, args, queue, priority, scheduled_at, max_attempts, unique, tags, batch.".
+-doc "Insert a job with options. Params: worker, args, meta, queue, priority, scheduled_at, max_attempts, unique, tags, batch, depends_on, on_dependency_failure. `meta` keys that start with `_shigoto` are reserved.".
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
     case shigoto_config:testing_mode() of
@@ -373,14 +394,42 @@ get_job(JobId) ->
 -doc """
 Rewrite stored job data in the form the current encryption settings write:
 under the newest key, in the configured `encryption_write_format`, and
-encrypted where it is still plaintext. Safe to run while the queue is live,
-and to run again. See `m:shigoto_reencrypt`.
+encrypted where it is still plaintext.
+
+Run it after changing what is written: after setting
+`encryption_write_format` to `v2`, after putting a new key first in
+`encryption_keys`, or after configuring a key for a table that already holds
+plaintext jobs. It walks `shigoto_jobs`, `shigoto_jobs_archive` and
+`shigoto_batches` by id and, for every value that is not already in the
+current form, decrypts it and encrypts it again: `args`, `meta`, `result`,
+each entry of `deps_results`, and a batch's `callback_args`.
+
+It also moves the `unique_key` of every row in `shigoto_jobs` to the digest
+under the current key: a key stored in the clear before encryption was turned
+on, and one stored under an older key. A unique insert looks for a job under
+every listed key, and in the clear while `require_encrypted` is not set, so
+duplicates are found before, during and after the run. Once it reports
+`failed => 0` and `skipped => 0` an old key can be removed and
+`require_encrypted` set. A `unique_key` written under a key that is no longer
+listed cannot be moved and is counted as `failed`. Archived jobs are not looked
+up by a unique insert, and their keys are left as they are.
+
+It is safe while the queue runs. Rows are read in batches without a lock, and
+each value is written back with a compare-and-swap, so a row that changed in
+the meantime is left alone and counted as `skipped`; run it again to pick
+those up. A running job is not affected by its row being rewritten. It can be
+stopped and started again at any point, and running it twice changes nothing
+the second time.
+
+A v1 ciphertext is bound to nothing, so this is also the moment a v1 value
+that was moved between rows gets bound to the row it was moved to. Run it once
+every node writes `v2`, then drop `v1` from `encryption_read_formats`.
 """.
 -spec reencrypt() ->
     {ok, #{
-        jobs := shigoto_reencrypt:counts(),
-        archive := shigoto_reencrypt:counts(),
-        batches := shigoto_reencrypt:counts()
+        jobs := reencrypt_counts(),
+        archive := reencrypt_counts(),
+        batches := reencrypt_counts()
     }}
     | {error, term()}.
 reencrypt() ->
@@ -389,9 +438,9 @@ reencrypt() ->
 -doc "Like `reencrypt/0` with options: `pool`, and `batch_size` (rows read per statement, default 500).".
 -spec reencrypt(map()) ->
     {ok, #{
-        jobs := shigoto_reencrypt:counts(),
-        archive := shigoto_reencrypt:counts(),
-        batches := shigoto_reencrypt:counts()
+        jobs := reencrypt_counts(),
+        archive := reencrypt_counts(),
+        batches := reencrypt_counts()
     }}
     | {error, term()}.
 reencrypt(Opts) ->

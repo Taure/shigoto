@@ -31,8 +31,8 @@ after its last attempt, discarded by hand, or cancelled.
 
 ## The callback
 
-The callback worker is checked like the worker of any job
-(`shigoto_job:worker/1`) before its args are read, and both before the batch is
+The callback worker is checked like the worker of any job before its args are
+read, and both before the batch is
 touched. A node that cannot run the callback (it does not have the module, the
 module is outside its `workers` list, or it cannot read the `callback_args`)
 leaves the batch `active`, writes nothing and logs
@@ -50,12 +50,11 @@ the write format is `v2` (`m:shigoto_crypto`), bound to the callback worker.
 
 A job is counted by its batch in the statement that ends it
 (`shigoto_repo:complete_job/3` and the statements that discard or cancel), so
-the counts never miss a job that ended. `settle/2` then finishes a batch whose
-count is full: in one transaction it moves the batch out of `active` and
-inserts the callback job, so neither happens without the other. If the node
-stops between the count and the settling, the batch is still `active` with a
-full count, and `settle_finished/1`, which a node runs every
-`rescue_interval`, settles it.
+the counts never miss a job that ended. A batch whose count is full is then
+settled: one transaction moves it out of `active` and inserts the callback job,
+so neither happens without the other. If the node stops between the count and
+the settling, the batch is still `active` with a full count, and the sweep a
+node runs every `rescue_interval` settles it.
 
 A job that is retried (`shigoto:retry/1`, `shigoto:retry_by/1`) leaves the
 discarded count and is counted again when it ends. A batch that has already
@@ -131,11 +130,10 @@ job_completed(Pool, BatchId) ->
 job_discarded(Pool, BatchId) ->
     jobs_discarded(Pool, BatchId, 1).
 
--doc """
-Count `Count` more jobs of the batch that ended without completing, discarded
-or cancelled, then settle it if those were its last. As with `job_completed/2`,
-shigoto itself counts in the statement that ends the jobs.
-""".
+-doc false.
+%% Count `Count` more jobs of the batch that ended without completing, discarded
+%% or cancelled, then settle it if those were its last. As with `job_completed/2`,
+%% shigoto itself counts in the statement that ends the jobs.
 -spec jobs_discarded(atom(), integer(), pos_integer()) -> ok | {error, term()}.
 jobs_discarded(Pool, BatchId, Count) ->
     SQL = ~"UPDATE shigoto_batches SET discarded_jobs = discarded_jobs + $2 WHERE id = $1",
@@ -144,20 +142,19 @@ jobs_discarded(Pool, BatchId, Count) ->
         {error, _} = Err -> Err
     end.
 
--doc """
-Finish the batch if every job it knows of has ended and it is still `active`.
-
-One transaction locks the batch row, moves it to `finished` (no callback
-worker), `callback_completing` or `callback_discarding` (a job was discarded or
-cancelled) and inserts the callback job. Only one caller makes the move, so
-the callback is enqueued once.
-
-When this node cannot run the callback, nothing is written:
-`shigoto_batch_callback_unrunnable` is logged, the batch stays `active` and the
-answer is `ok`. When the callback job cannot be inserted the move is rolled
-back, `shigoto_batch_settle_failed` is logged and the answer is
-`{error, settle_failed}`. Either way `settle_finished/1` tries again.
-""".
+-doc false.
+%% Finish the batch if every job it knows of has ended and it is still `active`.
+%%
+%% One transaction locks the batch row, moves it to `finished` (no callback
+%% worker), `callback_completing` or `callback_discarding` (a job was discarded or
+%% cancelled) and inserts the callback job. Only one caller makes the move, so
+%% the callback is enqueued once.
+%%
+%% When this node cannot run the callback, nothing is written:
+%% `shigoto_batch_callback_unrunnable` is logged, the batch stays `active` and the
+%% answer is `ok`. When the callback job cannot be inserted the move is rolled
+%% back, `shigoto_batch_settle_failed` is logged and the answer is
+%% `{error, settle_failed}`. Either way `settle_finished/1` tries again.
 -spec settle(atom(), integer()) -> ok | {error, settle_failed}.
 settle(Pool, BatchId) ->
     case attempted(Pool, BatchId) of
@@ -194,17 +191,16 @@ attempted(Pool, BatchId) ->
             failed
     end.
 
--doc """
-Settle the batches that are still `active` although every job has ended: what
-a node that stopped between counting a batch's last job and settling it left
-behind, and what a node that could not run the callback left for another.
-Answers how many it looked at.
-
-It goes through all of them, a hundred at a time in id order, so batches this
-node cannot settle do not keep it from the ones behind them. Those are
-reported in one `shigoto_batch_callback_unrunnable` log per call, with their
-number and the first ten.
-""".
+-doc false.
+%% Settle the batches that are still `active` although every job has ended: what
+%% a node that stopped between counting a batch's last job and settling it left
+%% behind, and what a node that could not run the callback left for another.
+%% Answers how many it looked at.
+%%
+%% It goes through all of them, a hundred at a time in id order, so batches this
+%% node cannot settle do not keep it from the ones behind them. Those are
+%% reported in one `shigoto_batch_callback_unrunnable` log per call, with their
+%% number and the first ten.
 -spec settle_finished(atom()) -> {ok, non_neg_integer()} | {error, term()}.
 settle_finished(Pool) ->
     settle_finished(Pool, 0, 0, {0, []}).
@@ -374,10 +370,9 @@ callback_args(#{callback_args := Stored, callback_worker := Worker}) when is_bin
 callback_args(_Batch) ->
     {ok, #{}}.
 
--doc """
-A batch as it is shown to someone reading it: `callback_args` decrypted, still
-JSON text. Args that do not open are replaced by the JSON string of the reason.
-""".
+-doc false.
+%% A batch as it is shown to someone reading it: `callback_args` decrypted, still
+%% JSON text. Args that do not open are replaced by the JSON string of the reason.
 -spec readable(map()) -> map().
 readable(#{callback_args := Stored, callback_worker := Worker} = Batch) when is_binary(Stored) ->
     case shigoto_crypto:open(Stored, {callback_args, bound_to(Worker)}) of

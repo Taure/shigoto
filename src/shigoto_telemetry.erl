@@ -20,8 +20,7 @@ logger for filtering); it is omitted from the tables below for brevity.
 
 No event carries a job's `args`, `meta`, `result` or `deps_results`, apart from
 the carrier a propagator put in `meta` (`start`, `stop`, `exception`). The
-`reason` of `[shigoto, job, failed]` is text written by `shigoto_error:text/1`:
-at most 1024 bytes, and with an encryption key configured only the shape
+`reason` of `[shigoto, job, failed]` is text of at most 1024 bytes, and with an encryption key configured only the shape
 of the failure, with every value that is not an atom replaced by `'_'`.
 
 ## Job Events

@@ -48,6 +48,8 @@ perform(#{<<"report_id">> := ReportId}) ->
 
 If any job was discarded or cancelled, the callback receives an extra
 `<<"_batch_event">> => <<"discard">>` key, whichever job finished last.
+`_batch_event` and every key that starts with `_shigoto` are reserved in
+`callback_args`: shigoto may add them, so do not use them for your own values.
 
 ## When a Batch Finishes
 

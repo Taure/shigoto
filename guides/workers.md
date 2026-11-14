@@ -173,8 +173,8 @@ It also runs for a job discarded because a job it waited on failed
 (`on_dependency_failure => discard`) and for one the stale-job rescue discards.
 
 The callback runs in a process of its own, after the job has been discarded:
-not in the queue, not in the process that called `shigoto:cancel/1` or
-`shigoto:discard/1`. It may take up to `on_discard_timeout` (60000 ms) and is
+not in the queue, and not in the process whose `shigoto:cancel/1` ended a job
+others were waiting on. It may take up to `on_discard_timeout` (60000 ms) and is
 stopped after that (`shigoto_on_discard_timeout` is logged). One that raises is
 logged as `shigoto_on_discard_failed`, with the shape of the reason and none
 of its values. At most 10 run at a time on a node and up to 10000 wait their

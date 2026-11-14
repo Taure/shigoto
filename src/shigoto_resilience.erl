@@ -65,13 +65,12 @@ ungated: its jobs are snoozed like any other gate failure, with the reason
 -define(GLOBAL_CONCURRENCY_SNOOZE, 5).
 -define(GATE_FAILED_SNOOZE, 5).
 
--doc """
-Ask every gate whether `Worker` may run `Job` now.
-
-`{snooze, Seconds}` means the job has to be put back for that long;
-`{snoozed, Seconds}` that the gate already did so (the global concurrency
-check, inside its own transaction).
-""".
+-doc false.
+%% Ask every gate whether `Worker` may run `Job` now.
+%%
+%% `{snooze, Seconds}` means the job has to be put back for that long;
+%% `{snoozed, Seconds}` that the gate already did so (the global concurrency
+%% check, inside its own transaction).
 -spec admit(module(), map()) -> ok | {snooze, pos_integer()} | {snoozed, pos_integer()}.
 admit(Worker, Job) ->
     %% Load shedding is asked last. Its admission is a count that only the
@@ -127,11 +126,10 @@ gate_failed(Gate, Worker, Reason) ->
     shigoto_telemetry:resilience_gate_failed(Worker, Gate, Reason),
     {snooze, ?GATE_FAILED_SNOOZE}.
 
--doc """
-Create the table that remembers which workers have their seki primitives. The
-calling process owns it; `shigoto_executor_sup` calls this, so the table lasts
-as long as the executors do.
-""".
+-doc false.
+%% Create the table that remembers which workers have their seki primitives. The
+%% calling process owns it; `shigoto_executor_sup` calls this, so the table lasts
+%% as long as the executors do.
 -spec new_table() -> ok.
 new_table() ->
     case ets:whereis(?INIT_TABLE) of

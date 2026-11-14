@@ -16,10 +16,9 @@ start_link() ->
 start_executor(Job, Pool, QueuePid) ->
     started(supervisor:start_child(?MODULE, [Job, Pool, QueuePid, claimed])).
 
--doc """
-Start an executor for a job read from a fanout queue. The job is not claimed,
-so the executor runs it and leaves its row alone.
-""".
+-doc false.
+%% Start an executor for a job read from a fanout queue. The job is not claimed,
+%% so the executor runs it and leaves its row alone.
 -spec start_fanout_executor(map(), atom(), pid()) -> {ok, pid()} | {error, term()}.
 start_fanout_executor(Job, Pool, QueuePid) ->
     started(supervisor:start_child(?MODULE, [Job, Pool, QueuePid, fanout])).
