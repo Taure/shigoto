@@ -804,6 +804,11 @@ a_batch_callback_carries_on_from_the_job_that_finished_the_batch(_Config) ->
 
 a_cron_job_gets_what_the_scheduler_injects(_Config) ->
     Me = list_to_binary(pid_to_list(self())),
+    %% Nothing is attached in the scheduler: it injects what a process with no
+    %% context of its own does, here the fake's root. A pass made here while the
+    %% application's own holds the cron lock is skipped, so passes are made
+    %% until one has scheduled the entry.
+    application:set_env(shigoto, fake_propagator_root, ~"trace-cron"),
     application:set_env(shigoto, cron, [
         {~"traced-cron", ~"* * * * *", shigoto_lifecycle_worker, #{
             ~"test" => Me, ~"tag" => ~"traced-cron"
@@ -821,6 +826,7 @@ a_cron_job_gets_what_the_scheduler_injects(_Config) ->
         #{rows := [#{id := Id}]} = shigoto_db:query(?POOL, ~"SELECT id FROM shigoto_jobs", []),
         ?assertEqual(#{~"traceparent" => ~"trace-cron"}, stored_carrier(Id))
     after
+        application:unset_env(shigoto, fake_propagator_root),
         application:unset_env(shigoto, cron),
         shigoto_db:query(?POOL, ~"DELETE FROM shigoto_cron", [])
     end.
@@ -953,11 +959,6 @@ cancelling_a_finished_job_reports_nothing(_Config) ->
     Done = enqueue(~"finished"),
     instruct(performing(~"finished"), {return, ok}),
     _ = await(Done, ~"completed"),
-    %% Nothing is attached in the scheduler: it injects what a process with no
-    %% context of its own does, here the fake's root. A pass made here while the
-    %% application's own holds the cron lock is skipped, so passes are made
-    %% until one has scheduled the entry.
-    application:set_env(shigoto, fake_propagator_root, ~"trace-cron"),
     Waiting = enqueue(~"cancel-reported", #{scheduled_at => seconds_from_now(3600)}),
     ok = telemetry:attach(?MODULE, [shigoto, job, cancelled], fun ?MODULE:forward/4, self()),
     ?assertEqual(ok, shigoto:cancel(Done)),
@@ -975,7 +976,6 @@ cancelling_a_finished_job_reports_nothing(_Config) ->
                 #{job_id := Waiting, worker := ~"shigoto_lifecycle_worker", queue := ?QUEUE}, Meta
             )
     after 2000 -> ct:fail(cancel_not_reported)
-        application:unset_env(shigoto, fake_propagator_root),
     end.
 
 %%----------------------------------------------------------------------
