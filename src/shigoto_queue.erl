@@ -170,6 +170,7 @@ handle_info(
     end;
 handle_info(rescue, #state{pool = Pool} = State) ->
     _ = shigoto_repo:rescue_stale_jobs(Pool, shigoto_config:stale_after()),
+    _ = shigoto_batch:settle_finished(Pool),
     schedule_rescue(),
     {noreply, State};
 handle_info(

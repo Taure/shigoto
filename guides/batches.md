@@ -56,6 +56,11 @@ A batch finishes when `completed_jobs + discarded_jobs` reaches `total_jobs`.
 after its last attempt, discarded by hand, or cancelled (`shigoto:cancel/1`,
 `shigoto:cancel_by/1`). A cancelled job therefore does not hold its batch open.
 
+A job is counted in the statement that ends it, and the callback job is
+inserted in the transaction that moves the batch out of `active`, so a batch
+neither misses a job nor runs its callback twice. If a node stops between the
+two, the batch is settled by the next `rescue_interval` sweep.
+
 `total_jobs` goes up in the statement that inserts a job, so a batch only knows
 about the jobs inserted so far. **Insert a batch's jobs together**, with
 `shigoto:insert_all/1` or inside one `shigoto:transaction/1`. Inserted one

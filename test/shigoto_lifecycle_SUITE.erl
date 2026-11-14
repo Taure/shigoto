@@ -40,6 +40,7 @@ the application does with it.
     a_module_that_is_not_a_worker_fails_the_job/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_cancelled_batch_job_still_finishes_the_batch/1,
+    a_batch_left_unsettled_is_settled_by_the_sweep/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1,
@@ -98,6 +99,7 @@ all() ->
         a_module_that_is_not_a_worker_fails_the_job,
         a_batch_callback_runs_after_its_jobs,
         a_cancelled_batch_job_still_finishes_the_batch,
+        a_batch_left_unsettled_is_settled_by_the_sweep,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete,
@@ -667,6 +669,30 @@ a_cancelled_batch_job_still_finishes_the_batch(_Config) ->
         {ok, #{total_jobs := 2, completed_jobs := 1, discarded_jobs := 1}},
         shigoto:get_batch(BatchId)
     ).
+
+a_batch_left_unsettled_is_settled_by_the_sweep(_Config) ->
+    BatchId = new_batch(),
+    Id = enqueue(~"unsettled", #{batch => BatchId, scheduled_at => seconds_from_now(3600)}),
+    %% What a node leaves that stopped right after its job's last statement:
+    %% the job completed and counted, the batch not yet settled.
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET state = 'completed', completed_at = now() WHERE id = $1", [
+            Id
+        ]
+    ),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_batches SET completed_jobs = 1 WHERE id = $1", [BatchId]
+    ),
+    receive
+        {batch_callback, Args} -> ?assertNot(maps:is_key(~"_batch_event", Args))
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch({ok, #{state := ~"callback_completing"}}, shigoto:get_batch(BatchId)),
+    %% Once.
+    receive
+        {batch_callback, _} -> ct:fail(second_batch_callback)
+    after 600 -> ok
+    end.
 
 a_child_runs_after_its_parent_with_the_result(_Config) ->
     Parent = enqueue(~"parent"),

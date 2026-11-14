@@ -41,7 +41,10 @@ replaces, holding the table lock while it does: the build reads the whole table
 and indexes only the rows waiting to run. On a table of many millions of rows,
 run `CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx ON
 shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')`
-by hand first; the migration then finds it and skips the build. Version 7 also
+by hand first; the migration then finds it and skips the build. It also builds
+`shigoto_batches_active_idx ON shigoto_batches (id) WHERE state = 'active'`,
+which takes a SHARE lock on `shigoto_batches` while it reads that table: batch
+counts wait, jobs do not. Version 7 also
 adds the nullable `shigoto_jobs.on_dependency_failure` column, which rewrites
 nothing. Nodes still on the previous version keep working against a version 7
 schema. This version's statements also run against a version 6 one, where the
@@ -439,5 +442,12 @@ v7_statements() ->
         %% What a waiting job does when a dependency fails; NULL means the
         %% application's default. Nullable with no default, so adding it does
         %% not rewrite the table, and nodes on the previous version ignore it.
-        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT"
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT",
+        %% The sweep the queues run every rescue interval reads only the
+        %% batches still active.
+        ~"""
+        CREATE INDEX IF NOT EXISTS shigoto_batches_active_idx
+        ON shigoto_batches (id)
+        WHERE state = 'active'
+        """
     ].

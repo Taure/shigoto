@@ -357,6 +357,9 @@ A job that was rescued, claimed again or cancelled in the meantime is left as it
 is and the answer is `{error, lost}`. Given a bare job id there is no attempt to
 compare, and only the `executing` state is checked.
 
+The job's batch counts it in the same statement, so a completed job is never
+missing from its batch's count.
+
 The result is propagated to any jobs that depend on this one (see
 `resolve_dependencies/2`) so they can read it via `deps_results`. With an
 encryption key and the `v2` write format it is stored encrypted, bound to this
@@ -377,14 +380,21 @@ complete_job(Pool, Claim, Result) ->
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
           FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
+        ), counted AS (
+          UPDATE shigoto_batches b SET completed_jobs = b.completed_jobs + 1
+          FROM done WHERE b.id = done.batch_id
         )
         SELECT batch_id FROM done
         """,
     case query(Pool, SQL, [JobId, ResultJson, Attempt]) of
         #{rows := [#{batch_id := null}]} ->
             ok;
-        #{rows := [#{batch_id := BatchId}]} ->
-            shigoto_batch:job_completed(Pool, BatchId);
+        #{rows := [#{batch_id := BatchId}]} when is_integer(BatchId) ->
+            %% The job is completed and counted whatever becomes of the
+            %% callback: a batch that could not be settled here is settled by
+            %% the next sweep.
+            _ = shigoto_batch:settle(Pool, BatchId),
+            ok;
         #{rows := []} ->
             {error, lost};
         {error, _} = Err ->
@@ -433,7 +443,7 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
         #{rows := Rows} ->
             {[Updated], Cascaded} = moved(Rows),
             _ = maybe_on_discard(Job, Updated),
-            _ = maybe_batch_discard(Pool, Updated),
+            ok = batches_settled(Pool, [Updated]),
             dependents_followed(Pool, Cascaded);
         {error, _} = Err ->
             Err
@@ -461,22 +471,25 @@ discard_job(Pool, JobId) ->
         {error, _} = Err -> Err
     end.
 
-%% The rows a discarding or cancelling statement answered: its own jobs are
-%% counted in their batches, and so are the dependents that went with them.
+%% The rows a discarding or cancelling statement answered: its own jobs and
+%% the dependents that went with them. The statement counted them in their
+%% batches; a batch that has no job left is settled here.
 -spec ended(atom(), [map()]) -> ok.
 ended(Pool, Rows) ->
     {Own, Cascaded} = moved(Rows),
-    ok = batches_told(Pool, Own),
+    ok = batches_settled(Pool, Own),
     dependents_followed(Pool, Cascaded).
 
-%% The jobs a statement just discarded or cancelled, counted in their batches.
--spec batches_told(atom(), [#{batch_id := integer() | null, _ => _}]) -> ok.
-batches_told(Pool, Rows) ->
-    Batched = [BatchId || #{batch_id := BatchId} <- Rows, is_integer(BatchId)],
-    _ = [
-        shigoto_batch:jobs_discarded(Pool, BatchId, length([B || B <- Batched, B =:= BatchId]))
-     || BatchId <- lists:usort(Batched), is_integer(BatchId)
+%% The batches of the jobs a statement just discarded or cancelled.
+-spec batches_settled(atom(), [map()]) -> ok.
+batches_settled(Pool, Rows) ->
+    Batches = [
+        BatchId
+     || #{batch_id := BatchId, state := State} <- Rows,
+        is_integer(BatchId),
+        State =:= ~"discarded" orelse State =:= ~"cancelled"
     ],
+    _ = [shigoto_batch:settle(Pool, BatchId) || BatchId <- lists:usort(Batches)],
     ok.
 
 -doc """
@@ -545,7 +558,8 @@ cancel_matching(Pool, Filters) ->
             Matching,
             ~" RETURNING *)"
         ],
-        <<"$", (integer_to_binary(Next))/binary>>
+        <<"$", (integer_to_binary(Next))/binary>>,
+        #{own => ids, count_batches => true}
     ),
     case query(Pool, SQL, Params ++ [default_policy()]) of
         #{rows := Rows} ->
@@ -692,7 +706,7 @@ rescue_stale_jobs(Pool, StaleSeconds) ->
 rescued(Pool, #{state := ~"discarded"} = Job) ->
     _ = shigoto_telemetry:job_rescued(Job),
     _ = maybe_on_discard(Job, Job),
-    _ = maybe_batch_discard(Pool, Job),
+    ok = batches_settled(Pool, [Job]),
     _ = shigoto_telemetry:job_discarded(Job),
     ok;
 rescued(_Pool, Job) ->
@@ -998,8 +1012,19 @@ try_advisory_xact_lock(Pool, Key) ->
 %% from before the column existed. A job the statement moved itself is never
 %% touched a second time as a dependent: PostgreSQL applies only one of two
 %% updates to a row within a statement.
+%%
+%% In the same statement each batch counts its jobs that ended: the `done`
+%% rows now discarded or cancelled (`count_batches`, off for a statement whose
+%% `done` rows had ended before it ran) and every cascaded one. `own => ids`
+%% answers the `done` rows with only `id`, `state` and `batch_id` set, for a
+%% statement that may move any number of jobs.
 -spec with_dependents(iodata(), binary()) -> binary().
 with_dependents(Done, DefaultPolicy) ->
+    with_dependents(Done, DefaultPolicy, #{own => rows, count_batches => true}).
+
+-spec with_dependents(iodata(), binary(), #{own := rows | ids, count_batches := boolean()}) ->
+    binary().
+with_dependents(Done, DefaultPolicy, #{own := Own, count_batches := CountOwn}) ->
     Tail =
         ~"""
         , failed(id, policy) AS (
@@ -1031,8 +1056,19 @@ with_dependents(Done, DefaultPolicy) ->
             )
           WHERE d.depends_on && ARRAY(SELECT id FROM failed) AND d.depends_on <> '{}'
           AND d.id NOT IN (SELECT id FROM failed)
+        ), batch_counts AS (
+          UPDATE shigoto_batches b SET discarded_jobs = b.discarded_jobs + ended.jobs
+          FROM (
+            SELECT batch_id, count(*) AS jobs FROM (
+              SELECT batch_id FROM done WHERE $count_own AND state IN ('discarded', 'cancelled')
+              UNION ALL
+              SELECT batch_id FROM cascaded
+            ) each_ended
+            WHERE batch_id IS NOT NULL GROUP BY batch_id
+          ) ended
+          WHERE b.id = ended.batch_id
         )
-        SELECT false AS cascaded, * FROM done
+        SELECT false AS cascaded, $own FROM done
         UNION ALL
         SELECT true AS cascaded, * FROM cascaded
         """,
@@ -1046,12 +1082,28 @@ with_dependents(Done, DefaultPolicy) ->
         )
         """,
     Errors = shigoto_error:appended(~"d.errors", Entry),
-    iolist_to_binary([
-        Done,
-        binary:replace(
-            binary:replace(Tail, ~"$default", DefaultPolicy, [global]), ~"$errors", Errors
-        )
-    ]).
+    Replaced = [
+        {~"$default", DefaultPolicy},
+        {~"$errors", Errors},
+        {~"$count_own", atom_to_binary(CountOwn)},
+        {~"$own", own_columns(Own)}
+    ],
+    iolist_to_binary([Done, replaced(Tail, Replaced)]).
+
+replaced(SQL, []) ->
+    SQL;
+replaced(SQL, [{Name, Value} | Rest]) ->
+    replaced(binary:replace(SQL, Name, Value, [global]), Rest).
+
+own_columns(rows) ->
+    ~"*";
+own_columns(ids) ->
+    ~"""
+    (jsonb_populate_record(
+      NULL::shigoto_jobs,
+      jsonb_build_object('id', id, 'state', state, 'batch_id', batch_id)
+    )).*
+    """.
 
 -spec default_policy() -> binary().
 default_policy() ->
@@ -1066,7 +1118,7 @@ moved(Rows) ->
 -spec dependents_followed(atom(), [map()]) -> ok.
 dependents_followed(Pool, Cascaded) ->
     _ = [followed(Job) || Job <- Cascaded],
-    batches_told(Pool, Cascaded).
+    batches_settled(Pool, Cascaded).
 
 followed(#{state := ~"discarded"} = Job) ->
     _ = maybe_on_discard(Job, Job),
@@ -1472,13 +1524,6 @@ state_name(State) when is_binary(State) -> State.
 %%----------------------------------------------------------------------
 %% Internal: batch helpers
 %%----------------------------------------------------------------------
-
-maybe_batch_discard(Pool, #{state := ~"discarded", batch_id := BatchId}) when
-    BatchId =/= null
-->
-    shigoto_batch:jobs_discarded(Pool, BatchId, 1);
-maybe_batch_discard(_Pool, _Job) ->
-    ok.
 
 %% on_discard/2 gets the job's args, so they are only decrypted for a row whose
 %% worker passes the check, and only when that worker has the callback. A job

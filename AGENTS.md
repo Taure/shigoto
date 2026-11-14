@@ -18,9 +18,11 @@ regression, not a refactor:
 - **`FOR UPDATE SKIP LOCKED` claiming.** Each job is claimed by exactly one node
   with no cross-node coordination. The claim query (`shigoto_repo:claim_jobs/3`)
   is the heart of the system - do not replace the locking model.
-- **Batch atomicity.** Batch completed/discarded counters are updated inside a
-  transaction; the completion callback fires exactly once. Keep count updates
-  and state transitions in one transaction.
+- **Batch atomicity.** A batch counts a job in the statement that ends the job
+  (`counted` in `complete_job/3`, `batch_counts` in `with_dependents/3`). The
+  move out of `active` and the insert of the callback job are one transaction
+  (`shigoto_batch:settle/2`), so the callback is enqueued exactly once. Never
+  count in a statement of its own, never split the move from the insert.
 - **Polling is the correctness backstop.** LISTEN/NOTIFY (`shigoto_notifier`) is
   a latency optimisation and is best-effort / at-most-once by the PG protocol.
   The per-queue polling loop MUST stay even when NOTIFY is wired up. Do not
@@ -130,8 +132,10 @@ shigoto_sup (one_for_one)
   the timed poll loop always runs underneath it. A payload only names a queue;
   unknown names are dropped and a queue is poked at most once per
   `notify_min_interval`, since anyone who can connect can `NOTIFY`.
-- **Batches.** `shigoto_batch` groups jobs, tracks completed/discarded counts
-  transactionally, and runs a callback worker on completion.
+- **Batches.** `shigoto_batch` groups jobs and runs a callback worker when the
+  last one ends. Counting is part of the job's own statement; `settle/2` then
+  finishes a batch with a full count, and `settle_finished/1` on the rescue
+  tick settles one a stopped node left `active`.
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
   `pg_try_advisory_xact_lock`, so one node schedules at a time, and stores each
   entry's `last_scheduled_at` in `shigoto_cron` in the same transaction, so a
