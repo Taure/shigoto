@@ -23,7 +23,7 @@ A row names its worker as text. Before a row is decrypted, the name must be:
 2. in `workers`, when that option is set,
 3. a module that exports `perform/1`.
 
-A row that fails is failed with `unknown_worker:<name>`. Its args are not
+A row that fails is failed with `{unknown_worker,<<"name">>}`. Its args are not
 decrypted and nothing in the module is called. The check is remembered per
 name: a known worker costs one ETS read and one `erlang:function_exported/3`
 per job.

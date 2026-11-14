@@ -28,6 +28,7 @@ written here may carry job args.
 -define(MAX_ENTRIES, 50).
 -define(MAX_DEPTH, 4).
 -define(MAX_ELEMENTS, 8).
+-define(IS_CLASS(Class), (Class =:= error orelse Class =:= exit orelse Class =:= throw)).
 -define(VALUE_ERRORS, [
     badmatch,
     case_clause,
@@ -48,6 +49,10 @@ written here may carry job args.
 -doc """
 The entry added to a job's `errors` for `Reason`: `error`, `at`, `attempt`,
 `worker`, and `stacktrace` when `Reason` is `{Class, Reason, Stacktrace}`.
+
+`{Class, Reason}` and `{Class, Reason, Stacktrace}` with `Class` one of
+`error`, `exit` and `throw` are written as `Class:Reason`, the way an exception
+prints. Any other reason is written as the term it is.
 """.
 -spec entry(map(), term()) -> #{binary() => binary() | integer()}.
 entry(Job, Reason) ->
@@ -69,12 +74,14 @@ text(Reason) ->
     {Error, _Stack} = described(Reason),
     Error.
 
-described({Class, Reason, Stack}) when is_list(Stack) ->
+%% Only what a catch produced is a class and a reason. `{error, Reason}` from
+%% perform/1 may carry any tuple, and `{rejected, quota}` is not an exception.
+described({Class, Reason, Stack}) when ?IS_CLASS(Class), is_list(Stack) ->
     {
         printed("~0tp:~0tp", [safe(Class), safe(Reason)], ?MAX_REASON_BYTES),
         printed("~0tp", [stack(Stack)], ?MAX_STACK_BYTES)
     };
-described({Class, Reason}) ->
+described({Class, Reason}) when ?IS_CLASS(Class) ->
     {printed("~0tp:~0tp", [safe(Class), safe(Reason)], ?MAX_REASON_BYTES), <<>>};
 described(Reason) ->
     {printed("~0tp", [safe(Reason)], ?MAX_REASON_BYTES), <<>>}.

@@ -181,7 +181,7 @@ args_moved_to_a_module_that_is_no_worker_are_not_decrypted(_Config) ->
     %% alone, the undef frame carried the decrypted args into `errors`.
     Target = insert_row(~"maps", stored(Source, args), 1),
     Row = await(Target, ~"discarded"),
-    ?assertMatch([#{~"error" := <<"unknown_worker:", _/binary>>}], errors(Row)),
+    ?assertMatch([#{~"error" := <<"{unknown_worker,", _/binary>>}], errors(Row)),
     ok = no_canary(Canary, [Row | captured()]).
 
 args_moved_to_another_column_are_not_decrypted(_Config) ->
@@ -207,7 +207,7 @@ a_worker_outside_the_allow_list_is_never_called(_Config) ->
         worker => shigoto_canary_other_worker, args => #{~"canary" => Canary}, max_attempts => 1
     }),
     Row = await(Id, ~"discarded"),
-    ?assertMatch([#{~"error" := <<"unknown_worker:", _/binary>>}], errors(Row)),
+    ?assertMatch([#{~"error" := <<"{unknown_worker,", _/binary>>}], errors(Row)),
     ok = not_performed(shigoto_canary_other_worker),
     ok = no_canary(Canary, [Row | captured()]),
     Allowed = enqueue(~"ok", Canary),

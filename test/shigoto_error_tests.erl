@@ -14,6 +14,7 @@ error_test_() ->
             fun a_stack_is_bounded/0,
             fun text_carries_no_value_when_a_key_is_set/0,
             fun text_is_as_given_without_a_key/0,
+            fun only_a_caught_class_prints_as_class_and_reason/0,
             fun text_is_bounded_and_always_valid/0,
             fun an_entry_has_the_documented_fields/0,
             fun appended_keeps_the_newest_entries/0
@@ -105,6 +106,19 @@ text_is_bounded_and_always_valid() ->
         ?assert(is_binary(iolist_to_binary(json:encode(shigoto_error:entry(#{}, Reason)))))
      || Reason <- [<<255, 254, 0, 1>>, [16#10FFFF, 300, -1], {error, <<200, 201>>}, "åäö€"]
     ].
+
+only_a_caught_class_prints_as_class_and_reason() ->
+    application:unset_env(shigoto, encryption_key),
+    ?assertEqual(~"error:badarg", shigoto_error:text({error, badarg})),
+    ?assertEqual(~"exit:normal", shigoto_error:text({exit, normal})),
+    ?assertEqual(~"throw:oops", shigoto_error:text({throw, oops})),
+    ?assertEqual(~"{rejected,<<\"quota\">>}", shigoto_error:text({rejected, ~"quota"})),
+    ?assertEqual(~"{unknown_worker,<<\"lists\">>}", shigoto_error:text({unknown_worker, ~"lists"})),
+    ?assertEqual(~"{http,503,\"body\"}", shigoto_error:text({http, 503, "body"})),
+    Returned = shigoto_error:entry(#{attempt => 1, worker => ~"w"}, {http, 503, "body"}),
+    ?assertNot(is_map_key(~"stacktrace", Returned)),
+    Raised = shigoto_error:entry(#{attempt => 1, worker => ~"w"}, {error, badarg, [{m, f, 1, []}]}),
+    ?assertMatch(#{~"error" := ~"error:badarg", ~"stacktrace" := _}, Raised).
 
 an_entry_has_the_documented_fields() ->
     Entry = shigoto_error:entry(#{attempt => 3, worker => my_worker}, {error, timeout, []}),
