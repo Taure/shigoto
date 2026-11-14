@@ -30,6 +30,10 @@
     test_encrypted_unique_key_is_keyed/1,
     test_encrypted_args_filter_is_refused/1,
     test_heartbeat_stale_threshold/1,
+    test_claim_counts_as_a_heartbeat/1,
+    test_stale_threshold_under_a_second/1,
+    test_rescue_discards_a_job_out_of_attempts/1,
+    test_heartbeat_is_written_under_the_claim/1,
     test_depends_on_blocks_claiming/1,
     test_depends_on_resolved_on_complete/1,
     test_depends_on_resolved_on_discard/1,
@@ -63,6 +67,10 @@ all() ->
         test_encrypted_unique_key_is_keyed,
         test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
+        test_claim_counts_as_a_heartbeat,
+        test_stale_threshold_under_a_second,
+        test_rescue_discards_a_job_out_of_attempts,
+        test_heartbeat_is_written_under_the_claim,
         test_depends_on_blocks_claiming,
         test_depends_on_resolved_on_complete,
         test_depends_on_resolved_on_discard,
@@ -451,18 +459,124 @@ test_heartbeat_stale_threshold(_Config) ->
     ),
     JobId = maps:get(id, Job),
     {ok, [_Claimed]} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 1),
-    %% Set heartbeat_at to the past so rescue picks it up
-    _ = shigoto_db:query(
-        ?POOL,
-        <<"UPDATE shigoto_jobs SET heartbeat_at = now() - interval '120 seconds' WHERE id = $1">>,
-        [JobId]
-    ),
+    %% Claimed and last heard from two minutes ago, so rescue picks it up
+    ok = last_heard_from(JobId, ~"heartbeat_at = now() - interval '120 seconds'"),
+    ok = last_heard_from(JobId, ~"attempted_at = now() - interval '120 seconds'"),
     %% Rescue with 60 second threshold
     {ok, Count} = shigoto_repo:rescue_stale_jobs(?POOL, 60),
     ?assert(Count >= 1),
     %% Job should be available again
     {ok, [Rescued]} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 1),
-    ?assertEqual(JobId, maps:get(id, Rescued)).
+    ?assertEqual(JobId, maps:get(id, Rescued)),
+    ?assertMatch(#{attempt := 2}, Rescued),
+    ?assertMatch(
+        [#{~"error" := ~"rescued", ~"attempt" := 1, ~"worker" := ~"shigoto_test_worker"}],
+        json:decode(maps:get(errors, Rescued))
+    ).
+
+test_claim_counts_as_a_heartbeat(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertEqual(maps:get(attempted_at, Claimed), maps:get(heartbeat_at, Claimed)),
+    %% A heartbeat left by an earlier attempt, on a job claimed just now.
+    ok = last_heard_from(JobId, ~"heartbeat_at = now() - interval '120 seconds'"),
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    %% A node from before claims set the heartbeat leaves it empty.
+    ok = last_heard_from(JobId, ~"heartbeat_at = NULL"),
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    ok = last_heard_from(JobId, ~"attempted_at = now() - interval '120 seconds'"),
+    ?assertEqual({ok, 1}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 60)).
+
+test_stale_threshold_under_a_second(_Config) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [_Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 0.5)),
+    ok = last_heard_from(JobId, ~"heartbeat_at = now() - interval '600 milliseconds'"),
+    ok = last_heard_from(JobId, ~"attempted_at = now() - interval '600 milliseconds'"),
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 5)),
+    ?assertEqual({ok, 1}, shigoto_repo:rescue_stale_jobs(?POOL, 0.5)).
+
+test_rescue_discards_a_job_out_of_attempts(_Config) ->
+    {ok, #{id := First}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 1}, max_attempts => 1}, #{}
+    ),
+    {ok, #{id := Second}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 2}, max_attempts => 1}, #{}
+    ),
+    {ok, #{id := Spare}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 3}, max_attempts => 2}, #{}
+    ),
+    {ok, #{id := Child}} = shigoto_repo:insert_job(
+        ?POOL,
+        #{worker => shigoto_test_worker, args => #{~"n" => 4}, depends_on => [First, Second]},
+        #{}
+    ),
+    {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([First, Second, Spare], lists:sort([Id || #{id := Id} <- Claimed])),
+    [
+        ok = last_heard_from(
+            Id,
+            ~"heartbeat_at = now() - interval '120 seconds', attempted_at = now() - interval '120 seconds'"
+        )
+     || Id <- [First, Second, Spare]
+    ],
+    ?assertEqual({ok, 3}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    [
+        ?assertMatch(
+            {ok, #{state := ~"discarded", attempt := 1, heartbeat_at := null}},
+            shigoto_repo:get_job(?POOL, Id)
+        )
+     || Id <- [First, Second]
+    ],
+    {ok, #{discarded_at := DiscardedAt}} = shigoto_repo:get_job(?POOL, First),
+    ?assertNotEqual(null, DiscardedAt),
+    ?assertMatch(
+        {ok, #{state := ~"available", attempt := 1, discarded_at := null}},
+        shigoto_repo:get_job(?POOL, Spare)
+    ),
+    %% Both parents went in one sweep: the child is released from both.
+    ?assertMatch({ok, #{depends_on := []}}, shigoto_repo:get_job(?POOL, Child)),
+    {ok, Next} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([Spare, Child], lists:sort([Id || #{id := Id} <- Next])).
+
+test_heartbeat_is_written_under_the_claim(_Config) ->
+    {ok, #{id := Held}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 1}}, #{}
+    ),
+    {ok, #{id := Reclaimed}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 2}}, #{}
+    ),
+    {ok, #{id := Cancelled}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 3}}, #{}
+    ),
+    {ok, [_, _, _]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET state = 'available' WHERE id = $1", [Reclaimed]
+    ),
+    {ok, [#{id := Reclaimed, attempt := 2}]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_repo:cancel_job(?POOL, Cancelled),
+    [ok = last_heard_from(Id, ~"heartbeat_at = NULL") || Id <- [Held, Reclaimed, Cancelled]],
+    ?assertEqual({ok, []}, shigoto_repo:heartbeat(?POOL, [])),
+    ?assertEqual(
+        {ok, [{Held, 1}]},
+        shigoto_repo:heartbeat(?POOL, [{Held, 1}, {Reclaimed, 1}, {Cancelled, 1}])
+    ),
+    ?assertMatch({ok, #{heartbeat_at := null}}, shigoto_repo:get_job(?POOL, Reclaimed)),
+    ?assertMatch({ok, #{heartbeat_at := null}}, shigoto_repo:get_job(?POOL, Cancelled)),
+    {ok, #{heartbeat_at := Heartbeat}} = shigoto_repo:get_job(?POOL, Held),
+    ?assertNotEqual(null, Heartbeat),
+    ?assertEqual({ok, [{Reclaimed, 2}]}, shigoto_repo:heartbeat(?POOL, [{Reclaimed, 2}])).
+
+last_heard_from(JobId, Set) ->
+    #{} = shigoto_db:query(
+        ?POOL, iolist_to_binary([~"UPDATE shigoto_jobs SET ", Set, ~" WHERE id = $1"]), [JobId]
+    ),
+    ok.
 
 %%----------------------------------------------------------------------
 %% Job dependency tests

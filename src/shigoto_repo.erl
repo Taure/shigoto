@@ -19,6 +19,7 @@ for safe multi-node job claiming.
     retry_job/2,
     retry_by/2,
     rescue_stale_jobs/2,
+    heartbeat/2,
     prune_jobs/2,
     prune_archive/2,
     upsert_cron_entry/2,
@@ -153,6 +154,7 @@ claim_jobs(Pool, Queue, Limit) ->
         UPDATE shigoto_jobs SET
           state = 'executing',
           attempted_at = now(),
+          heartbeat_at = now(),
           attempt = attempt + 1
         WHERE id = ANY(ARRAY(
           SELECT id FROM shigoto_jobs
@@ -194,7 +196,7 @@ claim_jobs_fair(Pool, Queue, Limit) ->
           SELECT id FROM ranked ORDER BY rn, id LIMIT $2
         )
         UPDATE shigoto_jobs SET
-          state = 'executing', attempted_at = now(), attempt = attempt + 1
+          state = 'executing', attempted_at = now(), heartbeat_at = now(), attempt = attempt + 1
         WHERE id IN (SELECT id FROM to_claim)
         AND state IN ('available', 'retryable')
         RETURNING *
@@ -460,21 +462,94 @@ retry_matching(Pool, Filters) ->
         {error, _} = Err -> Err
     end.
 
--doc "Rescue stale executing jobs. Uses heartbeat if available, otherwise attempted_at.".
--spec rescue_stale_jobs(atom(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
+-doc """
+Rescue the executing jobs whose owner has gone quiet: no claim and no heartbeat
+for `StaleSeconds`.
+
+A rescued job goes back to `available` to be claimed again. One that has used up
+its attempts is discarded instead, like a job that failed its last attempt:
+`on_discard/2` runs, its batch counts it and its dependents are released. So a
+job that takes its node down every time it runs stops after `max_attempts`.
+Either way the rescue is added to the job's `errors` as `"rescued"`.
+
+Claiming counts as the first heartbeat, and a heartbeat left over from an
+earlier attempt is not held against the current one.
+
+Answers how many jobs were rescued.
+""".
+-spec rescue_stale_jobs(atom(), number()) -> {ok, non_neg_integer()} | {error, term()}.
 rescue_stale_jobs(Pool, StaleSeconds) ->
     SQL =
-        <<
-            "UPDATE shigoto_jobs SET state = 'available'\n"
-            "WHERE state = 'executing'\n"
-            "AND (\n"
-            "  (heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1))\n"
-            "  OR\n"
-            "  (heartbeat_at IS NULL AND attempted_at < now() - make_interval(secs => $1))\n"
-            ")"
-        >>,
-    case query(Pool, SQL, [StaleSeconds]) of
-        #{num_rows := Count} -> {ok, Count};
+        ~"""
+        WITH stale AS (
+          SELECT id FROM shigoto_jobs
+          WHERE state = 'executing'
+          AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
+          FOR UPDATE SKIP LOCKED
+        ), done AS (
+          UPDATE shigoto_jobs j SET
+            state = CASE WHEN j.attempt >= j.max_attempts THEN 'discarded' ELSE 'available' END,
+            discarded_at = CASE WHEN j.attempt >= j.max_attempts THEN now() ELSE j.discarded_at END,
+            heartbeat_at = NULL,
+            errors = j.errors || jsonb_build_object(
+              'error', 'rescued', 'at', $2::text, 'attempt', j.attempt, 'worker', j.worker
+            )
+          FROM stale WHERE j.id = stale.id
+          RETURNING j.*
+        ), finished AS (
+          SELECT array_agg(id) AS ids, jsonb_object_agg(id::text, result) AS results
+          FROM done WHERE state = 'discarded'
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = ARRAY(
+                SELECT dep FROM unnest(d.depends_on) AS dep WHERE dep <> ALL (finished.ids)
+              ),
+              deps_results = d.deps_results || finished.results
+          FROM finished
+          WHERE d.depends_on && finished.ids AND d.depends_on <> '{}'
+        )
+        SELECT * FROM done
+        """,
+    case query(Pool, SQL, [float(StaleSeconds), now_timestamptz_str()]) of
+        #{rows := Rows} ->
+            ok = lists:foreach(fun(Row) -> rescued(Pool, decrypt_job_args(Row)) end, Rows),
+            {ok, length(Rows)};
+        {error, _} = Err ->
+            Err
+    end.
+
+rescued(Pool, #{state := ~"discarded"} = Job) ->
+    _ = shigoto_telemetry:job_rescued(Job),
+    _ = maybe_on_discard(Job, Job),
+    _ = maybe_batch_discard(Pool, Job),
+    _ = shigoto_telemetry:job_discarded(Job),
+    ok;
+rescued(_Pool, Job) ->
+    _ = shigoto_telemetry:job_rescued(Job),
+    ok.
+
+-doc """
+Record a heartbeat for the claims this node is running, each `{JobId, Attempt}`.
+
+Answers the claims that still hold. One that is missing was rescued and claimed
+again, or cancelled: its row is no longer `executing` under that attempt, and it
+gets no heartbeat.
+""".
+-spec heartbeat(atom(), [{integer(), integer()}]) ->
+    {ok, [{integer(), integer()}]} | {error, term()}.
+heartbeat(_Pool, []) ->
+    {ok, []};
+heartbeat(Pool, Claims) ->
+    {Ids, Attempts} = lists:unzip(Claims),
+    SQL =
+        ~"""
+        UPDATE shigoto_jobs j SET heartbeat_at = now()
+        FROM unnest($1::bigint[], $2::integer[]) AS claim(id, attempt)
+        WHERE j.id = claim.id AND j.attempt = claim.attempt AND j.state = 'executing'
+        RETURNING j.id, j.attempt
+        """,
+    case query(Pool, SQL, [Ids, Attempts]) of
+        #{rows := Rows} -> {ok, [{Id, Attempt} || #{id := Id, attempt := Attempt} <- Rows]};
         {error, _} = Err -> Err
     end.
 

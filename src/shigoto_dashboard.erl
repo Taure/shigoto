@@ -135,21 +135,19 @@ recent_failures(Limit) ->
         {error, _} = Err -> Err
     end.
 
--doc "Get jobs stuck in executing state (potential zombies).".
+-doc """
+The executing jobs the next rescue sweep would take: no claim and no heartbeat
+for `shigoto_config:stale_after/0` seconds.
+""".
 -spec stale_jobs() -> {ok, [map()]} | {error, term()}.
 stale_jobs() ->
-    Threshold = shigoto_config:heartbeat_interval() * 2 div 1000,
     SQL =
-        <<
-            "SELECT * FROM shigoto_jobs\n"
-            "WHERE state = 'executing'\n"
-            "AND (\n"
-            "  (heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1))\n"
-            "  OR\n"
-            "  (heartbeat_at IS NULL AND attempted_at < now() - make_interval(secs => $1))\n"
-            ")"
-        >>,
-    case query(SQL, [Threshold]) of
+        ~"""
+        SELECT * FROM shigoto_jobs
+        WHERE state = 'executing'
+        AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
+        """,
+    case query(SQL, [shigoto_config:stale_after()]) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
     end.

@@ -22,6 +22,11 @@ the application does with it.
     a_crash_in_perform_is_recorded_without_its_args/1,
     a_killed_worker_process_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
+    a_dead_nodes_job_is_rescued_and_rerun/1,
+    a_rescued_job_is_not_rescued_again_while_it_runs/1,
+    a_job_that_kills_its_node_is_discarded_at_max_attempts/1,
+    a_stale_executor_cannot_complete_a_reclaimed_job/1,
+    a_heartbeat_keeps_a_live_job_from_rescue/1,
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
     a_batch_callback_runs_after_its_jobs/1,
@@ -35,6 +40,7 @@ the application does with it.
     queues,
     poll_interval,
     heartbeat_interval,
+    rescue_interval,
     stage_interval,
     notifier,
     fanout_queues
@@ -52,6 +58,11 @@ all() ->
         a_crash_in_perform_is_recorded_without_its_args,
         a_killed_worker_process_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
+        a_dead_nodes_job_is_rescued_and_rerun,
+        a_rescued_job_is_not_rescued_again_while_it_runs,
+        a_job_that_kills_its_node_is_discarded_at_max_attempts,
+        a_stale_executor_cannot_complete_a_reclaimed_job,
+        a_heartbeat_keeps_a_live_job_from_rescue,
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
         a_batch_callback_runs_after_its_jobs,
@@ -101,6 +112,7 @@ env(TestCase) ->
             queues => [{?QUEUE, 5}],
             poll_interval => 100,
             heartbeat_interval => 5000,
+            rescue_interval => 200,
             stage_interval => 200
         },
         overrides(TestCase)
@@ -114,6 +126,8 @@ overrides(a_retry_is_woken_by_the_stager) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_burst_of_notifications_leaves_one_poll_timer) ->
     #{poll_interval => 200, notifier => connection()};
+overrides(a_heartbeat_keeps_a_live_job_from_rescue) ->
+    #{heartbeat_interval => 300};
 overrides(_TestCase) ->
     #{}.
 
@@ -231,6 +245,79 @@ cancelling_a_waiting_job_keeps_it_from_running(_Config) ->
     Row = row(Id),
     ?assertMatch(#{state := ~"cancelled", attempt := 0}, Row),
     ?assertNotEqual(null, maps:get(cancelled_at, Row)).
+
+%%----------------------------------------------------------------------
+%% A node that dies
+%%----------------------------------------------------------------------
+
+a_dead_nodes_job_is_rescued_and_rerun(_Config) ->
+    Id = enqueue(~"rescued"),
+    _ = performing(~"rescued"),
+    ok = node_dies(Id),
+    ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id)),
+    instruct(performing(~"rescued"), {return, ok}),
+    Row = await(Id, ~"completed"),
+    ?assertMatch(#{attempt := 2}, Row),
+    ?assertMatch([#{~"error" := ~"rescued", ~"attempt" := 1}], errors(Row)).
+
+a_rescued_job_is_not_rescued_again_while_it_runs(_Config) ->
+    Id = enqueue(~"rescued-once"),
+    _ = performing(~"rescued-once"),
+    ok = node_dies(Id),
+    Second = performing(~"rescued-once"),
+    #{heartbeat_at := Heartbeat, attempted_at := Attempted} = row(Id),
+    ?assertEqual(Attempted, Heartbeat),
+    ok = idle(~"rescued-once", 1000),
+    ?assertMatch(#{state := ~"executing", attempt := 2}, row(Id)),
+    instruct(Second, {return, ok}),
+    ?assertMatch(#{attempt := 2}, await(Id, ~"completed")).
+
+a_job_that_kills_its_node_is_discarded_at_max_attempts(_Config) ->
+    Id = enqueue(~"poison", #{max_attempts => 2}),
+    _ = performing(~"poison"),
+    ok = node_dies(Id),
+    _ = performing(~"poison"),
+    ok = node_dies(Id),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch(#{attempt := 2}, Row),
+    ?assertNotEqual(null, maps:get(discarded_at, Row)),
+    ?assertMatch([#{~"error" := ~"rescued"}, #{~"error" := ~"rescued"}], errors(Row)),
+    receive
+        {discarded, ~"poison", [_, _]} -> ok
+    after 2000 -> ct:fail(on_discard_not_called)
+    end,
+    ok = idle(~"poison", 1000).
+
+a_stale_executor_cannot_complete_a_reclaimed_job(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, job, lost], fun ?MODULE:forward/4, self()),
+    Id = enqueue(~"fenced"),
+    First = performing(~"fenced"),
+    %% The node holding the job goes quiet without dying: the job is rescued
+    %% and claimed again while the first run is still going.
+    ok = expire(Id),
+    Second = performing(~"fenced"),
+    instruct(First, {return, {ok, ~"stale"}}),
+    receive
+        {telemetry, [shigoto, job, lost], #{count := 1}, Meta} ->
+            ?assertMatch(#{job_id := Id, attempt := 1, transition := completed}, Meta)
+    after 2000 -> ct:fail(lost_transition_not_reported)
+    end,
+    ?assertMatch(#{state := ~"executing", attempt := 2, result := null}, row(Id)),
+    instruct(Second, {return, {ok, ~"current"}}),
+    Row = await(Id, ~"completed"),
+    ?assertEqual(~"current", json:decode(maps:get(result, Row))).
+
+a_heartbeat_keeps_a_live_job_from_rescue(_Config) ->
+    Id = enqueue(~"alive"),
+    Worker = performing(~"alive"),
+    ok = wait_for(fun() -> maps:get(heartbeat_at, row(Id)) > maps:get(attempted_at, row(Id)) end),
+    #{heartbeat_at := Earlier} = row(Id),
+    ok = wait_for(fun() -> maps:get(heartbeat_at, row(Id)) > Earlier end),
+    %% Longer than the stale threshold, with a rescue pass every 200 ms.
+    ok = idle(~"alive", 1500),
+    ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id)),
+    instruct(Worker, {return, ok}),
+    ?assertMatch(#{attempt := 1, errors := ~"[]"}, await(Id, ~"completed")).
 
 %%----------------------------------------------------------------------
 %% Waking up
@@ -376,6 +463,33 @@ answer_all(Left) ->
             answer_all(Left - 1)
     after 10000 -> ct:fail({unanswered, Left})
     end.
+
+node_dies(Id) ->
+    exit(queue_pid(), kill),
+    [exit(Executor, kill) || Executor <- executors_of(Id)],
+    ok = wait_for(fun() -> executors_of(Id) =:= [] end),
+    expire(Id).
+
+expire(Id) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        UPDATE shigoto_jobs
+        SET heartbeat_at = now() - interval '1 hour', attempted_at = now() - interval '1 hour'
+        WHERE id = $1
+        """,
+        [Id]
+    ),
+    ok.
+
+queue_pid() ->
+    case lists:keyfind({shigoto_queue, ?QUEUE}, 1, supervisor:which_children(shigoto_queue_sup)) of
+        {_, Pid, worker, _} when is_pid(Pid) -> Pid;
+        _ -> ct:fail(no_queue_process)
+    end.
+
+executors_of(Id) ->
+    [Pid || Pid <- shigoto_executor:running(Id), is_process_alive(Pid)].
 
 row(Id) ->
     #{rows := [Row]} = shigoto_db:query(?POOL, select_job(), [Id]),

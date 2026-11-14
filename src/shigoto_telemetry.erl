@@ -32,6 +32,7 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, job, progress]` | `progress` | job_id, worker, queue, attempt, priority, progress |
 | `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
 | `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
+| `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
 
 `lost` fires when a run finished but its claim no longer held, so its outcome
 (`transition`: `completed`, `failed` or `snoozed`) was not written: the job had
@@ -39,6 +40,10 @@ been rescued and claimed again, or cancelled, while this run was going. No
 `completed`, `failed` or `snoozed` event fires for that run. A steady rate of it
 means jobs outlive the stale threshold (`heartbeat_interval * 2`) without a
 heartbeat.
+
+`rescued` fires when the stale-job sweep takes a job from an owner that stopped
+heartbeating. `attempt` is the attempt that was lost. The job runs again, or is
+discarded when that was its last attempt (a `discarded` event follows).
 
 `transition_failed` fires when writing the outcome failed for any other reason
 (`reason` is the database error, cut down by `shigoto_db:reduced/1`). The row
@@ -130,6 +135,7 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     job_progress/2,
     job_lost/2,
     job_transition_failed/3,
+    job_rescued/1,
     %% Queue events
     queue_poll/2,
     queue_paused/1,
@@ -220,6 +226,12 @@ job_progress(Job, Progress) ->
 job_lost(Job, Transition) ->
     Meta = (job_meta(Job))#{transition => Transition},
     telemetry:execute([shigoto, job, lost], #{count => 1}, Meta).
+
+-spec job_rescued(map()) -> ok.
+job_rescued(Job) ->
+    Meta = job_meta(Job),
+    telemetry:execute([shigoto, job, rescued], #{count => 1}, Meta),
+    logger:warning(~"job rescued", Meta).
 
 -spec job_transition_failed(map(), completed | failed | snoozed, term()) -> ok.
 job_transition_failed(Job, Transition, Reason) ->

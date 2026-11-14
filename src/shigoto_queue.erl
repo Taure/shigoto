@@ -161,8 +161,7 @@ handle_info(
 handle_info(rescue, #state{shutting_down = true} = State) ->
     {noreply, State};
 handle_info(rescue, #state{pool = Pool} = State) ->
-    StaleSeconds = stale_threshold(),
-    _ = shigoto_repo:rescue_stale_jobs(Pool, StaleSeconds),
+    _ = shigoto_repo:rescue_stale_jobs(Pool, shigoto_config:stale_after()),
     schedule_rescue(),
     {noreply, State};
 handle_info(
@@ -213,11 +212,7 @@ drop_queued_polls() ->
     end.
 
 schedule_rescue() ->
-    erlang:send_after(60000, self(), rescue).
-
-stale_threshold() ->
-    HeartbeatInterval = shigoto_config:heartbeat_interval(),
-    HeartbeatInterval * 2 div 1000.
+    erlang:send_after(shigoto_config:rescue_interval(), self(), rescue).
 
 should_poll(1, _Counter) ->
     true;

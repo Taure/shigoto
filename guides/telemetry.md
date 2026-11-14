@@ -35,6 +35,7 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, job, progress]` | `progress` | job_id, worker, queue, attempt, priority, progress |
 | `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
 | `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
+| `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
 
 `lost` fires when a run finished but its claim no longer held, so its outcome
 (`transition`: `completed`, `failed` or `snoozed`) was not written: the job had
@@ -43,6 +44,10 @@ been rescued and claimed again, or cancelled, while this run was going. No
 `shigoto_job_transition_lost` warning. A steady rate of it means jobs outlive
 the stale threshold (`heartbeat_interval * 2`) without a heartbeat, and each of
 them ran twice.
+
+`rescued` fires when the stale-job sweep takes a job from an owner that stopped
+heartbeating. `attempt` is the attempt that was lost. The job runs again, or is
+discarded when that was its last attempt (a `discarded` event follows).
 
 `transition_failed` fires when writing the outcome failed for any other reason
 (`reason` is the database error). It comes with a `shigoto_job_transition_failed`

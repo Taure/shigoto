@@ -19,6 +19,8 @@ Configuration access for Shigoto. Reads from application env.
     middleware/0,
     encryption_key/0,
     heartbeat_interval/0,
+    rescue_interval/0,
+    stale_after/0,
     load_shedding/0,
     queue_weights/0,
     fair_queues/0,
@@ -143,6 +145,19 @@ encryption_key() ->
 -spec heartbeat_interval() -> pos_integer().
 heartbeat_interval() ->
     application:get_env(shigoto, heartbeat_interval, 30000).
+
+-doc "Milliseconds between sweeps for stale executing jobs. Default: 60000.".
+-spec rescue_interval() -> pos_integer().
+rescue_interval() ->
+    application:get_env(shigoto, rescue_interval, 60000).
+
+-doc """
+Seconds an executing job may go without a heartbeat before it counts as stale:
+twice the heartbeat interval.
+""".
+-spec stale_after() -> float().
+stale_after() ->
+    heartbeat_interval() * 2 / 1000.
 
 -doc "Load shedding config. Default: undefined (disabled).".
 -spec load_shedding() -> map() | undefined.

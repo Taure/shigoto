@@ -129,8 +129,12 @@ shigoto_sup (one_for_one)
   minute is scheduled once; it catches up on the last hour after downtime. The
   minute comes from PostgreSQL's clock and the stored minute only moves forward
   (`GREATEST` in the upsert), so node clock skew cannot reschedule a minute.
-- **Stale rescue.** Heartbeats + a per-queue `rescue` tick re-queue zombie jobs
-  whose owner died (threshold `heartbeat_interval * 2`).
+- **Stale rescue.** Heartbeats + a per-queue `rescue` tick (`rescue_interval`)
+  take back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
+  claiming counts as the first heartbeat). A rescued job is re-queued, or
+  discarded at `max_attempts` like a failed last attempt, so a job that kills
+  its node cannot loop. Heartbeats and outcomes are fenced on `(id, attempt)`:
+  a run whose job was rescued and claimed again writes nothing.
 - **Resilience** (via seki): per-worker rate limit, circuit breaker, local +
   global (Postgres advisory) bulkhead concurrency, and CoDel load shedding.
 

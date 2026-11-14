@@ -1,11 +1,14 @@
 -module(shigoto_heartbeat).
 -moduledoc """
-Heartbeat system for executing jobs. Periodically updates `heartbeat_at`
-for all in-flight jobs on this node, enabling faster stale job detection.
+Heartbeat for executing jobs. Every `heartbeat_interval` it updates
+`heartbeat_at` for the jobs this node is running, which is what keeps the
+stale-job rescue (`shigoto_repo:rescue_stale_jobs/2`) away from them. A job is
+stale once it has gone twice the heartbeat interval without one (60 seconds by
+default); claiming a job counts as its first.
 
-Without heartbeat, stale jobs are detected after 5 minutes. With heartbeat,
-a job is considered stale if its heartbeat is older than 2x the heartbeat
-interval (default: 60 seconds).
+A heartbeat is written under the claim the job is running under, so a run whose
+job has since been rescued and claimed again, or cancelled, does not keep the
+row alive.
 """.
 -behaviour(gen_server).
 
@@ -47,26 +50,15 @@ update_heartbeats() ->
     case ets:whereis(shigoto_executors) of
         undefined ->
             ok;
-        _ ->
-            JobIds = [Id || {{Id, _Attempt}, _Pid} <- ets:tab2list(shigoto_executors)],
-            case JobIds of
-                [] ->
-                    ok;
-                _ ->
-                    Pool = shigoto_config:pool(),
-                    Placeholders = placeholders(length(JobIds)),
-                    SQL = iolist_to_binary([
-                        ~"UPDATE shigoto_jobs SET heartbeat_at = now() WHERE id IN (",
-                        Placeholders,
-                        ~")"
-                    ]),
-                    _ = shigoto_db:query(Pool, SQL, JobIds),
-                    ok
-            end
+        _Table ->
+            Running = ets:tab2list(shigoto_executors),
+            Alive = [Entry || {_Claim, Pid} = Entry <- Running, is_process_alive(Pid)],
+            ok = forget(Running -- Alive),
+            _ = shigoto_repo:heartbeat(shigoto_config:pool(), [Claim || {Claim, _Pid} <- Alive]),
+            ok
     end.
 
-placeholders(N) ->
-    lists:join(~", ", [
-        iolist_to_binary([~"$", integer_to_binary(I)])
-     || I <- lists:seq(1, N)
-    ]).
+%% An executor that was killed never took its own entry out. Left in, its job
+%% would be kept alive by heartbeats nobody is running it for.
+forget(Dead) ->
+    lists:foreach(fun(Entry) -> ets:delete_object(shigoto_executors, Entry) end, Dead).

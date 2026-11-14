@@ -71,7 +71,8 @@ config :shigoto,
 | `cron` | `[]` | Cron entries (see the [Cron](cron.md) guide) |
 | `middleware` | `[]` | Global middleware chain (see [Middleware](middleware.md)) |
 | `encryption_key` | `undefined` | 32-byte AES-256-GCM key for encrypting job args |
-| `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs |
+| `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
+| `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
