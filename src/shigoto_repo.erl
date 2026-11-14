@@ -199,6 +199,10 @@ passed and it waits on no dependency. A failed job is `retryable` until the
 backoff written to its `scheduled_at` is over, and is then claimed like any
 other.
 
+The jobs are answered as they are stored: with an encryption key configured
+their `args` and `meta` are still ciphertext. `shigoto_job:opened/1` decrypts
+them, once it has checked the worker the row names.
+
 Never answers more than `Limit` jobs. The locking select runs once, as an
 uncorrelated `ARRAY(...)` subquery, because `WHERE id IN (SELECT ... LIMIT ...
 FOR UPDATE SKIP LOCKED)` lets PostgreSQL plan a semi join that rescans the
@@ -225,11 +229,8 @@ claim_jobs(Pool, Queue, Limit) ->
         )) RETURNING *
         """,
     case query(Pool, SQL, [Queue, Limit]) of
-        #{rows := Rows} ->
-            DecryptedRows = [decrypt_job_args(R) || R <- Rows],
-            {ok, DecryptedRows};
-        {error, _} = Err ->
-            Err
+        #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
     end.
 
 -doc "Claim due jobs with fair partition interleaving. One job per partition first, then fill.".
@@ -259,11 +260,8 @@ claim_jobs_fair(Pool, Queue, Limit) ->
         RETURNING *
         """,
     case query(Pool, SQL, [Queue, Limit]) of
-        #{rows := Rows} ->
-            DecryptedRows = [decrypt_job_args(R) || R <- Rows],
-            {ok, DecryptedRows};
-        {error, _} = Err ->
-            Err
+        #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
     end.
 
 -doc "Mark a job as completed with no result. Equivalent to `complete_job/3` with `null`.".
@@ -281,12 +279,14 @@ is and the answer is `{error, lost}`. Given a bare job id there is no attempt to
 compare, and only the `executing` state is checked.
 
 The result is propagated to any jobs that depend on this one (see
-`resolve_dependencies/2`) so they can read it via `deps_results`.
+`resolve_dependencies/2`) so they can read it via `deps_results`. With an
+encryption key and the `v2` write format it is stored encrypted, bound to this
+job's id, and stays so in the `deps_results` of its dependents.
 """.
 -spec complete_job(atom(), claim(), term()) -> ok | {error, lost | term()}.
 complete_job(Pool, Claim, Result) ->
     {JobId, Attempt} = fence(Claim),
-    ResultJson = encode_result(Result),
+    ResultJson = sealed_result(JobId, encode_result(Result)),
     SQL =
         ~"""
         WITH done AS (
@@ -586,7 +586,7 @@ rescue_stale_jobs(Pool, StaleSeconds) ->
     case query(Pool, SQL, [float(StaleSeconds), now_timestamptz_str(), default_policy()]) of
         #{rows := Rows} ->
             {Rescued, Cascaded} = moved(Rows),
-            ok = lists:foreach(fun(Row) -> rescued(Pool, decrypt_job_args(Row)) end, Rescued),
+            ok = lists:foreach(fun(Row) -> rescued(Pool, Row) end, Rescued),
             ok = dependents_followed(Pool, Cascaded),
             {ok, length(Rescued)};
         {error, _} = Err ->
@@ -689,12 +689,15 @@ update_progress(Pool, JobId, Progress) ->
         {error, _} = Err -> Err
     end.
 
--doc "Get a job by ID.".
+-doc """
+Get a job by ID, with its encrypted columns decrypted for reading
+(`shigoto_job:readable/1`).
+""".
 -spec get_job(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
 get_job(Pool, JobId) ->
     SQL = ~"SELECT * FROM shigoto_jobs WHERE id = $1",
     case query(Pool, SQL, [JobId]) of
-        #{rows := [Row]} -> {ok, decrypt_job_args(Row)};
+        #{rows := [Row]} -> {ok, shigoto_job:readable(Row)};
         #{rows := []} -> {error, not_found};
         {error, _} = Err -> Err
     end.
@@ -733,7 +736,7 @@ find_matching(Pool, Filters0) ->
         ~"SELECT * FROM shigoto_jobs WHERE ", WhereSQL, ~" ORDER BY id ASC"
     ]),
     case query(Pool, SQL, StateParams ++ OtherParams) of
-        #{rows := Rows} -> {ok, [decrypt_job_args(R) || R <- Rows]};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(R) || R <- Rows]};
         {error, _} = Err -> Err
     end.
 
@@ -810,11 +813,12 @@ upsert_cron_entry(Pool, Entry) ->
             "  ELSE GREATEST(EXCLUDED.last_scheduled_at, shigoto_cron.last_scheduled_at)\n"
             "END"
         >>,
-    EncArgs = shigoto_crypto:encrypt(encode_json(maps:get(args, Entry, #{}))),
+    Worker = atom_to_binary(maps:get(worker, Entry)),
+    EncArgs = shigoto_crypto:seal(encode_json(maps:get(args, Entry, #{})), {cron_args, Worker}),
     case
         query(Pool, SQL, [
             maps:get(name, Entry),
-            atom_to_binary(maps:get(worker, Entry), utf8),
+            Worker,
             EncArgs,
             maps:get(schedule, Entry),
             maps:get(queue, Entry, ~"default"),
@@ -965,9 +969,8 @@ moved(Rows) ->
 
 -spec dependents_followed(atom(), [map()]) -> ok.
 dependents_followed(Pool, Cascaded) ->
-    Jobs = [decrypt_job_args(Row) || Row <- Cascaded],
-    _ = [followed(Job) || Job <- Jobs],
-    batches_told(Pool, Jobs).
+    _ = [followed(Job) || Job <- Cascaded],
+    batches_told(Pool, Cascaded).
 
 followed(#{state := ~"discarded"} = Job) ->
     _ = maybe_on_discard(Job, Job),
@@ -1179,7 +1182,7 @@ maybe_replace(_Pool, Existing, _JobParams, #{replace := []}) ->
 maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Debounce}) ->
     {SetParts0, Params0, NextIdx} = lists:foldl(
         fun(Field, {Acc, Ps, I}) ->
-            {Col, Val} = replace_field_value(Field, JobParams),
+            {Col, Val} = replace_field_value(Field, JobParams, Existing),
             IBin = integer_to_binary(I),
             Part = <<Col/binary, " = $", IBin/binary>>,
             {[Part | Acc], Ps ++ [Val], I + 1}
@@ -1208,14 +1211,16 @@ maybe_replace(Pool, Existing, JobParams, #{replace := Fields, debounce := Deboun
         {error, _} = Err -> Err
     end.
 
-replace_field_value(args, JobParams) ->
+%% The new args go into the existing row, so they are encrypted for the worker
+%% that row names, which need not be the worker of the job that replaces them.
+replace_field_value(args, JobParams, #{worker := Worker}) when is_binary(Worker) ->
     ArgsJson = encode_json(maps:get(args, JobParams, #{})),
-    {~"args", shigoto_crypto:encrypt(ArgsJson)};
-replace_field_value(priority, JobParams) ->
+    {~"args", shigoto_crypto:seal(ArgsJson, {args, Worker})};
+replace_field_value(priority, JobParams, _Existing) ->
     {~"priority", maps:get(priority, JobParams, 0)};
-replace_field_value(max_attempts, JobParams) ->
+replace_field_value(max_attempts, JobParams, _Existing) ->
     {~"max_attempts", maps:get(max_attempts, JobParams, 3)};
-replace_field_value(scheduled_at, JobParams) ->
+replace_field_value(scheduled_at, JobParams, _Existing) ->
     {~"scheduled_at", maps:get(scheduled_at, JobParams, now_timestamptz())}.
 
 %%----------------------------------------------------------------------
@@ -1235,10 +1240,8 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
     BatchId = maps:get(batch, JobParams, null),
     PartitionKey = maps:get(partition_key, JobParams, null),
     DependsOn = maps:get(depends_on, JobParams, []),
-    ArgsJson = encode_json(Args),
-    EncArgs = shigoto_crypto:encrypt(ArgsJson),
-    MetaJson = encode_json(Meta),
-    EncMeta = shigoto_crypto:encrypt(MetaJson),
+    EncArgs = shigoto_crypto:seal(encode_json(Args), {args, Worker}),
+    EncMeta = shigoto_crypto:seal(encode_json(Meta), {meta, Worker}),
     %% The policy column is only named when the job sets one, so a plain insert
     %% is the same statement as before the column existed.
     {PolicyColumn, PolicyValue, PolicyParam} =
@@ -1341,41 +1344,37 @@ maybe_batch_discard(Pool, #{state := ~"discarded", batch_id := BatchId}) when
 maybe_batch_discard(_Pool, _Job) ->
     ok.
 
+%% on_discard/2 gets the job's args, so they are only decrypted for a row whose
+%% worker passes the check, and only when that worker has the callback. A job
+%% discarded on a node without its worker module, or whose args do not open,
+%% has no callback to run.
 maybe_on_discard(OrigJob, #{state := ~"discarded", errors := Errors}) ->
-    case discard_callback(OrigJob) of
+    case shigoto_job:worker(OrigJob) of
         {ok, Worker} ->
-            Args = decode_args(maps:get(args, OrigJob, #{})),
-            DecodedErrors =
-                case is_binary(Errors) of
-                    true -> json:decode(Errors);
-                    false -> Errors
-                end,
-            try
-                Worker:on_discard(Args, DecodedErrors)
-            catch
-                _:_ -> ok
+            case erlang:function_exported(Worker, on_discard, 2) of
+                true -> discarded(Worker, OrigJob, Errors);
+                false -> ok
             end;
-        none ->
+        {error, _} ->
             ok
     end;
 maybe_on_discard(_OrigJob, _Updated) ->
     ok.
 
-%% A job can be discarded on a node that does not have its worker module, or
-%% name one that exists nowhere. Then there is no callback to run.
--spec discard_callback(map()) -> {ok, module()} | none.
-discard_callback(#{worker := Name}) when is_binary(Name) ->
-    try binary_to_existing_atom(Name, utf8) of
-        Worker -> discard_callback(#{worker => Worker})
-    catch
-        error:badarg -> none
-    end;
-discard_callback(#{worker := Worker}) when is_atom(Worker) ->
-    _ = code:ensure_loaded(Worker),
-    case erlang:function_exported(Worker, on_discard, 2) of
-        true -> {ok, Worker};
-        false -> none
+discarded(Worker, Job, Errors) ->
+    case shigoto_job:opened(Job) of
+        {ok, _Worker, #{args := Args}} ->
+            try
+                Worker:on_discard(Args, decoded_errors(Errors))
+            catch
+                _:_ -> ok
+            end;
+        {error, _} ->
+            ok
     end.
+
+decoded_errors(Errors) when is_binary(Errors) -> json:decode(Errors);
+decoded_errors(Errors) -> Errors.
 
 %%----------------------------------------------------------------------
 %% Internal: helpers
@@ -1395,31 +1394,6 @@ resolve_tags(JobParams) ->
             Tags
     end.
 
-decode_args(Args) when is_map(Args) -> Args;
-decode_args(Args) when is_binary(Args) ->
-    try
-        json:decode(Args)
-    catch
-        _:_ -> #{}
-    end;
-decode_args(_) ->
-    #{}.
-
-decrypt_job_args(Job0) ->
-    Job1 =
-        case Job0 of
-            #{args := Args} when is_binary(Args) ->
-                Job0#{args => shigoto_crypto:decrypt(Args)};
-            _ ->
-                Job0
-        end,
-    case Job1 of
-        #{meta := Meta} when is_binary(Meta) ->
-            Job1#{meta => shigoto_crypto:decrypt(Meta)};
-        _ ->
-            Job1
-    end.
-
 -doc "Fetch recent jobs for fanout queues. No locking — all nodes read the same rows.".
 -spec fetch_fanout_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 fetch_fanout_jobs(Pool, Queue, WindowSeconds) ->
@@ -1433,11 +1407,8 @@ fetch_fanout_jobs(Pool, Queue, WindowSeconds) ->
             "ORDER BY priority DESC, inserted_at ASC"
         >>,
     case query(Pool, SQL, [Queue, WindowSeconds]) of
-        #{rows := Rows} ->
-            DecryptedRows = [decrypt_job_args(R) || R <- Rows],
-            {ok, DecryptedRows};
-        {error, _} = Err ->
-            Err
+        #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
     end.
 
 query(Pool, SQL, Params) ->
@@ -1459,6 +1430,11 @@ encode_json(Map) when is_map(Map) ->
     iolist_to_binary(json:encode(Map));
 encode_json(Bin) when is_binary(Bin) ->
     Bin.
+
+%% NULL stays NULL: there is nothing to encrypt, and a dependent reads it as
+%% the JSON null a job without a result contributes.
+sealed_result(_JobId, null) -> null;
+sealed_result(JobId, Json) -> shigoto_crypto:seal(Json, {result, JobId}).
 
 encode_result(null) ->
     null;

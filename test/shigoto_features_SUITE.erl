@@ -452,16 +452,12 @@ test_encryption_roundtrip(_Config) ->
             #{worker => shigoto_test_worker, args => #{<<"secret">> => <<"data">>}},
             #{}
         ),
-        %% Claiming should decrypt
+        %% A claimed job is still as it is stored; it is opened for the run,
+        %% after the worker it names has been checked.
         {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, <<"default">>, 1),
-        ClaimedArgs = maps:get(args, Claimed),
-        %% The decrypted args should be the original JSON
-        Decoded =
-            case is_binary(ClaimedArgs) of
-                true -> json:decode(ClaimedArgs);
-                false -> ClaimedArgs
-            end,
-        ?assertEqual(<<"data">>, maps:get(<<"secret">>, Decoded))
+        ?assertMatch(<<"\"enc:", _/binary>>, maps:get(args, Claimed)),
+        {ok, shigoto_test_worker, #{args := Args}} = shigoto_job:opened(Claimed),
+        ?assertEqual(<<"data">>, maps:get(<<"secret">>, Args))
     after
         application:set_env(shigoto, encryption_key, undefined)
     end.

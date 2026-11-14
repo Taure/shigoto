@@ -29,6 +29,15 @@ A batch finishes when `completed_jobs + discarded_jobs` reaches `total_jobs`.
 `discarded_jobs` counts every job that ended without completing: discarded
 after its last attempt, discarded by hand, or cancelled.
 
+## The callback
+
+The callback worker is checked like the worker of any job
+(`shigoto_job:worker/1`) before its args are read: a batch row naming a module
+that is not a worker gets no callback job, `shigoto_batch_callback_unrunnable`
+is logged, and the batch stays in its `callback_*` state. `callback_args` are
+stored encrypted when an encryption key is configured and the write format is
+`v2` (`m:shigoto_crypto`), bound to the callback worker.
+
 `total_jobs` goes up in the statement that inserts a job, so the batch only
 knows about the jobs inserted so far. Insert a batch's jobs together, with
 `shigoto:insert_all/1` or inside one `shigoto:transaction/1`: inserted one
@@ -36,13 +45,16 @@ statement at a time, the first job can finish while it is still the only one,
 and the callback fires before the rest exist.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     create/2,
     increment_total/2,
     job_completed/2,
     job_discarded/2,
     jobs_discarded/3,
-    get/2
+    get/2,
+    readable/1
 ]).
 
 -doc "Create a new batch.".
@@ -55,7 +67,9 @@ create(Pool, Opts) ->
             W when is_atom(W) -> atom_to_binary(W, utf8);
             W when is_binary(W) -> W
         end,
-    Args = encode_json(maps:get(callback_args, Opts, #{})),
+    Args = shigoto_crypto:seal(
+        encode_json(maps:get(callback_args, Opts, #{})), {callback_args, bound_to(WorkerBin)}
+    ),
     SQL = <<
         "INSERT INTO shigoto_batches (callback_worker, callback_args) "
         "VALUES ($1, $2) RETURNING *"
@@ -109,12 +123,12 @@ jobs_discarded(Pool, BatchId, Count) ->
         {error, _} = Err -> Err
     end.
 
--doc "Get a batch by ID.".
+-doc "Get a batch by ID, with its `callback_args` decrypted for reading.".
 -spec get(atom(), integer()) -> {ok, map()} | {error, not_found | term()}.
 get(Pool, BatchId) ->
     SQL = ~"SELECT * FROM shigoto_batches WHERE id = $1",
     case query(Pool, SQL, [BatchId]) of
-        #{rows := [Row]} -> {ok, Row};
+        #{rows := [Row]} -> {ok, readable(Row)};
         #{rows := []} -> {error, not_found};
         {error, _} = Err -> Err
     end.
@@ -158,18 +172,7 @@ maybe_fire_callback(Pool, BatchId, Batch) ->
             case try_transition(Pool, BatchId, ~"active", NewState) of
                 ok ->
                     shigoto_telemetry:batch_completed(Batch),
-                    CallbackArgs0 = decode_callback_args(Batch),
-                    CallbackArgs =
-                        case Event of
-                            complete -> CallbackArgs0;
-                            discard -> CallbackArgs0#{~"_batch_event" => ~"discard"}
-                        end,
-                    CallbackWorker = binary_to_existing_atom(CallbackWorkerBin, utf8),
-                    _ = shigoto:insert(#{
-                        worker => CallbackWorker,
-                        args => CallbackArgs
-                    }),
-                    ok;
+                    called_back(Batch, Event);
                 already_transitioned ->
                     ok
             end;
@@ -190,12 +193,68 @@ finish_batch(Pool, Batch) ->
     _ = query(Pool, SQL, [maps:get(id, Batch)]),
     ok.
 
-decode_callback_args(#{callback_args := Args}) when is_map(Args) ->
-    Args;
-decode_callback_args(#{callback_args := Args}) when is_binary(Args) ->
-    json:decode(Args);
-decode_callback_args(_) ->
-    #{}.
+%% The worker is checked before the args are opened, as for a job.
+called_back(#{callback_worker := Name} = Batch, Event) ->
+    case shigoto_job:worker(Name) of
+        {ok, Worker} ->
+            case callback_args(Batch) of
+                {ok, Args} when is_map(Args) ->
+                    _ = shigoto:insert(#{worker => Worker, args => with_event(Args, Event)}),
+                    ok;
+                {ok, _NotAMap} ->
+                    callback_unrunnable(Batch, invalid_callback_args);
+                {error, Reason} ->
+                    callback_unrunnable(Batch, Reason)
+            end;
+        {error, {unknown_worker, _Name}} ->
+            callback_unrunnable(Batch, unknown_worker)
+    end.
+
+with_event(Args, complete) -> Args;
+with_event(Args, discard) -> Args#{~"_batch_event" => ~"discard"}.
+
+callback_unrunnable(Batch, Reason) ->
+    ?LOG_ERROR(#{
+        msg => ~"shigoto_batch_callback_unrunnable",
+        batch_id => maps:get(id, Batch, undefined),
+        callback_worker => maps:get(callback_worker, Batch, undefined),
+        reason => Reason
+    }),
+    ok.
+
+-spec callback_args(map()) -> {ok, term()} | {error, term()}.
+callback_args(#{callback_args := Args}) when is_map(Args) ->
+    {ok, Args};
+callback_args(#{callback_args := Stored, callback_worker := Worker}) when is_binary(Stored) ->
+    case shigoto_crypto:open(Stored, {callback_args, bound_to(Worker)}) of
+        {ok, Plain} ->
+            try
+                {ok, json:decode(Plain)}
+            catch
+                _:_ -> {error, invalid_callback_args}
+            end;
+        {error, _} = Failed ->
+            Failed
+    end;
+callback_args(_Batch) ->
+    {ok, #{}}.
+
+-doc """
+A batch as it is shown to someone reading it: `callback_args` decrypted, still
+JSON text. Args that do not open are replaced by the JSON string of the reason.
+""".
+-spec readable(map()) -> map().
+readable(#{callback_args := Stored, callback_worker := Worker} = Batch) when is_binary(Stored) ->
+    case shigoto_crypto:open(Stored, {callback_args, bound_to(Worker)}) of
+        {ok, Plain} -> Batch#{callback_args => Plain};
+        {error, plaintext_refused} -> Batch;
+        {error, Reason} -> Batch#{callback_args => iolist_to_binary(json:encode(Reason))}
+    end;
+readable(Batch) ->
+    Batch.
+
+bound_to(Worker) when is_binary(Worker) -> Worker;
+bound_to(_NoWorker) -> <<>>.
 
 query(Pool, SQL, Params) ->
     shigoto_db:query(Pool, SQL, Params).

@@ -93,7 +93,15 @@ job_counts() ->
         {error, _} = Err -> Err
     end.
 
--doc "Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.".
+-doc """
+Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.
+
+The jobs are answered like `shigoto:get_job/1` answers one: with an encryption
+key configured their `args`, `meta`, `result` and `deps_results` are decrypted
+(`shigoto_job:readable/1`), and a column that does not open is replaced by the
+reason. Encrypted args cannot be searched: the database only holds ciphertext,
+so there is no `args` filter.
+""".
 -spec search_jobs(map()) -> {ok, [map()]} | {error, term()}.
 search_jobs(Filters) ->
     Limit = maps:get(limit, Filters, 50),
@@ -116,11 +124,11 @@ search_jobs(Filters) ->
         OffsetIdx
     ]),
     case query(SQL, Params ++ [Limit, Offset]) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
--doc "Get the most recent failed jobs.".
+-doc "Get the most recent failed jobs, decrypted for reading like `search_jobs/1`.".
 -spec recent_failures(pos_integer()) -> {ok, [map()]} | {error, term()}.
 recent_failures(Limit) ->
     SQL =
@@ -131,13 +139,14 @@ recent_failures(Limit) ->
             "LIMIT $1"
         >>,
     case query(SQL, [Limit]) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
 -doc """
 The executing jobs the next rescue sweep would take: no claim and no heartbeat
-for `shigoto_config:stale_after/0` seconds.
+for `shigoto_config:stale_after/0` seconds. Decrypted for reading like
+`search_jobs/1`.
 """.
 -spec stale_jobs() -> {ok, [map()]} | {error, term()}.
 stale_jobs() ->
@@ -148,11 +157,11 @@ stale_jobs() ->
         AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
         """,
     case query(SQL, [shigoto_config:stale_after()]) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
--doc "Get batch statistics.".
+-doc "Get the batches that have not finished, with `callback_args` decrypted for reading.".
 -spec batch_stats() -> {ok, [map()]} | {error, term()}.
 batch_stats() ->
     SQL =
@@ -163,7 +172,7 @@ batch_stats() ->
             "LIMIT 100"
         >>,
     case query(SQL, []) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_batch:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 

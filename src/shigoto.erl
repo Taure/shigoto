@@ -339,7 +339,12 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
     shigoto_telemetry:job_progress(#{id => JobId, worker => unknown, queue => unknown}, Progress),
     Result.
 
--doc "Get a job by ID. JSONB columns come back as JSON text; see the moduledoc.".
+-doc """
+Get a job by ID. JSONB columns come back as JSON text; see the moduledoc. With
+an encryption key configured `args`, `meta`, `result` and `deps_results` are
+decrypted; a column that does not open is the JSON string of the reason
+(`"decrypt_failed"`), never ciphertext.
+""".
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).

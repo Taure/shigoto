@@ -29,6 +29,7 @@ Configuration access for Shigoto. Reads from application env.
     encryption_write_format/0,
     encryption_read_formats/0,
     require_encrypted/0,
+    workers/0,
     instance/0,
     advisory_lock_timeout/0,
     fanout_queues/0,
@@ -245,6 +246,19 @@ require_encrypted() ->
     application:get_env(shigoto, require_encrypted, false) =:= true.
 
 -doc """
+The worker modules this node runs. Default: `undefined`, any module that
+exports `perform/1`. With a list, a job naming a module outside it fails with
+`unknown_worker` and the module is never loaded or called.
+""".
+-spec workers() -> [term()] | undefined.
+workers() ->
+    case application:get_env(shigoto, workers, undefined) of
+        undefined -> undefined;
+        Workers when is_list(Workers) -> Workers;
+        _NotAList -> []
+    end.
+
+-doc """
 The name of this installation. Default: `undefined`.
 
 With a name, the advisory locks shigoto takes and the `NOTIFY` channel it uses
@@ -284,6 +298,7 @@ check() ->
         _ = encryption_write_format(),
         ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
         ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
+        ok = checked(workers_checked(setting(workers, undefined))),
         ok = checked(instance_checked(setting(instance, undefined))),
         ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000)))
     catch
@@ -308,6 +323,16 @@ read_formats_checked(Formats) ->
 
 boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
 boolean_checked(Setting, Value) -> {error, {not_a_boolean, Setting, Value}}.
+
+workers_checked(undefined) ->
+    ok;
+workers_checked(Workers) when is_list(Workers) ->
+    case lists:all(fun erlang:is_atom/1, Workers) of
+        true -> ok;
+        false -> {error, {invalid_workers, not_modules}}
+    end;
+workers_checked(_Workers) ->
+    {error, {invalid_workers, not_a_list}}.
 
 instance_checked(undefined) ->
     ok;

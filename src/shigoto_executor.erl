@@ -28,13 +28,21 @@ changes nothing: the executor logs `shigoto_job_transition_lost`, emits
 that fails for any other reason is logged as `shigoto_job_transition_failed`
 with `[shigoto, job, transition_failed]`; the row stays `executing` and the
 stale-job rescue returns it to the queue.
+
+The job is held as it was claimed, with its encrypted columns still encrypted.
+`shigoto_job:opened/1` checks the worker the row names and only then decrypts
+them, for the run alone: a row naming a module that is not a worker, or whose
+args do not open, fails the attempt (`unknown_worker`, `decrypt_failed`,
+`format_refused`, `plaintext_refused`) without `perform/1` being called. The
+state `sys:get_state/1` and a crash report show is the job without its data
+columns (`shigoto_job:redact/1`).
 """.
 -behaviour(gen_server).
 
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/3, start_link/4, execute_sync/3, run_perform/4, running/1, stop/2]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
 
 -record(state, {
     job :: map(),
@@ -116,7 +124,12 @@ handle_call(_Request, _From, State) ->
 
 -doc false.
 handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid, run = Run} = State) ->
-    _ = executed(Job, Pool, worker_timeout, Run),
+    _ =
+        try
+            executed(Job, Pool, worker_timeout, Run)
+        catch
+            Class:Reason:Stack -> crashed(Job, Class, Reason, Stack)
+        end,
     gen_server:cast(QueuePid, {job_finished, maps:get(id, Job), self()}),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
@@ -130,6 +143,26 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{job = Job, run = Run}) ->
     ets:delete(shigoto_executors, registered_as(Job, Run)),
     ok.
+
+-doc false.
+format_status(#{state := #state{job = Job} = State} = Status) ->
+    Status#{state := State#state{job = shigoto_job:redact(Job)}};
+format_status(Status) ->
+    Status.
+
+%% Anything that escapes the run would end this process with a reason and a
+%% stacktrace that may hold the decrypted job, printed in its crash report.
+%% It is logged here without them instead. The row stays `executing` and the
+%% stale-job rescue returns it to the queue.
+crashed(Job, Class, Reason, Stack) ->
+    ?LOG_ERROR(#{
+        msg => ~"shigoto_executor_crashed",
+        job_id => maps:get(id, Job, undefined),
+        attempt => maps:get(attempt, Job, undefined),
+        reason => shigoto_error:text({Class, Reason}),
+        stacktrace => shigoto_error:stack(Stack),
+        note => ~"the row stays executing until the stale-job rescue returns it to the queue"
+    }).
 
 %% A job that is rescued and claimed again while its first run is still going
 %% has two executors for a while; the attempt tells them apart. A fanout run
@@ -146,18 +179,21 @@ registered_as(Job, fanout) ->
 -spec executed(map(), atom(), timeout() | worker_timeout, run()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
 executed(Job, Pool, Timeout, Run) ->
-    case worker_of(Job) of
-        {ok, Worker} -> performed_by(Worker, Job, Pool, Timeout, Run);
+    case shigoto_job:opened(Job) of
+        {ok, Worker, Opened} -> performed_by(Worker, Job, Opened, Pool, Timeout, Run);
         {error, Reason} -> unrunnable(Reason, Job, Pool, Run)
     end.
 
-%% The job names a module this node cannot run: one that does not exist here,
-%% or has no perform/1. It fails like any other attempt, so it is retried (a
-%% node on a newer release may have the worker) and then discarded, instead of
-%% crashing the executor and leaving the row to be rescued over and over.
+%% The job cannot be run here: it names a module that is not a worker on this
+%% node, or its encrypted columns do not open. Nothing was decrypted and
+%% nothing in the named module was called. It fails like any other attempt, so
+%% it is retried (a node on a newer release may have the worker, or the key)
+%% and then discarded, instead of crashing the executor and leaving the row to
+%% be rescued over and over.
 unrunnable(Reason, Job, Pool, Run) ->
     ?LOG_ERROR(#{
-        msg => ~"shigoto_job_unknown_worker",
+        msg => unrunnable_message(Reason),
+        reason => shigoto_error:text(Reason),
         job_id => maps:get(id, Job, undefined),
         worker => maps:get(worker, Job, undefined),
         queue => maps:get(queue, Job, undefined),
@@ -165,11 +201,16 @@ unrunnable(Reason, Job, Pool, Run) ->
     }),
     concluded(Run, {failed, Reason, Reason}, Job, Pool, undefined, 0).
 
-performed_by(Worker, Job, Pool, Timeout, Run) ->
+unrunnable_message({unknown_worker, _Name}) -> ~"shigoto_job_unknown_worker";
+unrunnable_message(_Unreadable) -> ~"shigoto_job_unreadable".
+
+%% `Job` is the row as it was claimed and is what every write and event is
+%% made with. `Opened` is its decrypted form, used for the run and nothing else.
+performed_by(Worker, Job, Opened, Pool, Timeout, Run) ->
     set_logger_metadata(Job, Worker),
     T0 = erlang:monotonic_time(native),
     try
-        Outcome = outcome(Job, Worker, Timeout, caller(Run)),
+        Outcome = outcome(Opened, Worker, Timeout, caller(Run)),
         Duration = erlang:monotonic_time(native) - T0,
         Answer = concluded(Run, Outcome, Job, Pool, Worker, Duration),
         ok = gates_told(Outcome, Job, Worker, Duration, Run),
@@ -203,7 +244,7 @@ outcome(Job, Worker, Timeout, Caller) ->
     try
         returned(
             run_with_resilience(
-                Job, Worker, resolve_args(Job), timeout_of(Timeout, Worker), Caller
+                Job, Worker, maps:get(args, Job), timeout_of(Timeout, Worker), Caller
             )
         )
     catch
@@ -483,34 +524,6 @@ resolve_timeout(Worker) ->
         true -> Worker:timeout();
         false -> ?DEFAULT_TIMEOUT
     end.
-
--spec worker_of(map()) -> {ok, module()} | {error, {unknown_worker, binary()}}.
-worker_of(#{worker := Worker}) when is_atom(Worker) ->
-    runnable(Worker);
-worker_of(#{worker := Name}) when is_binary(Name) ->
-    try binary_to_existing_atom(Name, utf8) of
-        Worker -> runnable(Worker)
-    catch
-        error:badarg -> {error, {unknown_worker, Name}}
-    end.
-
-runnable(Worker) ->
-    _ = code:ensure_loaded(Worker),
-    case erlang:function_exported(Worker, perform, 1) of
-        true -> {ok, Worker};
-        false -> {error, {unknown_worker, atom_to_binary(Worker)}}
-    end.
-
-resolve_args(#{args := Args}) when is_map(Args) ->
-    Args;
-resolve_args(#{args := Args}) when is_binary(Args) ->
-    try
-        json:decode(Args)
-    catch
-        _:_ -> #{}
-    end;
-resolve_args(_) ->
-    #{}.
 
 -spec apply_with_timeout(module(), atom(), [term()], timeout(), caller()) ->
     {returned, term()}
