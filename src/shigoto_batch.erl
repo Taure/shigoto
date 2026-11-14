@@ -17,11 +17,23 @@ BatchId = maps:get(id, Batch),
 shigoto:insert(#{worker => step_one, args => #{}, batch => BatchId}),
 shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
 
-%% When all jobs complete, my_batch_callback:perform/1 is called
-%% with the callback_args. If any job is discarded, the batch
-%% state changes to 'callback_discarding' and the callback is
+%% When all jobs have finished, my_batch_callback:perform/1 is called
+%% with the callback_args. If any job was discarded or cancelled, the
+%% batch state changes to 'callback_discarding' and the callback is
 %% called with an added <<\"_batch_event\">> => <<\"discard\">> key.
 ```
+
+## When a batch is finished
+
+A batch finishes when `completed_jobs + discarded_jobs` reaches `total_jobs`.
+`discarded_jobs` counts every job that ended without completing: discarded
+after its last attempt, discarded by hand, or cancelled.
+
+`total_jobs` goes up in the statement that inserts a job, so the batch only
+knows about the jobs inserted so far. Insert a batch's jobs together, with
+`shigoto:insert_all/1` or inside one `shigoto:transaction/1`: inserted one
+statement at a time, the first job can finish while it is still the only one,
+and the callback fires before the rest exist.
 """.
 
 -export([
@@ -29,6 +41,7 @@ shigoto:insert(#{worker => step_two, args => #{}, batch => BatchId}),
     increment_total/2,
     job_completed/2,
     job_discarded/2,
+    jobs_discarded/3,
     get/2
 ]).
 
@@ -69,19 +82,30 @@ job_completed(Pool, BatchId) ->
         "WHERE id = $1 RETURNING *"
     >>,
     case query(Pool, SQL, [BatchId]) of
-        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch, complete);
+        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch);
+        #{rows := []} -> ok;
         {error, _} = Err -> Err
     end.
 
 -doc "Record a discarded job in the batch. May trigger callback.".
 -spec job_discarded(atom(), integer()) -> ok | {error, term()}.
 job_discarded(Pool, BatchId) ->
-    SQL = <<
-        "UPDATE shigoto_batches SET discarded_jobs = discarded_jobs + 1 "
-        "WHERE id = $1 RETURNING *"
-    >>,
-    case query(Pool, SQL, [BatchId]) of
-        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch, discard);
+    jobs_discarded(Pool, BatchId, 1).
+
+-doc """
+Record `Count` jobs of the batch that ended without completing: discarded or
+cancelled. May trigger callback.
+""".
+-spec jobs_discarded(atom(), integer(), pos_integer()) -> ok | {error, term()}.
+jobs_discarded(Pool, BatchId, Count) ->
+    SQL =
+        ~"""
+        UPDATE shigoto_batches SET discarded_jobs = discarded_jobs + $2
+        WHERE id = $1 RETURNING *
+        """,
+    case query(Pool, SQL, [BatchId, Count]) of
+        #{rows := [Batch]} -> maybe_fire_callback(Pool, BatchId, Batch);
+        #{rows := []} -> ok;
         {error, _} = Err -> Err
     end.
 
@@ -99,7 +123,9 @@ get(Pool, BatchId) ->
 %% Internal
 %%----------------------------------------------------------------------
 
-maybe_fire_callback(Pool, BatchId, Batch, Event) ->
+%% The event is `discard` when any job of the batch was discarded or
+%% cancelled, whichever job happened to finish last.
+maybe_fire_callback(Pool, BatchId, Batch) ->
     #{
         total_jobs := Total,
         completed_jobs := Completed,
@@ -107,6 +133,11 @@ maybe_fire_callback(Pool, BatchId, Batch, Event) ->
         callback_worker := CallbackWorkerBin
     } = Batch,
     AllDone = (Completed + Discarded) >= Total,
+    Event =
+        case Discarded > 0 of
+            true -> discard;
+            false -> complete
+        end,
     case {AllDone, CallbackWorkerBin} of
         {true, null} ->
             %% Atomically transition to finished — only one concurrent caller wins

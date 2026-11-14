@@ -117,22 +117,42 @@ insert_all(Pool, JobParamsList, Opts) ->
         Jobs
     ),
     ValuesSQL = lists:join(~", ", ValueClauses),
-    SQL = iolist_to_binary([
+    Insert = [
         <<
             "INSERT INTO shigoto_jobs "
             "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
         >>,
         ValuesSQL,
         ~" RETURNING *"
-    ]),
-    case query(Pool, SQL, AllParams) of
-        #{rows := Rows} ->
-            BatchIds = [maps:get(batch, J, null) || J <- Jobs],
-            update_batch_counts(Pool, BatchIds),
-            {ok, Rows};
-        {error, _} = Err ->
-            Err
+    ],
+    Batched = lists:any(fun(Job) -> maps:get(batch, Job, null) =/= null end, Jobs),
+    case query(Pool, counting_its_batches(Insert, Batched), AllParams) of
+        #{rows := Rows} -> {ok, Rows};
+        {error, _} = Err -> Err
     end.
+
+%% A batch's total goes up in the statement that inserts its jobs. Counted
+%% afterwards, a job could be claimed and finished before its batch knew of it,
+%% and the batch would fire its callback with jobs still to come.
+-spec counting_its_batches(iodata(), boolean()) -> binary().
+counting_its_batches(Insert, false) ->
+    iolist_to_binary(Insert);
+counting_its_batches(Insert, true) ->
+    iolist_to_binary([
+        ~"WITH inserted AS (",
+        Insert,
+        ~"""
+        ), counted AS (
+          UPDATE shigoto_batches b SET total_jobs = b.total_jobs + batched.jobs
+          FROM (
+            SELECT batch_id, count(*) AS jobs FROM inserted
+            WHERE batch_id IS NOT NULL GROUP BY batch_id
+          ) batched
+          WHERE b.id = batched.batch_id
+        )
+        SELECT * FROM inserted
+        """
+    ]).
 
 -doc """
 Claim up to `Limit` due jobs from a queue using `FOR UPDATE SKIP LOCKED`.
@@ -302,8 +322,8 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
 
 -doc """
 Discard a job that has not finished. Resolves dependencies so dependent jobs
-aren't stuck. A job that is already completed, discarded or cancelled is left
-as it is.
+aren't stuck, and counts the job in its batch. A job that is already completed,
+discarded or cancelled is left as it is.
 """.
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
@@ -312,21 +332,34 @@ discard_job(Pool, JobId) ->
         WITH done AS (
           UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now()
           WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
-          RETURNING id, result
+          RETURNING id, result, batch_id
         ), dependents AS (
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
           FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
-        SELECT id FROM done
+        SELECT batch_id FROM done
         """,
     case query(Pool, SQL, [JobId]) of
-        #{rows := _} -> ok;
+        #{rows := Rows} -> batches_told(Pool, Rows);
         {error, _} = Err -> Err
     end.
 
--doc "Cancel a job. Resolves dependencies so dependent jobs aren't stuck.".
+%% The jobs a statement just discarded or cancelled, counted in their batches.
+-spec batches_told(atom(), [#{batch_id := integer() | null, _ => _}]) -> ok.
+batches_told(Pool, Rows) ->
+    _ = [
+        shigoto_batch:jobs_discarded(Pool, BatchId, maps:get(jobs, Row, 1))
+     || #{batch_id := BatchId} = Row <- Rows, BatchId =/= null
+    ],
+    ok.
+
+-doc """
+Cancel a job that has not finished. Resolves dependencies so dependent jobs
+aren't stuck, and counts the job as discarded in its batch, so the batch can
+still finish.
+""".
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
     SQL =
@@ -334,17 +367,17 @@ cancel_job(Pool, JobId) ->
         WITH done AS (
           UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now()
           WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
-          RETURNING id, result
+          RETURNING id, result, batch_id
         ), dependents AS (
           UPDATE shigoto_jobs d
           SET depends_on = array_remove(d.depends_on, done.id),
               deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
           FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
-        SELECT id FROM done
+        SELECT batch_id FROM done
         """,
     case query(Pool, SQL, [JobId]) of
-        #{rows := _} -> ok;
+        #{rows := Rows} -> batches_told(Pool, Rows);
         {error, _} = Err -> Err
     end.
 
@@ -376,12 +409,16 @@ cancel_matching(Pool, Filters) ->
                 ])
         end,
     SQL = iolist_to_binary([
-        ~"UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
-        WhereSQL
+        ~"WITH done AS (UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
+        WhereSQL,
+        ~" RETURNING batch_id) SELECT batch_id, count(*) AS jobs FROM done GROUP BY batch_id"
     ]),
     case query(Pool, SQL, Params) of
-        #{num_rows := Count} -> {ok, Count};
-        {error, _} = Err -> Err
+        #{rows := Rows} ->
+            ok = batches_told(Pool, Rows),
+            {ok, lists:sum([Jobs || #{jobs := Jobs} <- Rows])};
+        {error, _} = Err ->
+            Err
     end.
 
 -doc """
@@ -1042,7 +1079,7 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
     EncArgs = shigoto_crypto:encrypt(ArgsJson),
     MetaJson = encode_json(Meta),
     EncMeta = shigoto_crypto:encrypt(MetaJson),
-    SQL =
+    Insert =
         <<
             "INSERT INTO shigoto_jobs\n"
             "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on)\n"
@@ -1050,7 +1087,7 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
             "RETURNING *"
         >>,
     case
-        query(Pool, SQL, [
+        query(Pool, counting_its_batches(Insert, BatchId =/= null), [
             Queue,
             Worker,
             EncArgs,
@@ -1065,11 +1102,8 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
             DependsOn
         ])
     of
-        #{rows := [Row]} ->
-            _ = maybe_increment_batch(Pool, BatchId),
-            {ok, Row};
-        {error, _} = Err ->
-            Err
+        #{rows := [Row]} -> {ok, Row};
+        {error, _} = Err -> Err
     end.
 
 %%----------------------------------------------------------------------
@@ -1169,13 +1203,10 @@ format_worker(_) -> ~"unknown".
 %% Internal: batch helpers
 %%----------------------------------------------------------------------
 
-maybe_increment_batch(_Pool, null) -> ok;
-maybe_increment_batch(Pool, BatchId) -> shigoto_batch:increment_total(Pool, BatchId).
-
 maybe_batch_discard(Pool, #{state := ~"discarded", batch_id := BatchId}) when
     BatchId =/= null
 ->
-    shigoto_batch:job_discarded(Pool, BatchId);
+    shigoto_batch:jobs_discarded(Pool, BatchId, 1);
 maybe_batch_discard(_Pool, _Job) ->
     ok.
 
@@ -1203,17 +1234,6 @@ maybe_on_discard(_OrigJob, _Updated) ->
 
 resolve_worker_atom(#{worker := W}) when is_atom(W) -> W;
 resolve_worker_atom(#{worker := W}) when is_binary(W) -> binary_to_existing_atom(W, utf8).
-
-update_batch_counts(Pool, BatchIds) ->
-    UniqueBatchIds = lists:usort([B || B <- BatchIds, B =/= null]),
-    lists:foreach(
-        fun(BatchId) ->
-            Count = length([B || B <- BatchIds, B =:= BatchId]),
-            SQL = ~"UPDATE shigoto_batches SET total_jobs = total_jobs + $2 WHERE id = $1",
-            _ = query(Pool, SQL, [BatchId, Count])
-        end,
-        UniqueBatchIds
-    ).
 
 %%----------------------------------------------------------------------
 %% Internal: helpers

@@ -36,6 +36,7 @@ the application does with it.
     the_pruner_archives_old_finished_jobs/1,
     every_fanout_consumer_runs_a_job/1,
     a_batch_callback_runs_after_its_jobs/1,
+    a_cancelled_batch_job_still_finishes_the_batch/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_burst_of_jobs_all_complete/1
 ]).
@@ -80,6 +81,7 @@ all() ->
         the_pruner_archives_old_finished_jobs,
         every_fanout_consumer_runs_a_job,
         a_batch_callback_runs_after_its_jobs,
+        a_cancelled_batch_job_still_finishes_the_batch,
         a_child_runs_after_its_parent_with_the_result,
         a_burst_of_jobs_all_complete
     ].
@@ -481,6 +483,24 @@ a_batch_callback_runs_after_its_jobs(_Config) ->
     end,
     ?assertMatch(
         {ok, #{total_jobs := 2, completed_jobs := 2, state := ~"callback_completing"}},
+        shigoto:get_batch(BatchId)
+    ).
+
+a_cancelled_batch_job_still_finishes_the_batch(_Config) ->
+    BatchId = new_batch(),
+    ok = shigoto:pause_queue(?QUEUE),
+    Kept = enqueue(~"batch-kept", #{batch => BatchId}),
+    Cancelled = enqueue(~"batch-cancelled", #{batch => BatchId}),
+    ok = shigoto:cancel(Cancelled),
+    ok = shigoto:resume_queue(?QUEUE),
+    instruct(performing(~"batch-kept"), {return, ok}),
+    _ = await(Kept, ~"completed"),
+    receive
+        {batch_callback, Args} -> ?assertMatch(#{~"_batch_event" := ~"discard"}, Args)
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch(
+        {ok, #{total_jobs := 2, completed_jobs := 1, discarded_jobs := 1}},
         shigoto:get_batch(BatchId)
     ).
 

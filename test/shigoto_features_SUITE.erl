@@ -24,6 +24,9 @@
     test_middleware_chain/1,
     test_batch_create_and_complete/1,
     test_batch_with_callback/1,
+    test_batch_counts_cancelled_and_discarded_jobs/1,
+    test_batch_event_is_discard_whichever_job_is_last/1,
+    test_batch_total_is_counted_with_the_insert/1,
     test_get_job/1,
     test_encryption_roundtrip/1,
     test_encrypted_unique_key_hides_args/1,
@@ -61,6 +64,9 @@ all() ->
         test_middleware_chain,
         test_batch_create_and_complete,
         test_batch_with_callback,
+        test_batch_counts_cancelled_and_discarded_jobs,
+        test_batch_event_is_discard_whichever_job_is_last,
+        test_batch_total_is_counted_with_the_insert,
         test_get_job,
         test_encryption_roundtrip,
         test_encrypted_unique_key_hides_args,
@@ -445,6 +451,105 @@ test_encryption_roundtrip(_Config) ->
     after
         application:set_env(shigoto, encryption_key, undefined)
     end.
+
+test_batch_counts_cancelled_and_discarded_jobs(_Config) ->
+    {ok, #{id := BatchId}} = shigoto_batch:create(?POOL, #{}),
+    InBatch = fun(Tag) ->
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL,
+            #{
+                worker => shigoto_test_worker,
+                args => #{~"n" => Tag},
+                batch => BatchId,
+                tags => [Tag]
+            },
+            #{}
+        ),
+        JobId
+    end,
+    Cancelled = InBatch(~"one"),
+    Discarded = InBatch(~"two"),
+    _ = [InBatch(~"swept") || _ <- lists:seq(1, 3)],
+    {ok, _Outside} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}, tags => [~"swept"]}, #{}
+    ),
+    Completed = InBatch(~"last"),
+    ?assertMatch({ok, #{total_jobs := 6}}, shigoto_batch:get(?POOL, BatchId)),
+    ok = shigoto_repo:cancel_job(?POOL, Cancelled),
+    ?assertMatch({ok, #{discarded_jobs := 1}}, shigoto_batch:get(?POOL, BatchId)),
+    %% Cancelling it again counts nothing.
+    ok = shigoto_repo:cancel_job(?POOL, Cancelled),
+    ?assertMatch({ok, #{discarded_jobs := 1}}, shigoto_batch:get(?POOL, BatchId)),
+    ok = shigoto_repo:discard_job(?POOL, Discarded),
+    ok = shigoto_repo:discard_job(?POOL, Discarded),
+    ?assertMatch({ok, #{discarded_jobs := 2}}, shigoto_batch:get(?POOL, BatchId)),
+    ?assertEqual({ok, 4}, shigoto_repo:cancel_by(?POOL, #{tags => [~"swept"]})),
+    ?assertMatch(
+        {ok, #{discarded_jobs := 5, completed_jobs := 0, state := ~"active"}},
+        shigoto_batch:get(?POOL, BatchId)
+    ),
+    {ok, [#{id := Completed} = Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
+    ?assertMatch(
+        {ok, #{total_jobs := 6, discarded_jobs := 5, completed_jobs := 1, state := ~"finished"}},
+        shigoto_batch:get(?POOL, BatchId)
+    ).
+
+test_batch_event_is_discard_whichever_job_is_last(_Config) ->
+    {ok, #{id := BatchId}} = shigoto_batch:create(?POOL, #{
+        callback_worker => shigoto_batch_callback_worker,
+        callback_args => #{~"test_pid" => list_to_binary(pid_to_list(self()))}
+    }),
+    {ok, [#{id := First}, _Second]} = shigoto_repo:insert_all(
+        ?POOL,
+        [
+            #{worker => shigoto_test_worker, args => #{~"n" => N}, batch => BatchId}
+         || N <- [1, 2]
+        ],
+        #{}
+    ),
+    ok = shigoto_repo:cancel_job(?POOL, First),
+    {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_repo:complete_job(?POOL, Claimed),
+    ?assertMatch(
+        {ok, #{state := ~"callback_discarding", completed_jobs := 1, discarded_jobs := 1}},
+        shigoto_batch:get(?POOL, BatchId)
+    ),
+    {ok, [Callback]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = shigoto_executor:execute_sync(Callback, ?POOL, 5000),
+    receive
+        {batch_callback, Args} -> ?assertMatch(#{~"_batch_event" := ~"discard"}, Args)
+    after 2000 -> ct:fail(no_batch_callback)
+    end.
+
+test_batch_total_is_counted_with_the_insert(_Config) ->
+    {ok, #{id := One}} = shigoto_batch:create(?POOL, #{}),
+    {ok, #{id := Other}} = shigoto_batch:create(?POOL, #{}),
+    Job = fun(Batch) -> #{worker => shigoto_test_worker, args => #{}, batch => Batch} end,
+    {ok, Inserted} = shigoto_repo:insert_all(
+        ?POOL,
+        [Job(One), Job(Other), Job(One), #{worker => shigoto_test_worker, args => #{}}, Job(One)],
+        #{}
+    ),
+    ?assertEqual(
+        lists:sort([One, Other, One, null, One]),
+        lists:sort([maps:get(batch_id, Row) || Row <- Inserted])
+    ),
+    ?assertMatch({ok, #{total_jobs := 3}}, shigoto_batch:get(?POOL, One)),
+    ?assertMatch({ok, #{total_jobs := 1}}, shigoto_batch:get(?POOL, Other)),
+    {ok, #{batch_id := Other}} = shigoto_repo:insert_job(?POOL, Job(Other), #{}),
+    ?assertMatch({ok, #{total_jobs := 2}}, shigoto_batch:get(?POOL, Other)),
+    %% An insert that is rolled back takes its count with it.
+    ?assertError(
+        rolled_back,
+        shigoto_db:transaction(?POOL, fun() ->
+            {ok, _} = shigoto_repo:insert_job(?POOL, Job(Other), #{}),
+            {ok, _} = shigoto_repo:insert_all(?POOL, [Job(One), Job(One)], #{}),
+            error(rolled_back)
+        end)
+    ),
+    ?assertMatch({ok, #{total_jobs := 3}}, shigoto_batch:get(?POOL, One)),
+    ?assertMatch({ok, #{total_jobs := 2}}, shigoto_batch:get(?POOL, Other)).
 
 %%----------------------------------------------------------------------
 %% Heartbeat stale threshold test

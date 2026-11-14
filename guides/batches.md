@@ -46,7 +46,21 @@ perform(#{<<"report_id">> := ReportId}) ->
     ok.
 ```
 
-If any job is discarded, the callback receives an extra `<<"_batch_event">> => <<"discard">>` key.
+If any job was discarded or cancelled, the callback receives an extra
+`<<"_batch_event">> => <<"discard">>` key, whichever job finished last.
+
+## When a Batch Finishes
+
+A batch finishes when `completed_jobs + discarded_jobs` reaches `total_jobs`.
+`discarded_jobs` counts every job that ended without completing: discarded
+after its last attempt, discarded by hand, or cancelled (`shigoto:cancel/1`,
+`shigoto:cancel_by/1`). A cancelled job therefore does not hold its batch open.
+
+`total_jobs` goes up in the statement that inserts a job, so a batch only knows
+about the jobs inserted so far. **Insert a batch's jobs together**, with
+`shigoto:insert_all/1` or inside one `shigoto:transaction/1`. Inserted one
+statement at a time, the first job can finish while it is still the only one in
+the batch, and the callback fires before the rest exist.
 
 ## Batch States
 
@@ -54,7 +68,7 @@ If any job is discarded, the callback receives an extra `<<"_batch_event">> => <
 |-------|-------------|
 | `active` | Jobs are still processing |
 | `callback_completing` | All jobs done, callback inserted |
-| `callback_discarding` | Some jobs discarded, callback inserted |
+| `callback_discarding` | All jobs done, some discarded or cancelled, callback inserted |
 | `finished` | Batch complete (no callback configured) |
 
 ## Monitoring Batches
