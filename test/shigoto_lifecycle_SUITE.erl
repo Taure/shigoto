@@ -27,6 +27,7 @@ the application does with it.
     a_cancel_from_another_node_stops_the_worker/1,
     a_killed_executor_takes_its_worker_down/1,
     stopping_the_application_stops_a_running_worker/1,
+    a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt/1,
     a_dead_nodes_job_is_rescued_and_rerun/1,
     a_rescued_job_is_not_rescued_again_while_it_runs/1,
     a_job_that_kills_its_node_is_discarded_at_max_attempts/1,
@@ -105,6 +106,7 @@ all() ->
         a_cancel_from_another_node_stops_the_worker,
         a_killed_executor_takes_its_worker_down,
         stopping_the_application_stops_a_running_worker,
+        a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt,
         a_dead_nodes_job_is_rescued_and_rerun,
         a_rescued_job_is_not_rescued_again_while_it_runs,
         a_job_that_kills_its_node_is_discarded_at_max_attempts,
@@ -229,6 +231,8 @@ overrides(a_superseded_run_is_stopped_at_the_next_heartbeat) ->
 overrides(a_heartbeat_keeps_a_live_job_from_rescue) ->
     #{heartbeat_interval => 300};
 overrides(stopping_the_application_stops_a_running_worker) ->
+    #{shutdown_timeout => 200};
+overrides(a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt) ->
     #{shutdown_timeout => 200};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
@@ -395,8 +399,25 @@ stopping_the_application_stops_a_running_worker(_Config) ->
     Worker = performing(~"shut-down"),
     ok = application:stop(shigoto),
     ok = stopped(Worker, 2000),
-    %% Nothing was recorded: the row waits for the stale-job rescue.
-    ?assertMatch(#{state := ~"executing", attempt := 1, errors := ~"[]"}, row(Id)).
+    %% The node stopped the run, the job did not fail: its claim is given
+    %% back with the attempt, and nothing is recorded against it.
+    ?assertMatch(
+        #{state := ~"available", attempt := 1, max_attempts := 4, errors := ~"[]"}, row(Id)
+    ).
+
+a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt(_Config) ->
+    Id = enqueue(~"deployed-over", #{max_attempts => 1}),
+    Worker = performing(~"deployed-over"),
+    ok = application:stop(shigoto),
+    ok = stopped(Worker, 2000),
+    {ok, _} = application:ensure_all_started(shigoto),
+    instruct(performing(~"deployed-over"), {return, ok}),
+    ?assertMatch(#{attempt := 2, errors := ~"[]"}, await(Id, ~"completed")),
+    ok = idle(~"deployed-over", 500),
+    receive
+        {discarded, ~"deployed-over", _Errors} -> ct:fail(discarded_by_a_shutdown)
+    after 0 -> ok
+    end.
 
 %%----------------------------------------------------------------------
 %% A node that dies

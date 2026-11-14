@@ -46,6 +46,9 @@ init([]) ->
         id => shigoto_executor,
         start => {shigoto_executor, start_link, []},
         restart => temporary,
-        type => worker
+        type => worker,
+        %% An executor that is stopped waits up to six seconds for its worker
+        %% process and then gives its claim back.
+        shutdown => 8000
     },
     {ok, {#{strategy => simple_one_for_one, intensity => 10, period => 10}, [ChildSpec]}}.

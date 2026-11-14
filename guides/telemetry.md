@@ -51,7 +51,8 @@ the outcome is written, so `completed`, `failed` or `snoozed` still follows.
 claimed again, or cancelled on another node, while this run was going. Either
 the run finished and its outcome (`transition`: `completed`, `failed` or
 `snoozed`) was not written, or the heartbeat noticed first and the run was
-stopped (`transition`: `stopped`). No `completed`, `failed` or `snoozed` event
+stopped (`transition`: `stopped`), or the node was stopping and the claim it
+tried to give back was no longer its own (`transition`: `released`). No `completed`, `failed` or `snoozed` event
 fires for that run. It comes with a
 `shigoto_job_transition_lost` warning. A steady rate of it means jobs outlive
 the stale threshold (`heartbeat_interval * 2`) without a heartbeat, and each of
@@ -65,6 +66,11 @@ discarded when that was its last attempt (a `discarded` event follows).
 (`reason` is the database error). It comes with a `shigoto_job_transition_failed`
 error log. The row stays `executing` until the stale-job rescue returns it to
 the queue, so the job runs again.
+
+A run stopped because its node is stopping ends with `[shigoto, job, stop]`
+and `outcome` `stopped`, and its claim is given back: the job is `available`
+again and no attempt is used. `transition` is `released` in `lost` and
+`transition_failed` when that write did not go through.
 
 The `reason` of `failed` is text. With an encryption key configured it is the
 shape of the failure with every value removed, as in the `errors` column (see

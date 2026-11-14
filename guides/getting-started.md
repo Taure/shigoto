@@ -67,7 +67,7 @@ config :shigoto,
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are archived |
-| `shutdown_timeout` | `15000` | Milliseconds to wait for in-flight jobs during shutdown |
+| `shutdown_timeout` | `15000` | Milliseconds to wait for in-flight jobs during shutdown. A job still running after that is stopped and given back to the queue without using an attempt |
 | `cron` | `[]` | Cron entries (see the [Cron](cron.md) guide) |
 | `middleware` | `[]` | Global middleware chain (see [Middleware](middleware.md)) |
 | `encryption_key` | `undefined` | 32-byte AES-256-GCM key (see [Encryption](encryption.md)) |

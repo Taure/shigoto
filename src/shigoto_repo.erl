@@ -17,6 +17,7 @@ for safe multi-node job claiming.
     cancelled_job/2,
     cancel_by/2,
     snooze_job/3,
+    release_job/2,
     retry_job/2,
     retry_by/2,
     rescue_stale_jobs/2,
@@ -599,6 +600,32 @@ snooze_job(Pool, Claim, Seconds) ->
         RETURNING id
         """,
     case query(Pool, SQL, [JobId, Seconds, Attempt]) of
+        #{rows := [_]} -> ok;
+        #{rows := []} -> {error, lost};
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+Give a claimed job back without anything having come of the run: the node is
+stopping and the run was stopped with it. The job is `available` again at
+once and keeps its place, and `max_attempts` goes up by one, as for a snooze,
+so the interrupted run does not use up an attempt.
+
+Like `complete_job/3`, the write only applies while the claim still holds, and
+answers `{error, lost}` otherwise.
+""".
+-spec release_job(atom(), claim()) -> ok | {error, lost | term()}.
+release_job(Pool, Claim) ->
+    {JobId, Attempt} = fence(Claim),
+    SQL =
+        ~"""
+        UPDATE shigoto_jobs SET state = 'available',
+          heartbeat_at = NULL,
+          max_attempts = max_attempts + 1
+        WHERE id = $1 AND state = 'executing' AND ($2::integer IS NULL OR attempt = $2)
+        RETURNING id
+        """,
+    case query(Pool, SQL, [JobId, Attempt]) of
         #{rows := [_]} -> ok;
         #{rows := []} -> {error, lost};
         {error, _} = Err -> Err

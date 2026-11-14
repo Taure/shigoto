@@ -125,8 +125,11 @@ shigoto_sup (one_for_one)
 - **Executor.** One `shigoto_executor` per running job. It traps exits and
   runs `perform/1` in a linked process, so neither outlives the other.
   `shigoto_executor:stop/2` ends a run early (local cancel, or the heartbeat
-  finding the claim gone); the supervisor's shutdown does the same. A stopped
-  run writes nothing. Fanout jobs run unclaimed and never write to their row.
+  finding the claim gone) and writes nothing. A run the supervisor stops at
+  shutdown did not fail: it gives its claim back in one fenced write
+  (`shigoto_repo:release_job/2`, `available` with the attempt returned, the
+  snooze rule), so a deploy never uses up an attempt. Fanout jobs run
+  unclaimed and never write to their row.
 - **Notify + polling fallback.** `shigoto_notifier` LISTENs via a
   minato listener, pokes the matching queue to `poll`, and reconnects on drop;
   the timed poll loop always runs underneath it. A payload only names a queue;

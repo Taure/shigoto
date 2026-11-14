@@ -14,7 +14,13 @@ other. `stop/2` ends a run early: `shigoto:cancel/1,2` uses it for the jobs
 running on this node, and the heartbeat for the runs whose claim it finds gone
 (a cancel on another node, or a rescue). The worker process gets `shutdown`,
 and `kill` five seconds later if it traps exits and has not gone. Nothing is
-written for a stopped run.
+written for a run stopped that way.
+
+When the node stops, the executor supervisor stops the runs the queues did not
+see finish within `shutdown_timeout`. Such a run did not fail, so its claim is
+given back (`shigoto_repo:release_job/2`): the job is `available` again with
+the attempt returned, and any node runs it next. If that write does not get
+through, the row stays `executing` and the stale-job rescue takes it.
 
 A job from a fanout queue is run without a claim, by every node. Its row is not
 this node's to change, so the executor writes nothing for it: the outcome goes
@@ -67,7 +73,7 @@ or `fanout`, where every node runs it and none owns the row.
     | {snooze, pos_integer()}
     | {snoozed, pos_integer()}
     | {failed, Stored :: term(), Reported :: term()}
-    | {stopped, term()}.
+    | {stopped, cancelled | lost | {shutdown, term()}}.
 
 -doc false.
 start_link(Job, Pool, QueuePid) ->
@@ -286,6 +292,8 @@ timeout_of(Timeout, _Worker) -> Timeout.
 
 -spec concluded(run(), outcome(), map(), atom(), module() | undefined, integer()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
+concluded(claimed, {stopped, {shutdown, _Reason}}, Job, Pool, _Worker, _Duration) ->
+    released(Job, Pool);
 concluded(_Run, {stopped, Why}, Job, _Pool, _Worker, _Duration) ->
     ?LOG_NOTICE(#{
         msg => ~"shigoto_job_stopped",
@@ -302,6 +310,23 @@ concluded(_Claimed, Outcome, Job, Pool, Worker, Duration) ->
 
 stop_reported(lost, Job) -> shigoto_telemetry:job_lost(Job, stopped);
 stop_reported(_Why, _Job) -> ok.
+
+%% The node is stopping and took the run with it. The job did not fail, so
+%% the claim goes back with its attempt, in one fenced write.
+-spec released(map(), atom()) -> {error, term()}.
+released(Job, Pool) ->
+    case shigoto_repo:release_job(Pool, Job) of
+        ok ->
+            ?LOG_NOTICE(#{
+                msg => ~"shigoto_job_released",
+                why => shutdown,
+                job_id => maps:get(id, Job, undefined),
+                attempt => maps:get(attempt, Job, undefined)
+            }),
+            {error, {stopped, shutdown}};
+        {error, Reason} ->
+            unrecorded(released, Job, Reason)
+    end.
 
 -spec announced(outcome(), map(), integer()) -> ok | {snooze, pos_integer()} | {error, term()}.
 announced({completed, _Result}, Job, Duration) ->
@@ -364,7 +389,7 @@ milliseconds(Duration) ->
 
 %% The outcome was not written. `lost` is the fence doing its job; anything
 %% else is a write that failed.
--spec unrecorded(completed | snoozed | failed, map(), term()) -> {error, term()}.
+-spec unrecorded(completed | snoozed | failed | released, map(), term()) -> {error, term()}.
 unrecorded(Transition, Job, lost) ->
     ?LOG_WARNING(#{
         msg => ~"shigoto_job_transition_lost",
@@ -558,7 +583,8 @@ resolve_timeout(Worker) ->
     | {stopped, term()}.
 apply_with_timeout(Module, Function, Args, Timeout, {executor, Supervisor}) ->
     receive
-        {stop_job, Why} -> {stopped, Why}
+        {stop_job, Why} -> {stopped, Why};
+        {'EXIT', Supervisor, Reason} -> {stopped, {shutdown, Reason}}
     after 0 ->
         {Pid, Ref} = spawn_worker(Module, Function, Args, [link, monitor]),
         Applied =
@@ -573,7 +599,7 @@ apply_with_timeout(Module, Function, Args, Timeout, {executor, Supervisor}) ->
                     {stopped, Why};
                 {'EXIT', Supervisor, Reason} ->
                     ok = stop_worker(Pid, Ref),
-                    {stopped, Reason}
+                    {stopped, {shutdown, Reason}}
             after Timeout ->
                 ok = stop_worker(Pid, Ref),
                 {returned, {error, timeout}}

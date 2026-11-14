@@ -148,7 +148,11 @@ archive_after_days() ->
 notifier_config() ->
     map_setting(notifier).
 
--doc "Milliseconds to wait for in-flight jobs during shutdown. Default: 15000.".
+-doc """
+Milliseconds to wait for in-flight jobs during shutdown. Default: 15000. A job
+still running after that is stopped and its claim given back: it is
+`available` again and the interrupted run uses no attempt.
+""".
 -spec shutdown_timeout() -> pos_integer().
 shutdown_timeout() ->
     integer_setting(shutdown_timeout, 15000).

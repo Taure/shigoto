@@ -57,7 +57,8 @@ not open) has no `start`.
 claimed again, or cancelled on another node, while this run was going. Either
 the run finished and its outcome (`transition`: `completed`, `failed` or
 `snoozed`) was not written, or the heartbeat noticed first and the run was
-stopped (`transition`: `stopped`). No `completed`, `failed` or `snoozed` event
+stopped (`transition`: `stopped`), or the node was stopping and the claim it
+tried to give back was no longer its own (`transition`: `released`). No `completed`, `failed` or `snoozed` event
 fires for that run. A steady rate of it
 means jobs outlive the stale threshold (`heartbeat_interval * 2`) without a
 heartbeat.
@@ -70,6 +71,11 @@ discarded when that was its last attempt (a `discarded` event follows).
 (`reason` is the database error, cut down by `shigoto_db:reduced/1`). The row
 stays `executing` and the stale-job rescue returns it to the queue, so the job
 runs again.
+
+A run stopped because its node is stopping ends with `[shigoto, job, stop]`
+and `outcome` `stopped`, and its claim is given back: the job is `available`
+again and no attempt is used. `transition` is `released` in `lost` and
+`transition_failed` when that write did not go through.
 
 ## Queue Events
 
@@ -284,7 +290,7 @@ job_progress(Job, Progress) ->
     Meta = (job_meta(Job))#{progress => Progress},
     telemetry:execute([shigoto, job, progress], #{progress => Progress}, Meta).
 
--spec job_lost(map(), completed | failed | snoozed | stopped) -> ok.
+-spec job_lost(map(), completed | failed | snoozed | released | stopped) -> ok.
 job_lost(Job, Transition) ->
     Meta = (job_meta(Job))#{transition => Transition},
     telemetry:execute([shigoto, job, lost], #{count => 1}, Meta).
@@ -295,7 +301,7 @@ job_rescued(Job) ->
     telemetry:execute([shigoto, job, rescued], #{count => 1}, Meta),
     logger:warning(~"job rescued", Meta).
 
--spec job_transition_failed(map(), completed | failed | snoozed, term()) -> ok.
+-spec job_transition_failed(map(), completed | failed | snoozed | released, term()) -> ok.
 job_transition_failed(Job, Transition, Reason) ->
     Meta = (job_meta(Job))#{transition => Transition, reason => Reason},
     telemetry:execute([shigoto, job, transition_failed], #{count => 1}, Meta).
