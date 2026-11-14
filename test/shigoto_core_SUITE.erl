@@ -14,6 +14,8 @@
     %% Dependency cycle detection
     test_dependency_missing_ids_rejected/1,
     test_dependency_cycle_detected/1,
+    test_dependency_shared_ancestor_accepted/1,
+    test_dependency_on_a_finished_job_is_not_waited_for/1,
     test_dependency_valid_chain_accepted/1,
     test_dependency_self_reference_safe/1,
     test_dependency_multiple_parents/1,
@@ -65,6 +67,8 @@ all() ->
     [
         test_dependency_missing_ids_rejected,
         test_dependency_cycle_detected,
+        test_dependency_shared_ancestor_accepted,
+        test_dependency_on_a_finished_job_is_not_waited_for,
         test_dependency_valid_chain_accepted,
         test_dependency_self_reference_safe,
         test_dependency_multiple_parents,
@@ -133,54 +137,95 @@ test_dependency_missing_ids_rejected(_Config) ->
     ?assertMatch({error, {missing_dependencies, _}}, Result).
 
 test_dependency_cycle_detected(_Config) ->
-    %% A depends on B, B depends on A — create B first with dep on A
-    {ok, A} = shigoto_repo:insert_job(
-        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    Insert = fun(DependsOn) ->
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => #{}, depends_on => DependsOn}, #{}
+        ),
+        JobId
+    end,
+    A = Insert([]),
+    B = Insert([A]),
+    C = Insert([B]),
+    %% A job has no id until it is inserted, so nothing can depend on it yet and
+    %% inserting one cannot close a circle. Only rows written around the API can.
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET depends_on = ARRAY[$2::bigint] WHERE id = $1", [A, C]
     ),
-    AId = maps:get(id, A),
-    {ok, B} = shigoto_repo:insert_job(
+    [
+        ?assertEqual(
+            {error, dependency_cycle},
+            shigoto_repo:insert_job(
+                ?POOL,
+                #{worker => shigoto_test_worker, args => #{}, depends_on => DependsOn},
+                #{}
+            )
+        )
+     || DependsOn <- [[A], [B], [C], [A, C]]
+    ],
+    %% A job outside the circle is not held against one.
+    D = Insert([]),
+    ?assertMatch({ok, #{depends_on := [D]}}, shigoto_repo:get_job(?POOL, Insert([D]))).
+
+test_dependency_shared_ancestor_accepted(_Config) ->
+    Insert = fun(DependsOn) ->
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL, #{worker => shigoto_test_worker, args => #{}, depends_on => DependsOn}, #{}
+        ),
+        JobId
+    end,
+    A = Insert([]),
+    B = Insert([A]),
+    C = Insert([A]),
+    %% A diamond: D waits on B and C, which both wait on A.
+    D = Insert([B, C]),
+    %% A job may wait on a job and on that job's own dependency.
+    E = Insert([A, B]),
+    F = Insert([A, B, C, D, E]),
+    ?assertMatch({ok, #{depends_on := [B, C]}}, shigoto_repo:get_job(?POOL, D)),
+    ?assertMatch({ok, #{depends_on := [A, B]}}, shigoto_repo:get_job(?POOL, E)),
+    ?assertMatch({ok, #{depends_on := [A, B, C, D, E]}}, shigoto_repo:get_job(?POOL, F)),
+    Run = fun() ->
+        {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+        [ok = shigoto_repo:complete_job(?POOL, Job) || Job <- Claimed],
+        lists:sort([Id || #{id := Id} <- Claimed])
+    end,
+    ?assertEqual([[A], [B, C], [D, E], [F], []], [Run() || _ <- lists:seq(1, 5)]).
+
+test_dependency_on_a_finished_job_is_not_waited_for(_Config) ->
+    {ok, #{id := Done}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 1}}, #{}
+    ),
+    {ok, #{id := Gone}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 2}}, #{}
+    ),
+    {ok, [First, _]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertMatch(#{id := Done}, First),
+    ok = shigoto_repo:complete_job(?POOL, First, #{~"rows" => 3}),
+    ok = shigoto_repo:cancel_job(?POOL, Gone),
+    {ok, #{id := Pending}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{~"n" => 3}}, #{}
+    ),
+    {ok, Child} = shigoto_repo:insert_job(
         ?POOL,
-        #{worker => shigoto_test_worker, args => #{}, depends_on => [AId]},
+        #{
+            worker => shigoto_test_worker,
+            args => #{~"n" => 4},
+            depends_on => [Done, Gone, Pending]
+        },
         #{}
     ),
-    BId = maps:get(id, B),
-    %% Now try to insert C that depends on both A and B — B already depends on A,
-    %% so B's depends_on contains AId. C depends on [AId, BId]. B depends on AId
-    %% which is also in C's depends_on — this is a mutual dependency.
-    %% Actually that's not a cycle for C. Let me create a real cycle:
-    %% Try to make A depend on B (but A is already inserted without deps).
-    %% We can't modify A. Instead test: D depends on E, E depends on D.
-    {ok, D} = shigoto_repo:insert_job(
-        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ?assertMatch(#{depends_on := [Pending]}, Child),
+    ?assertEqual(
+        #{integer_to_binary(Done) => #{~"rows" => 3}, integer_to_binary(Gone) => null},
+        json:decode(maps:get(deps_results, Child))
     ),
-    DId = maps:get(id, D),
-    {ok, E} = shigoto_repo:insert_job(
+    {ok, #{id := Free}} = shigoto_repo:insert_job(
         ?POOL,
-        #{worker => shigoto_test_worker, args => #{}, depends_on => [DId]},
+        #{worker => shigoto_test_worker, args => #{~"n" => 5}, depends_on => [Done]},
         #{}
     ),
-    EId = maps:get(id, E),
-    %% F depends on both D and E. E depends on D. D is in F's deps, D is in E's deps.
-    %% E.depends_on contains D, and D is in F's depends_on — that's a cycle detection case.
-    Result = shigoto_repo:insert_job(
-        ?POOL,
-        #{worker => shigoto_test_worker, args => #{}, depends_on => [DId, EId]},
-        #{}
-    ),
-    %% This should detect that E depends on D, and D is also in the new job's deps
-    ?assertMatch({error, dependency_cycle}, Result),
-    %% But depending on just E (no mutual) should be fine
-    {ok, _} = shigoto_repo:insert_job(
-        ?POOL,
-        #{worker => shigoto_test_worker, args => #{}, depends_on => [EId]},
-        #{}
-    ),
-    %% And depending on just B (which depends on A, no overlap) should be fine
-    {ok, _} = shigoto_repo:insert_job(
-        ?POOL,
-        #{worker => shigoto_test_worker, args => #{}, depends_on => [BId]},
-        #{}
-    ).
+    {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([Pending, Free], lists:sort([Id || #{id := Id} <- Claimed])).
 
 test_dependency_valid_chain_accepted(_Config) ->
     {ok, A} = shigoto_repo:insert_job(

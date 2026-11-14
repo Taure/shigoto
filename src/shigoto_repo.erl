@@ -53,14 +53,24 @@ finds no row.
     debounce => undefined
 }).
 
--doc "Insert a new job. Respects worker defaults and unique constraints. Validates dependency cycles.".
+-doc """
+Insert a new job. Respects worker defaults and unique constraints.
+
+With `depends_on`, every job named must exist
+(`{error, {missing_dependencies, Ids}}` otherwise). A dependency that has
+already finished is not waited for: its result goes straight into the new
+job's `deps_results`. The jobs still waited for must not depend on each other
+in a circle, which only rows written around this API can do
+(`{error, dependency_cycle}`).
+""".
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert_job(Pool, JobParams0, Opts) ->
-    JobParams = apply_worker_defaults(JobParams0),
-    DependsOn = maps:get(depends_on, JobParams, []),
+    JobParams1 = apply_worker_defaults(JobParams0),
+    DependsOn = maps:get(depends_on, JobParams1, []),
     case validate_dependencies(Pool, DependsOn) of
-        ok ->
+        {ok, Pending, Results} ->
+            JobParams = JobParams1#{depends_on => Pending, deps_results => Results},
             case resolve_unique(JobParams, Opts) of
                 none ->
                     do_insert(Pool, JobParams, Opts, null);
@@ -877,50 +887,71 @@ fence(JobId) when is_integer(JobId) -> {JobId, null}.
 %% Internal: dependency validation
 %%----------------------------------------------------------------------
 
+-spec validate_dependencies(atom(), [integer()]) ->
+    {ok, Pending :: [integer()], Results :: #{binary() => term()}} | {error, term()}.
 validate_dependencies(_Pool, []) ->
-    ok;
+    {ok, [], #{}};
 validate_dependencies(Pool, DepIds) ->
-    %% Check that all dependency IDs exist
-    Placeholders = lists:join(~", ", [
-        <<"$", (integer_to_binary(I))/binary>>
-     || I <- lists:seq(1, length(DepIds))
-    ]),
-    SQL = iolist_to_binary([
-        ~"SELECT id, depends_on FROM shigoto_jobs WHERE id IN (",
-        Placeholders,
-        ~")"
-    ]),
-    case query(Pool, SQL, DepIds) of
+    %% The dependencies and everything they still wait for. UNION drops the
+    %% rows already seen, which also ends the walk when the rows form a circle.
+    SQL =
+        ~"""
+        WITH RECURSIVE waited(id, depends_on, state, result) AS (
+          SELECT id, depends_on, state, result FROM shigoto_jobs WHERE id = ANY($1::bigint[])
+          UNION
+          SELECT j.id, j.depends_on, j.state, j.result
+          FROM waited w JOIN shigoto_jobs j ON j.id = ANY(w.depends_on)
+        )
+        SELECT id, depends_on, state, result FROM waited
+        """,
+    case query(Pool, SQL, [DepIds]) of
         #{rows := Rows} ->
-            FoundIds = [maps:get(id, R) || R <- Rows],
-            Missing = DepIds -- FoundIds,
-            case Missing of
-                [] ->
-                    %% Check for cycles: if any dep transitively depends on us,
-                    %% we'd create a cycle. Since the new job doesn't have an ID yet,
-                    %% we check if any dep depends on any other dep (mutual deps).
-                    check_transitive_cycles(Rows, DepIds);
-                _ ->
-                    {error, {missing_dependencies, Missing}}
+            Jobs = #{Id => Row || #{id := Id} = Row <- Rows},
+            case [Id || Id <- DepIds, not is_map_key(Id, Jobs)] of
+                [] -> waited_for(DepIds, Jobs);
+                Missing -> {error, {missing_dependencies, Missing}}
             end;
         {error, _} = Err ->
             Err
     end.
 
-check_transitive_cycles(Rows, DepIds) ->
-    DepSet = sets:from_list(DepIds),
-    HasCycle = lists:any(
-        fun
-            (#{depends_on := TransDeps}) when is_list(TransDeps) ->
-                lists:any(fun(D) -> sets:is_element(D, DepSet) end, TransDeps);
-            (_) ->
-                false
-        end,
-        Rows
-    ),
-    case HasCycle of
-        true -> {error, dependency_cycle};
-        false -> ok
+waited_for(DepIds, Jobs) ->
+    Waits =
+        #{
+            Id => [Dep || Dep <- DependsOn, is_map_key(Dep, Jobs)]
+         || Id := #{depends_on := DependsOn} <- Jobs
+        },
+    case can_all_finish(Waits) of
+        false ->
+            {error, dependency_cycle};
+        true ->
+            Finished = [Id || Id <- DepIds, is_finished(maps:get(Id, Jobs))],
+            Results =
+                #{
+                    integer_to_binary(Id) => decoded_result(maps:get(Id, Jobs))
+                 || Id <- Finished
+                },
+            {ok, lists:usort(DepIds) -- Finished, Results}
+    end.
+
+is_finished(#{state := State}) ->
+    lists:member(State, [~"completed", ~"discarded", ~"cancelled"]).
+
+decoded_result(#{result := null}) -> null;
+decoded_result(#{result := Result}) when is_binary(Result) -> json:decode(Result);
+decoded_result(#{result := Result}) -> Result.
+
+%% Take away the jobs that wait for nothing until none are left. If a round
+%% finds no such job, the ones remaining wait for each other.
+-spec can_all_finish(#{integer() => [integer()]}) -> boolean().
+can_all_finish(Waits) when map_size(Waits) =:= 0 ->
+    true;
+can_all_finish(Waits) ->
+    case [Id || Id := [] <- Waits] of
+        [] ->
+            false;
+        Free ->
+            can_all_finish(#{Id => Deps -- Free || Id := Deps <- maps:without(Free, Waits)})
     end.
 
 %%----------------------------------------------------------------------
@@ -1100,8 +1131,8 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
     Insert =
         <<
             "INSERT INTO shigoto_jobs\n"
-            "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on)\n"
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n"
+            "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on, deps_results)\n"
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)\n"
             "RETURNING *"
         >>,
     case
@@ -1117,7 +1148,8 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
             TagsArr,
             BatchId,
             PartitionKey,
-            DependsOn
+            DependsOn,
+            encode_json(maps:get(deps_results, JobParams, #{}))
         ])
     of
         #{rows := [Row]} -> {ok, Row};

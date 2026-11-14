@@ -55,25 +55,37 @@ is empty, it becomes claimable.
 This means dependent jobs aren't permanently stuck if a parent fails — they
 still execute after the parent reaches a terminal state.
 
-## Cycle Detection
+A dependency that has already finished when the dependent job is inserted is
+not waited for. Its result is put into the new job's `deps_results` straight
+away, so depending on a job that completed a moment ago behaves like depending
+on one that completes a moment later.
+
+## Validation
 
 Shigoto validates dependencies on insert:
 
 - **Missing IDs**: Returns `{error, {missing_dependencies, [Id, ...]}}` if
-  any dependency ID doesn't exist.
-- **Cycles**: Returns `{error, dependency_cycle}` if the new job's dependencies
-  would create a circular dependency (e.g., A depends on B, B depends on A).
+  any dependency ID doesn't exist. A finished job that has been pruned or
+  archived no longer exists.
+- **Cycles**: A job gets its ID when it is inserted, so nothing can depend on
+  it before then and inserting a job can never close a circle. Any shape of
+  dependencies between existing jobs is accepted, including a diamond, or a job
+  that waits both on a job and on that job's own dependency:
 
-```erlang
-%% This would fail with {error, dependency_cycle}
-{ok, X} = shigoto:insert(#{worker => w, args => #{}}),
-{ok, Y} = shigoto:insert(#{worker => w, args => #{}, depends_on => [maps:get(id, X)]}),
-{error, dependency_cycle} = shigoto:insert(#{
-    worker => w,
-    args => #{},
-    depends_on => [maps:get(id, X), maps:get(id, Y)]
-}).
-```
+  ```erlang
+  {ok, A} = shigoto:insert(#{worker => w, args => #{}}),
+  {ok, B} = shigoto:insert(#{worker => w, args => #{}, depends_on => [maps:get(id, A)]}),
+  {ok, _} = shigoto:insert(#{
+      worker => w,
+      args => #{},
+      depends_on => [maps:get(id, A), maps:get(id, B)]
+  }).
+  ```
+
+  `{error, dependency_cycle}` is returned only when the jobs depended on
+  already wait for each other in a circle, which takes rows written to
+  `depends_on` around this API. A job inserted behind such a circle would never
+  run.
 
 ## Combining with Batches
 
