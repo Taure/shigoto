@@ -132,10 +132,10 @@ and reason on each node, so alert on this event rather than on the log.
 |-------|-------------|----------|
 | `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
 
-Emitted with the `shigoto_cron_lock_held_elsewhere` and
-`shigoto_stager_lock_held_elsewhere` warnings: `lock` (`cron` or `stager`) has
-been taken by something other than a shigoto pass for `consecutive_misses`
-passes in a row.
+Emitted with the `shigoto_cron_lock_held_elsewhere`,
+`shigoto_stager_lock_held_elsewhere` and `shigoto_rescuer_lock_held_elsewhere`
+warnings: `lock` (`cron`, `stager` or `rescuer`) has been taken by something
+other than a pass of this node for `consecutive_misses` passes in a row.
 
 ## Migration Events
 
@@ -396,7 +396,7 @@ batch_completed(Batch) ->
 %% Cron events
 %%----------------------------------------------------------------------
 
--spec leader_lock_unavailable(cron | stager, pos_integer()) -> ok.
+-spec leader_lock_unavailable(cron | stager | rescuer, pos_integer()) -> ok.
 leader_lock_unavailable(Lock, Misses) ->
     telemetry:execute(
         [shigoto, leader_lock, unavailable],

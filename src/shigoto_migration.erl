@@ -446,7 +446,7 @@ v7_statements() ->
         %% application's default. Nullable with no default, so adding it does
         %% not rewrite the table, and nodes on the previous version ignore it.
         ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT",
-        %% The two sweeps the queues run every rescue interval read only the
+        %% The two sweeps a node runs every rescue interval read only the
         %% jobs still waiting on a dependency and the batches still active.
         ~"""
         CREATE INDEX IF NOT EXISTS shigoto_jobs_waiting_on_idx

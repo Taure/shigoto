@@ -46,7 +46,6 @@ init({Queue, Concurrency}) ->
     Weight = maps:get(Queue, Weights, 1),
     FairQueues = shigoto_config:fair_queues(),
     Fair = lists:member(Queue, FairQueues),
-    schedule_rescue(),
     {ok,
         schedule_poll(#state{
             queue = Queue,
@@ -152,12 +151,6 @@ handle_info(
                     weight_counter = NewCounter
                 })}
     end;
-handle_info(rescue, #state{pool = Pool} = State) ->
-    _ = shigoto_repo:rescue_stale_jobs(Pool, shigoto_config:stale_after()),
-    _ = shigoto_repo:release_stuck_dependents(Pool),
-    _ = shigoto_batch:settle_finished(Pool),
-    schedule_rescue(),
-    {noreply, State};
 handle_info(
     {'DOWN', _Ref, process, Pid, _Reason}, #state{active = Active, executors = Execs} = State
 ) ->
@@ -236,9 +229,6 @@ drop_queued_polls() ->
         poll -> drop_queued_polls()
     after 0 -> ok
     end.
-
-schedule_rescue() ->
-    erlang:send_after(shigoto_config:rescue_interval(), self(), rescue).
 
 should_poll(1, _Counter) ->
     true;

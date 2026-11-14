@@ -854,7 +854,7 @@ did not see the insert. This finds what such a race left behind, and jobs
 waiting on a job that no longer exists, and does for them what the dependency
 would have done: a completed (or missing) dependency is removed and its result
 handed over; a discarded or cancelled one is followed by each waiting job's
-`on_dependency_failure`. The queues run it every `rescue_interval`.
+`on_dependency_failure`. Each node runs it every `rescue_interval`.
 
 Answers how many dependencies it resolved.
 """.

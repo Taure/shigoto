@@ -38,6 +38,9 @@ the application does with it.
     a_stale_executor_cannot_complete_a_reclaimed_job/1,
     a_superseded_run_is_stopped_at_the_next_heartbeat/1,
     a_heartbeat_keeps_a_live_job_from_rescue/1,
+    one_process_rescues_for_every_queue_of_the_node/1,
+    a_rescue_pass_waits_its_turn_in_the_cluster/1,
+    a_node_without_queues_rescues_nothing/1,
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
     every_fanout_consumer_runs_a_job/1,
@@ -122,6 +125,9 @@ all() ->
         a_stale_executor_cannot_complete_a_reclaimed_job,
         a_superseded_run_is_stopped_at_the_next_heartbeat,
         a_heartbeat_keeps_a_live_job_from_rescue,
+        one_process_rescues_for_every_queue_of_the_node,
+        a_rescue_pass_waits_its_turn_in_the_cluster,
+        a_node_without_queues_rescues_nothing,
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
         every_fanout_consumer_runs_a_job,
@@ -250,6 +256,10 @@ overrides(TestCase) when
     TestCase =:= a_slow_on_discard_does_not_hold_up_a_cancel
 ->
     #{on_discard_timeout => 1500};
+overrides(one_process_rescues_for_every_queue_of_the_node) ->
+    #{queues => [{?QUEUE, 5}, {~"second", 5}, {~"third", 5}, {~"fourth", 5}]};
+overrides(a_node_without_queues_rescues_nothing) ->
+    #{queues => []};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
@@ -1114,6 +1124,76 @@ a_module_that_is_not_a_worker_fails_the_job(_Config) ->
     Row = await(Id, ~"discarded"),
     ?assertMatch([#{~"error" := ~"{unknown_worker,<<\"lists\">>}"}], errors(Row)),
     ?assertEqual(nomatch, binary:match(maps:get(errors, Row), ~"191212121212")).
+
+%%----------------------------------------------------------------------
+%% The rescue and the sweeps
+%%----------------------------------------------------------------------
+
+one_process_rescues_for_every_queue_of_the_node(_Config) ->
+    1 = erlang:trace_pattern({shigoto_repo, rescue_stale_jobs, 2}, true, [local]),
+    _ = erlang:trace(processes, true, [call]),
+    try
+        timer:sleep(1500)
+    after
+        _ = erlang:trace(processes, false, [call]),
+        _ = erlang:trace_pattern({shigoto_repo, rescue_stale_jobs, 2}, false, [local])
+    end,
+    Callers = rescue_callers(),
+    %% Four queues at five passes each would be twenty calls from four
+    %% processes.
+    ?assertEqual([whereis(shigoto_rescuer)], lists:usort(Callers)),
+    ?assert(length(Callers) >= 3),
+    ?assert(length(Callers) =< 8).
+
+rescue_callers() ->
+    receive
+        {trace, Pid, call, {shigoto_repo, rescue_stale_jobs, _Args}} -> [Pid | rescue_callers()]
+    after 0 -> []
+    end.
+
+%% Another node's pass holds the lock for as long as it runs.
+a_rescue_pass_waits_its_turn_in_the_cluster(_Config) ->
+    Id = enqueue(~"contended"),
+    _ = performing(~"contended"),
+    Self = self(),
+    Peer = spawn_link(fun() ->
+        shigoto_db:transaction(?POOL, fun() ->
+            Self ! {locked, shigoto_repo:try_advisory_xact_lock(?POOL, shigoto_rescuer:lock_id())},
+            receive
+                pass_over -> ok
+            end
+        end),
+        Self ! unlocked
+    end),
+    receive
+        {locked, Locked} -> ?assertEqual(true, Locked)
+    after 5000 -> ct:fail(lock_not_taken)
+    end,
+    ok = node_dies(Id),
+    ok = idle(~"contended", 1000),
+    ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id)),
+    Peer ! pass_over,
+    receive
+        unlocked -> ok
+    after 5000 -> ct:fail(lock_not_released)
+    end,
+    instruct(performing(~"contended"), {return, ok}),
+    ?assertMatch(#{attempt := 2}, await(Id, ~"completed")).
+
+%% A node that runs no queue takes no part in the rescue, as before.
+a_node_without_queues_rescues_nothing(_Config) ->
+    Id = insert_row(~"shigoto_lifecycle_worker", ~"{}", 3),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        UPDATE shigoto_jobs SET state = 'executing', attempt = 1,
+          heartbeat_at = now() - interval '1 hour', attempted_at = now() - interval '1 hour'
+        WHERE id = $1
+        """,
+        [Id]
+    ),
+    timer:sleep(1000),
+    ?assertMatch(#{state := ~"executing", attempt := 1, errors := ~"[]"}, row(Id)).
 
 %%----------------------------------------------------------------------
 %% on_discard/2

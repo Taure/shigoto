@@ -133,10 +133,11 @@ reason on each node, so alert on this event rather than on the log (see the
 |-------|-------------|----------|
 | `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
 
-Emitted with the `shigoto_cron_lock_held_elsewhere` and
-`shigoto_stager_lock_held_elsewhere` warnings, when `lock` (`cron` or
-`stager`) has been taken by something other than a shigoto pass for
-`consecutive_misses` passes in a row. See "Advisory locks" in the
+Emitted with the `shigoto_cron_lock_held_elsewhere`,
+`shigoto_stager_lock_held_elsewhere` and `shigoto_rescuer_lock_held_elsewhere`
+warnings, when `lock` (`cron`, `stager` or `rescuer`) has been taken by
+something other than a pass of this node for `consecutive_misses` passes in a
+row. See "Advisory locks" in the
 [Cron](cron.md) guide.
 
 ### Migration Events

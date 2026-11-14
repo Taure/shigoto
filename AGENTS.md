@@ -94,6 +94,7 @@ shigoto_sup (one_for_one)
   ├─ shigoto_callbacks      runs on_discard/2 in processes of its own
   ├─ shigoto_executor_sup   simple_one_for_one; one process per running job
   ├─ shigoto_queue_sup      one shigoto_queue gen_server per queue
+  ├─ shigoto_rescuer        stale-job rescue + the two sweeps, one pass per node
   ├─ shigoto_cron           cron + leader election
   ├─ shigoto_pruner         hourly archive -> prune
   └─ shigoto_notifier       LISTEN/NOTIFY wake-ups (optional)
@@ -144,7 +145,7 @@ rescues jobs that are still running here.
   `notify_min_interval`, since anyone who can connect can `NOTIFY`.
 - **Batches.** `shigoto_batch` groups jobs and runs a callback worker when the
   last one ends. Counting is part of the job's own statement; `settle/2` then
-  finishes a batch with a full count, and `settle_finished/1` on the rescue
+  finishes a batch with a full count, and `settle_finished/1` on the rescuer's
   tick settles one a stopped node left `active`. A retried job is taken out of
   `discarded_jobs` (`retrying/1` in `shigoto_repo`).
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
@@ -162,7 +163,7 @@ rescues jobs that are still running here.
   each by its `on_dependency_failure` (job column, else the app default). A
   dependency already finished at insert is not waited for. Inserting cannot
   create a cycle (no id yet), so there is no cycle check. A statement only
-  sees the dependents committed before it began, so the rescue tick also runs
+  sees the dependents committed before it began, so the rescuer's pass also runs
   `shigoto_repo:release_stuck_dependents/1` for jobs waiting on a job that has
   ended or is gone.
 - **Context propagation.** `shigoto_propagator` is a behaviour (`inject/0`,
@@ -173,8 +174,12 @@ rescues jobs that are still running here.
   `perform/1` process, and is in the metadata of `[shigoto, job, start|stop|
   exception]`. Bounded (32 entries, 4096 bytes); a propagator that raises or
   oversteps is logged and never fails an insert or a job.
-- **Stale rescue.** Heartbeats + a per-queue `rescue` tick (`rescue_interval`)
-  take back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
+- **Stale rescue.** Heartbeats + `shigoto_rescuer`, one process per node whose
+  pass (every `rescue_interval`, under an advisory try-lock so nodes never
+  pass at once; a node without queues does not pass) runs the rescue, the
+  stuck-dependents sweep and the batch sweep. The lock is held by a process
+  of its own: the statements must stay in their own transactions. It takes
+  back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
   claiming counts as the first heartbeat). A rescued job is re-queued, or
   discarded at `max_attempts` like a failed last attempt, so a job that kills
   its node cannot loop. Heartbeats and outcomes are fenced on `(id, attempt)`:

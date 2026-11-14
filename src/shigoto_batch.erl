@@ -46,7 +46,7 @@ the counts never miss a job that ended. `settle/2` then finishes a batch whose
 count is full: in one transaction it moves the batch out of `active` and
 inserts the callback job, so neither happens without the other. If the node
 stops between the count and the settling, the batch is still `active` with a
-full count, and `settle_finished/1`, which the queues run every
+full count, and `settle_finished/1`, which a node runs every
 `rescue_interval`, settles it.
 
 A job that is retried (`shigoto:retry/1`, `shigoto:retry_by/1`) leaves the

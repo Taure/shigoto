@@ -1,7 +1,8 @@
 -module(shigoto_sup).
 -moduledoc """
-Top-level supervisor for Shigoto. Starts the heartbeat, the executor and
-queue supervisors, the cron scheduler, the pruner, and the optional
+Top-level supervisor for Shigoto. Starts the heartbeat, the `on_discard/2`
+runner, the executor and queue supervisors, the rescuer, the cron scheduler,
+the pruner, and the optional
 LISTEN/NOTIFY notifier plus its due-job stager.
 
 Children stop in the reverse of the order they start in. The heartbeat starts
@@ -63,6 +64,11 @@ init(Migrated) ->
         ] ++
             migrator(Migrated) ++
             [
+                #{
+                    id => shigoto_rescuer,
+                    start => {shigoto_rescuer, start_link, []},
+                    type => worker
+                },
                 #{
                     id => shigoto_cron,
                     start => {shigoto_cron, start_link, []},
