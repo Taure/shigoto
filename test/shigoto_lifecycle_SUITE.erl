@@ -21,6 +21,7 @@ the application does with it.
     a_job_out_of_attempts_is_discarded/1,
     a_crash_in_perform_is_recorded_without_its_args/1,
     a_killed_worker_process_is_a_failure/1,
+    a_perform_that_returns_nonsense_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
     cancelling_a_running_job_stops_its_worker/1,
     a_cancel_from_another_node_stops_the_worker/1,
@@ -70,6 +71,7 @@ all() ->
         a_job_out_of_attempts_is_discarded,
         a_crash_in_perform_is_recorded_without_its_args,
         a_killed_worker_process_is_a_failure,
+        a_perform_that_returns_nonsense_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
         cancelling_a_running_job_stops_its_worker,
         a_cancel_from_another_node_stops_the_worker,
@@ -262,6 +264,15 @@ a_killed_worker_process_is_a_failure(_Config) ->
     Failed = await(Id, ~"retryable"),
     ?assertMatch([#{~"error" := ~"killed"}], errors(Failed)),
     instruct(performing(~"killed"), {return, ok}),
+    _ = await(Id, ~"completed").
+
+a_perform_that_returns_nonsense_is_a_failure(_Config) ->
+    Id = enqueue(~"nonsense"),
+    instruct(performing(~"nonsense"), {return, {done, ~"191212121212"}}),
+    Failed = await(Id, ~"retryable"),
+    ?assertMatch([#{~"error" := <<"error:function_clause", _/binary>>}], errors(Failed)),
+    ?assertEqual(nomatch, binary:match(maps:get(errors, Failed), ~"191212121212")),
+    instruct(performing(~"nonsense"), {return, ok}),
     _ = await(Id, ~"completed").
 
 %%----------------------------------------------------------------------

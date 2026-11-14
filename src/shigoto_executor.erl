@@ -192,20 +192,23 @@ supervisor() ->
 -spec outcome(map(), module(), timeout() | worker_timeout, caller()) -> outcome().
 outcome(Job, Worker, Timeout, Caller) ->
     try
-        run_with_resilience(
-            Job, Worker, resolve_args(Job), timeout_of(Timeout, Worker), Caller
+        returned(
+            run_with_resilience(
+                Job, Worker, resolve_args(Job), timeout_of(Timeout, Worker), Caller
+            )
         )
-    of
-        ok -> {completed, null};
-        {ok, Result} -> {completed, Result};
-        {snooze, Seconds} -> {snooze, Seconds};
-        {snoozed, Seconds} -> {snoozed, Seconds};
-        {error, Reason} -> {failed, Reason, Reason};
-        Other -> {failed, {bad_return_value, Other}, {bad_return_value, Other}}
     catch
         throw:{?MODULE, stopped, Why} -> {stopped, Why};
         Class:Reason:Stack -> {failed, {Class, Reason, Stack}, {Class, Reason}}
     end.
+
+%% Called inside the try, so a perform/1 that returns something else fails the
+%% job with function_clause instead of taking the executor down.
+returned(ok) -> {completed, null};
+returned({ok, Result}) -> {completed, Result};
+returned({snooze, Seconds}) -> {snooze, Seconds};
+returned({snoozed, Seconds}) -> {snoozed, Seconds};
+returned({error, Reason}) -> {failed, Reason, Reason}.
 
 timeout_of(worker_timeout, Worker) -> resolve_timeout(Worker);
 timeout_of(Timeout, _Worker) -> Timeout.
