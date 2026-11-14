@@ -337,35 +337,9 @@ unrecorded(Transition, Job, Reason) ->
 %%----------------------------------------------------------------------
 
 run_with_resilience(Job, Worker, Args, Timeout, Caller) ->
-    shigoto_resilience:ensure_worker_primitives(Worker),
-    case shigoto_resilience:check_load(Job) of
-        {snooze, _} = Snooze ->
-            Snooze;
-        ok ->
-            case shigoto_resilience:check_rate_limit(Worker, Job) of
-                {snooze, _} = Snooze ->
-                    Snooze;
-                ok ->
-                    case shigoto_resilience:check_global_concurrency(Worker, Job) of
-                        {snooze, Seconds} ->
-                            %% This gate has already put the job back itself.
-                            {snoozed, Seconds};
-                        ok ->
-                            case shigoto_resilience:check_bulkhead(Worker, Job) of
-                                {snooze, _} = Snooze ->
-                                    Snooze;
-                                ok ->
-                                    case shigoto_resilience:check_circuit(Worker, Job) of
-                                        {snooze, _} = Snooze ->
-                                            Snooze;
-                                        ok ->
-                                            run_middleware_chain(
-                                                Job, Worker, Args, Timeout, Caller
-                                            )
-                                    end
-                            end
-                    end
-            end
+    case shigoto_resilience:admit(Worker, Job) of
+        ok -> run_middleware_chain(Job, Worker, Args, Timeout, Caller);
+        Snooze -> Snooze
     end.
 
 -doc """

@@ -26,9 +26,20 @@ all queues. This is separate from per-queue concurrency.
 
 System-level CoDel-based load shedding can be enabled via config. Low-priority
 jobs are shed first when the system is overloaded.
+
+## A gate that cannot answer
+
+`admit/2` runs the gates in order. A gate that fails to answer, because its
+seki primitive is missing, a worker callback raised, the database refused the
+global concurrency count or its advisory lock stayed taken, does not admit the
+job: the job is snoozed for 5 seconds, `shigoto_resilience_gate_failed` is
+logged and `[shigoto, resilience, gate_failed]` is emitted. A snooze is not an
+attempt, so a job behind a gate that stays broken waits rather than being
+discarded; alert on the event.
 """.
 
 -export([
+    admit/2,
     check_rate_limit/2,
     check_bulkhead/2,
     release_bulkhead/1,
@@ -45,6 +56,63 @@ jobs are shed first when the system is overloaded.
 
 -define(INIT_TABLE, shigoto_resilience_init).
 -define(GLOBAL_CONCURRENCY_SNOOZE, 5).
+-define(GATE_FAILED_SNOOZE, 5).
+
+-doc """
+Ask every gate whether `Worker` may run `Job` now.
+
+`{snooze, Seconds}` means the job has to be put back for that long;
+`{snoozed, Seconds}` that the gate already did so (the global concurrency
+check, inside its own transaction).
+""".
+-spec admit(module(), map()) -> ok | {snooze, pos_integer()} | {snoozed, pos_integer()}.
+admit(Worker, Job) ->
+    admitted(
+        [setup, load, rate_limit, global_concurrency, bulkhead, circuit], Worker, Job
+    ).
+
+admitted([], _Worker, _Job) ->
+    ok;
+admitted([Gate | Gates], Worker, Job) ->
+    case asked(Gate, Worker, Job) of
+        ok -> admitted(Gates, Worker, Job);
+        Snooze -> Snooze
+    end.
+
+asked(Gate, Worker, Job) ->
+    try
+        checked(Gate, Worker, Job)
+    catch
+        Class:Reason -> gate_failed(Gate, Worker, shigoto_error:shape({Class, Reason}))
+    end.
+
+checked(setup, Worker, _Job) ->
+    ensure_worker_primitives(Worker);
+checked(load, _Worker, Job) ->
+    check_load(Job);
+checked(rate_limit, Worker, Job) ->
+    check_rate_limit(Worker, Job);
+checked(global_concurrency, Worker, Job) ->
+    case check_global_concurrency(Worker, Job) of
+        {snooze, Seconds} -> {snoozed, Seconds};
+        Answer -> Answer
+    end;
+checked(bulkhead, Worker, Job) ->
+    check_bulkhead(Worker, Job);
+checked(circuit, Worker, Job) ->
+    check_circuit(Worker, Job).
+
+-spec gate_failed(atom(), module(), term()) -> {snooze, pos_integer()}.
+gate_failed(Gate, Worker, Reason) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_resilience_gate_failed",
+        gate => Gate,
+        worker => Worker,
+        reason => Reason,
+        action => ~"the job is snoozed; a gate that cannot answer does not admit"
+    }),
+    shigoto_telemetry:resilience_gate_failed(Worker, Gate, Reason),
+    {snooze, ?GATE_FAILED_SNOOZE}.
 
 -doc """
 Create the table that remembers which workers have their seki primitives. The
@@ -160,8 +228,14 @@ observes the reduced count. That makes a burst of concurrently claimed jobs snoo
 one at a time until exactly `global_concurrency/0` remain running, instead of all
 snoozing together and livelocking.
 
-Returns `ok` or `{snooze, Seconds}`. Fails open (`ok`) on any database error, so a
-transient DB problem never turns the check into a job failure.
+Returns `ok`, or `{snooze, Seconds}` once it has put the job back.
+
+It fails closed. When the count cannot be made, or the advisory lock is not
+free within `shigoto_config:advisory_lock_timeout/0` (anything in the database
+can hold it), the job is not admitted: this raises
+`error({shigoto_resilience, Reason})`, which `admit/2` turns into a snooze and
+`[shigoto, resilience, gate_failed]`. The cap is a promise about what runs at
+once, and a check that cannot count must not let everything through.
 """.
 -spec check_global_concurrency(module(), map()) -> ok | {snooze, pos_integer()}.
 check_global_concurrency(Worker, Job = #{}) ->
@@ -243,33 +317,36 @@ setup_load_shedder() ->
 %%----------------------------------------------------------------------
 
 admit_global(Pool, WorkerBin, #{id := JobId} = Job, MaxGlobal, LockKey) ->
-    try
-        shigoto_db:transaction(Pool, fun() ->
-            _ = shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-            CountSQL =
-                ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
-            case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
-                #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
-                    _ = shigoto_repo:snooze_job(Pool, Job, ?GLOBAL_CONCURRENCY_SNOOZE),
-                    {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
-                _ ->
-                    ok
-            end
-        end)
-    of
+    Answer =
+        try
+            shigoto_db:transaction(Pool, fun() ->
+                case shigoto_lock:acquire_xact(Pool, [LockKey]) of
+                    ok -> counted(Pool, WorkerBin, JobId, Job, MaxGlobal);
+                    {error, Reason} -> {failed, shigoto_db:reduced(Reason)}
+                end
+            end)
+        catch
+            Class:Reason -> {failed, shigoto_error:shape({Class, Reason})}
+        end,
+    case Answer of
+        ok -> ok;
         {snooze, _} = Snooze -> Snooze;
-        _ -> ok
-    catch
-        Class:Reason:Stack ->
-            ?LOG_WARNING(#{
-                msg => ~"global concurrency check failed, admitting job",
-                worker => WorkerBin,
-                job_id => JobId,
-                class => Class,
-                reason => Reason,
-                stacktrace => Stack
-            }),
-            ok
+        {failed, Why} -> error({?MODULE, Why})
+    end.
+
+counted(Pool, WorkerBin, JobId, Job, MaxGlobal) ->
+    CountSQL =
+        ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
+    case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
+        #{rows := [#{count := Others}]} when is_integer(Others), Others >= MaxGlobal ->
+            case shigoto_repo:snooze_job(Pool, Job, ?GLOBAL_CONCURRENCY_SNOOZE) of
+                ok -> {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
+                {error, Reason} -> {failed, shigoto_db:reduced(Reason)}
+            end;
+        #{rows := [#{count := Others}]} when is_integer(Others) ->
+            ok;
+        {error, Reason} ->
+            {failed, shigoto_db:reduced(Reason)}
     end.
 
 do_ensure(Worker) ->

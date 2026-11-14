@@ -78,6 +78,14 @@ after a late migration and one of them fails to start (it is also logged as
 | `[shigoto, resilience, circuit_open]` | `count` | worker |
 | `[shigoto, resilience, bulkhead_full]` | `count` | worker |
 | `[shigoto, resilience, load_shed]` | `count` | priority |
+| `[shigoto, resilience, gate_failed]` | `count` | worker, gate, reason |
+
+`gate_failed` fires when a gate could not be checked: its seki primitive is
+missing, a worker callback raised, the database refused the global concurrency
+count, or the advisory lock for it was not free within
+`advisory_lock_timeout` (`reason` is `lock_timeout`). `gate` is `rate_limit`,
+`bulkhead`, `circuit`, `global_concurrency`, `load` or `setup`. The job is
+snoozed, not run: a gate that cannot answer does not admit.
 
 ## Batch Events
 
@@ -153,6 +161,7 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     resilience_circuit_open/1,
     resilience_bulkhead_full/1,
     resilience_load_shed/1,
+    resilience_gate_failed/3,
     %% Batch events
     batch_completed/1,
     %% Cron events
@@ -305,6 +314,14 @@ resilience_load_shed(Priority) ->
         [shigoto, resilience, load_shed],
         #{count => 1},
         #{priority => Priority, domain => [shigoto]}
+    ).
+
+-spec resilience_gate_failed(module(), atom(), term()) -> ok.
+resilience_gate_failed(Worker, Gate, Reason) ->
+    telemetry:execute(
+        [shigoto, resilience, gate_failed],
+        #{count => 1},
+        #{worker => Worker, gate => Gate, reason => Reason, domain => [shigoto]}
     ).
 
 %%----------------------------------------------------------------------

@@ -29,6 +29,8 @@ Configuration access for Shigoto. Reads from application env.
     encryption_write_format/0,
     encryption_read_formats/0,
     require_encrypted/0,
+    instance/0,
+    advisory_lock_timeout/0,
     fanout_queues/0,
     check/0
 ]).
@@ -243,6 +245,33 @@ require_encrypted() ->
     application:get_env(shigoto, require_encrypted, false) =:= true.
 
 -doc """
+The name of this installation. Default: `undefined`.
+
+With a name, the advisory locks shigoto takes and the `NOTIFY` channel it uses
+are its own, so two installations in one database (two schemas) do not share
+them. Lower-case letters, digits and `_`, at most 32 bytes. Every node of one
+installation has to name the same instance: a node with a name and one without
+do not exclude each other.
+""".
+-spec instance() -> binary() | undefined.
+instance() ->
+    case application:get_env(shigoto, instance, undefined) of
+        Instance when is_binary(Instance) -> Instance;
+        _Unnamed -> undefined
+    end.
+
+-doc """
+Milliseconds to wait for an advisory lock another session holds before giving
+up. Default: 5000.
+""".
+-spec advisory_lock_timeout() -> non_neg_integer().
+advisory_lock_timeout() ->
+    case application:get_env(shigoto, advisory_lock_timeout, 5000) of
+        Ms when is_integer(Ms), Ms >= 0 -> Ms;
+        _Invalid -> 5000
+    end.
+
+-doc """
 Check the settings that are dangerous to get wrong, before anything starts.
 
 Answers `{error, {shigoto_config, Reason}}` for the first problem. `Reason`
@@ -254,7 +283,9 @@ check() ->
         ok = checked(shigoto_crypto:check_keys()),
         _ = encryption_write_format(),
         ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
-        ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false)))
+        ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
+        ok = checked(instance_checked(setting(instance, undefined))),
+        ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000)))
     catch
         error:{shigoto_config, Reason} -> {error, {shigoto_config, Reason}}
     end.
@@ -277,3 +308,16 @@ read_formats_checked(Formats) ->
 
 boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
 boolean_checked(Setting, Value) -> {error, {not_a_boolean, Setting, Value}}.
+
+instance_checked(undefined) ->
+    ok;
+instance_checked(Instance) when is_binary(Instance) ->
+    case re:run(Instance, ~"^[a-z0-9_]{1,32}$", [dollar_endonly, {capture, none}]) of
+        match -> ok;
+        nomatch -> {error, {invalid_instance, Instance}}
+    end;
+instance_checked(Instance) ->
+    {error, {invalid_instance, Instance}}.
+
+interval_checked(_Setting, Ms) when is_integer(Ms), Ms >= 0 -> ok;
+interval_checked(Setting, Ms) -> {error, {not_milliseconds, Setting, Ms}}.

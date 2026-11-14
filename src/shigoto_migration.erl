@@ -20,7 +20,10 @@ Create or update the shigoto tables.
 
 Runs in one transaction that first takes an advisory lock, so nodes booting at
 the same time migrate one after the other rather than racing on
-`CREATE ... IF NOT EXISTS`. The last statement records the schema version as
+`CREATE ... IF NOT EXISTS`. The lock is waited for at most
+`shigoto_config:advisory_lock_timeout/0` (`{error, lock_timeout}` after that,
+which the boot and `m:shigoto_migrator` retry), since any session in the
+database can hold it. The last statement records the schema version as
 the comment on `shigoto_jobs` (`shigoto 7`), replacing any comment set there.
 A schema that already records this version or a newer one (written by a newer
 shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
@@ -80,7 +83,7 @@ locked(Pool) ->
         shigoto_db:transaction(Pool, fun() ->
             %% The advisory lock first: lock_timeout would also cut short the
             %% wait for another node's migration.
-            answered(shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)", [?LOCK_ID])),
+            answered(shigoto_lock:acquire_xact(Pool, [?LOCK_ID])),
             answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '500ms'", [])),
             case current(Pool) of
                 true ->
@@ -98,6 +101,7 @@ locked(Pool) ->
             end
         end)
     catch
+        throw:{?MODULE, lock_timeout} -> {error, lock_timeout};
         throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
         throw:{?MODULE, Reason} -> {error, shigoto_db:reduced(Reason)};
         error:{shigoto_db, Reason} -> {error, Reason}

@@ -875,14 +875,13 @@ current_minute(Pool) ->
 Take a transaction-scoped advisory lock without waiting.
 
 `true` when this transaction holds the lock, `false` when another one does. Call
-it inside `shigoto_db:transaction/2`: the lock is released when that ends.
+it inside `shigoto_db:transaction/2`: the lock is released when that ends. The
+key is this installation's own when an `instance` is configured
+(`m:shigoto_lock`).
 """.
 -spec try_advisory_xact_lock(atom(), integer()) -> boolean() | {error, term()}.
 try_advisory_xact_lock(Pool, Key) ->
-    case query(Pool, ~"SELECT pg_try_advisory_xact_lock($1) AS locked", [Key]) of
-        #{rows := [#{locked := Locked}]} -> Locked;
-        {error, _} = Err -> Err
-    end.
+    shigoto_lock:try_xact(Pool, Key).
 
 %%----------------------------------------------------------------------
 %% Internal: the dependents of a job that failed
@@ -1094,19 +1093,30 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-    UniqueKey = build_unique_key(UniqueOpts, Worker, Args, Queue),
-    LockKey = erlang:phash2(UniqueKey),
+    %% One key per configured encryption key, the current one first. The job
+    %% is stored under the current one and looked for under all of them, so a
+    %% job inserted before a key rotation still counts as the duplicate it is.
+    [UniqueKey | _] = UniqueKeys = build_unique_keys(UniqueOpts, Worker, Args, Queue),
+    LockKeys = [erlang:phash2(Key) || Key <- UniqueKeys],
     shigoto_db:transaction(Pool, fun() ->
-        _ = query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-        case find_existing_job(Pool, UniqueOpts, UniqueKey) of
-            {ok, Existing} ->
-                maybe_replace(Pool, Existing, JobParams, UniqueOpts);
-            not_found ->
-                do_insert(Pool, JobParams, Opts, UniqueKey)
+        case shigoto_lock:acquire_xact(Pool, LockKeys) of
+            ok ->
+                case find_existing_job(Pool, UniqueOpts, UniqueKeys) of
+                    {ok, Existing} ->
+                        maybe_replace(Pool, Existing, JobParams, UniqueOpts);
+                    not_found ->
+                        do_insert(Pool, JobParams, Opts, UniqueKey);
+                    {error, _} = Err ->
+                        Err
+                end;
+            {error, lock_timeout} ->
+                {error, {lock_timeout, unique}};
+            {error, Reason} ->
+                {error, shigoto_db:reduced(Reason)}
         end
     end).
 
-build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
+build_unique_keys(#{keys := Keys}, Worker, Args, Queue) ->
     Parts = lists:map(
         fun
             (worker) -> Worker;
@@ -1115,34 +1125,35 @@ build_unique_key(#{keys := Keys}, Worker, Args, Queue) ->
         end,
         lists:sort(Keys)
     ),
-    shigoto_crypto:unique_key(iolist_to_binary(lists:join(~":", Parts))).
+    shigoto_crypto:unique_keys(iolist_to_binary(lists:join(~":", Parts))).
 
-find_existing_job(Pool, #{states := States, period := Period}, UniqueKey) ->
+find_existing_job(Pool, #{states := States, period := Period}, UniqueKeys) ->
     StatesClause = states_in_clause(States),
     {SQL, Params} =
         case Period of
             infinity ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey]
+                    [UniqueKeys]
                 };
             Secs ->
                 {
                     iolist_to_binary([
-                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = $1 AND state IN (",
+                        ~"SELECT * FROM shigoto_jobs WHERE unique_key = ANY($1::text[]) AND state IN (",
                         StatesClause,
                         ~") AND inserted_at >= now() - make_interval(secs => $2) ORDER BY id ASC LIMIT 1"
                     ]),
-                    [UniqueKey, Secs]
+                    [UniqueKeys, Secs]
                 }
         end,
     case query(Pool, SQL, Params) of
         #{rows := [Row]} -> {ok, Row};
-        #{rows := []} -> not_found
+        #{rows := []} -> not_found;
+        {error, _} = Err -> Err
     end.
 
 states_in_clause(States) ->
