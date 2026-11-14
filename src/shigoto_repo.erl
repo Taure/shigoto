@@ -385,6 +385,9 @@ cancel_job(Pool, JobId) ->
 Cancel available or retryable jobs matching a pattern. Filters: `worker`,
 `queue`, `tags`, `args`, `state`.
 
+Like `cancel_job/2`, it releases the jobs that depend on a cancelled one and
+counts each cancelled job in its batch. Answers how many jobs were cancelled.
+
 With an encryption key configured an `args` filter answers
 `{error, args_filter_unsupported_with_encryption}`: stored args are ciphertext,
 so it would match nothing.
@@ -411,7 +414,22 @@ cancel_matching(Pool, Filters) ->
     SQL = iolist_to_binary([
         ~"WITH done AS (UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
         WhereSQL,
-        ~" RETURNING batch_id) SELECT batch_id, count(*) AS jobs FROM done GROUP BY batch_id"
+        ~"""
+         RETURNING id, result, batch_id
+        ), finished AS (
+          SELECT array_agg(id) AS ids, jsonb_object_agg(id::text, result) AS results FROM done
+        ), dependents AS (
+          UPDATE shigoto_jobs d
+          SET depends_on = ARRAY(
+                SELECT dep FROM unnest(d.depends_on) AS dep WHERE dep <> ALL (finished.ids)
+              ),
+              deps_results = d.deps_results || finished.results
+          FROM finished
+          WHERE d.depends_on && finished.ids AND d.depends_on <> '{}'
+          AND d.id <> ALL (finished.ids)
+        )
+        SELECT batch_id, count(*) AS jobs FROM done GROUP BY batch_id
+        """
     ]),
     case query(Pool, SQL, Params) of
         #{rows := Rows} ->

@@ -54,6 +54,7 @@
     test_discard_leaves_a_finished_job_alone/1,
     test_concurrent_claim_no_double_execute/1,
     test_cancel_by_no_match/1,
+    test_cancel_by_releases_dependents/1,
     test_insert_minimal_params/1,
     test_debounce_resets_scheduled_at/1
 ]).
@@ -98,6 +99,7 @@ all() ->
         test_discard_leaves_a_finished_job_alone,
         test_concurrent_claim_no_double_execute,
         test_cancel_by_no_match,
+        test_cancel_by_releases_dependents,
         test_insert_minimal_params,
         test_debounce_resets_scheduled_at
     ].
@@ -709,6 +711,35 @@ test_cancel_by_no_match(_Config) ->
     ),
     %% Cancel by nonexistent worker
     {ok, 0} = shigoto_repo:cancel_by(?POOL, #{worker => nonexistent_worker}).
+
+test_cancel_by_releases_dependents(_Config) ->
+    Insert = fun(Params) ->
+        {ok, #{id := JobId}} = shigoto_repo:insert_job(
+            ?POOL, Params#{worker => shigoto_test_worker}, #{}
+        ),
+        JobId
+    end,
+    First = Insert(#{args => #{~"n" => 1}, tags => [~"doomed"]}),
+    Second = Insert(#{args => #{~"n" => 2}, tags => [~"doomed"]}),
+    Kept = Insert(#{args => #{~"n" => 3}}),
+    %% Waits on both cancelled jobs, and on one that is not cancelled.
+    Child = Insert(#{args => #{~"n" => 4}, depends_on => [First, Second]}),
+    Waiting = Insert(#{args => #{~"n" => 5}, depends_on => [First, Kept]}),
+    %% Cancelled in the same statement as the job it waits on.
+    Doomed = Insert(#{args => #{~"n" => 6}, depends_on => [First], tags => [~"doomed"]}),
+    ?assertEqual({ok, 3}, shigoto_repo:cancel_by(?POOL, #{tags => [~"doomed"]})),
+    [
+        ?assertMatch({ok, #{state := ~"cancelled"}}, shigoto_repo:get_job(?POOL, Id))
+     || Id <- [First, Second, Doomed]
+    ],
+    ?assertMatch(
+        {ok, #{state := ~"available", depends_on := []}}, shigoto_repo:get_job(?POOL, Child)
+    ),
+    ?assertMatch(
+        {ok, #{state := ~"available", depends_on := [Kept]}}, shigoto_repo:get_job(?POOL, Waiting)
+    ),
+    {ok, Claimed} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([Kept, Child], lists:sort([Id || #{id := Id} <- Claimed])).
 
 test_insert_minimal_params(_Config) ->
     {ok, Job} = shigoto_repo:insert_job(
