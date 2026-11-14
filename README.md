@@ -269,6 +269,7 @@ shigoto_sup (one_for_one)
 - [Telemetry](guides/telemetry.md)
 - [Context Propagation](guides/context-propagation.md)
 - [Testing](guides/testing.md)
+- [Upgrading from 1.10](guides/upgrading.md)
 
 ## Ecosystem
 

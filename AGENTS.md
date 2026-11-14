@@ -41,7 +41,7 @@ port without Erlang-idiom adaptation.
 
 ```bash
 rebar3 compile
-docker compose up -d        # Postgres 16 on :5556 (db shigoto_test, pw root)
+docker compose up -d        # Postgres 16 on :5556 (db shigoto_test, pw root); SHIGOTO_PG_VERSION picks another
 rebar3 eunit                # shigoto_cron_parser_tests
 rebar3 ct                   # CT suites, incl. the lifecycle suite on the real app (needs DB)
 rebar3 dialyzer
@@ -215,7 +215,8 @@ shigoto_sup (one_for_one)
 
 `test/` holds the CT suites (`shigoto_core_SUITE`, `shigoto_features_SUITE`,
 `shigoto_integration_SUITE`, `shigoto_lifecycle_SUITE`, `shigoto_boot_SUITE`,
-`shigoto_cron_SUITE`, `shigoto_kura_SUITE`), a bench suite
+`shigoto_cron_SUITE`, `shigoto_kura_SUITE`, `shigoto_security_SUITE`,
+`shigoto_cluster_SUITE`), a bench suite
 (`shigoto_bench_SUITE`), the eunit modules, and small `*_worker.erl` fixtures.
 Add or update tests alongside every change. Use `shigoto:drain_queue/1,2` for
 deterministic synchronous processing in tests. Keep the fixture workers minimal.
@@ -228,6 +229,19 @@ and only inserts a job and watches what happens to it. A change to how a job
 moves between states needs a case there, written to fail first.
 `shigoto_lifecycle_worker` reports each run to the test process and does what
 it is told (`return`, `crash`, `die`), so a case controls a job from outside.
+It also holds the cases that make PostgreSQL refuse a write (`refusing/2`, a
+trigger that raises) or drop every connection.
+
+`shigoto_cluster_SUITE` starts a second node with `peer`. The two share only
+the database, as two shigoto nodes do, so its cases read what happened from
+the rows: every job claimed once, a job whose node died run again elsewhere, a
+cancel reaching the node that runs the job, one cron job per minute.
+
+CI runs `rebar3 ct` on PostgreSQL 14 to 18 (`postgres` job in ci.yml), and a
+release needs every one of them green. Locally:
+`SHIGOTO_PG_VERSION=18 docker compose up -d --wait`. The `pgbouncer` compose
+profile puts PgBouncer in transaction mode on :5557; the lifecycle suite runs
+through it with `SHIGOTO_TEST_DB_PORT=5557 SHIGOTO_TEST_LISTEN_PORT=5556`.
 
 ## Git and PRs
 
