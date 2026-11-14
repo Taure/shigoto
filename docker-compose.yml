@@ -1,10 +1,15 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:${SHIGOTO_PG_VERSION:-16}
     ports:
       - "5556:5432"
     environment:
       POSTGRES_DB: shigoto_test
       POSTGRES_PASSWORD: root
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "shigoto_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 60

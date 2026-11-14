@@ -27,8 +27,32 @@ jobs:
       enable-summary: true
       extra-services-compose: 'docker-compose.ci.yml'
 
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '17', '18']
+    env:
+      SHIGOTO_PG_VERSION: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: Taure/erlang-ci@v2.1.7
+        with:
+          version-file: '.tool-versions'
+      - name: Start PostgreSQL ${{ matrix.postgres }}
+        run: docker compose -f docker-compose.ci.yml up -d --wait
+      - name: Common Test
+        run: rebar3 ct
+
   release:
-    needs: ci
+    needs: [ci, postgres]
     if: ${{ github.event_name == 'push' }}
     uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.7
     permissions:
