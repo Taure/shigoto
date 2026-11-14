@@ -138,6 +138,15 @@ and the other nodes still run it.
 `max_attempts`, `backoff/2` and the stale-job rescue do not apply to fanout
 jobs.
 
+A fanout job never ends, so nothing can wait for it:
+
+- It cannot be part of a batch. `shigoto:insert/1,2` and `insert_all/1,2`
+  answer `{error, {fanout_job_in_batch, Queue}}` on a node that has the queue
+  in `fanout_queues`.
+- `depends_on` is not for fanout jobs either: a fanout job runs without
+  waiting for the jobs it names, and a job that names a fanout job waits for
+  ever.
+
 ## Cleanup
 
 Fanout jobs stay in `available` state since no node claims them. The

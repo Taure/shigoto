@@ -71,6 +71,7 @@ The steps for encryption are described in full in
 | `insert_all/1,2` with a unique worker | inserted duplicates | inserts each unique job once, in one transaction; a duplicate is answered as the job already there. Pass `unique => false` to insert duplicates |
 | A worker with `rate_limit/0` or `concurrency/0` when seki is not running | ran ungated | does not run; the job is snoozed, and after `unrunnable_snooze_limit` (20) snoozes in a row its attempt fails with `gate_failed` |
 | `{error, {Tag, X}}` returned from `perform/1` | recorded as `Tag:X`, like an exception | recorded as the term, `{Tag,X}`, also for `{error, {error, X}}`; only what was raised is `Class:Reason` |
+| A job with `batch` for a fanout queue | inserted; the batch never finished | refused: `{error, {fanout_job_in_batch, Queue}}` |
 | `errors` of a job that was put back | | has an entry per time, with `snoozed`; an entry without it is a failed attempt |
 | `shigoto_crypto:decrypt/1` of a frame that does not open | answered the ciphertext | raises `{shigoto_crypto, decrypt_failed}` |
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |

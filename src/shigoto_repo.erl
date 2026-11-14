@@ -69,6 +69,10 @@ job's `deps_results`. Any dependencies between existing jobs are accepted: a
 job has no id until it is inserted, so nothing can depend on it yet and an
 insert cannot close a circle.
 
+A job with `batch` for a queue this node has in `fanout_queues` is refused
+with `{error, {fanout_job_in_batch, Queue}}`: no node ends a fanout job, so
+the batch would never finish.
+
 `on_dependency_failure` says what the job does when a job it waits on is
 discarded or cancelled: `run` without it, or be `cancel`led or `discard`ed in
 turn. Left out, `shigoto_config:on_dependency_failure/0` decides when the
@@ -81,9 +85,9 @@ insert_job(Pool, JobParams0, Opts) ->
     JobParams1 = shigoto_propagator:stamped(
         apply_worker_defaults(JobParams0), shigoto_propagator:injected()
     ),
-    case stated_policy(JobParams1) of
+    case insertable(JobParams1, Opts) of
         {error, _} = Invalid -> Invalid;
-        {ok, _Policy} -> insert_validated(Pool, JobParams1, Opts)
+        ok -> insert_validated(Pool, JobParams1, Opts)
     end.
 
 insert_validated(Pool, JobParams1, Opts) ->
@@ -133,7 +137,7 @@ placed_all(_Pool, [], _Opts) ->
 placed_all(Pool, JobParamsList, Opts) ->
     Carrier = shigoto_propagator:injected(),
     Jobs = [shigoto_propagator:stamped(apply_worker_defaults(J), Carrier) || J <- JobParamsList],
-    case [Invalid || Job <- Jobs, {error, _} = Invalid <- [stated_policy(Job)]] of
+    case [Invalid || Job <- Jobs, {error, _} = Invalid <- [insertable(Job, Opts)]] of
         [Invalid | _] ->
             Invalid;
         [] ->
@@ -1363,6 +1367,25 @@ fence(JobId) when is_integer(JobId) -> {JobId, null}.
 %%----------------------------------------------------------------------
 %% Internal: dependency validation
 %%----------------------------------------------------------------------
+
+%% What an insert refuses without asking the database.
+-spec insertable(map(), map()) -> ok | {error, term()}.
+insertable(JobParams, Opts) ->
+    case stated_policy(JobParams) of
+        {error, _} = Invalid -> Invalid;
+        {ok, _Policy} -> outside_a_batch_if_fanout(JobParams, Opts)
+    end.
+
+%% No node ends a fanout job, so a batch would wait for it for ever.
+outside_a_batch_if_fanout(JobParams, Opts) ->
+    Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
+    case maps:get(batch, JobParams, null) =/= null andalso is_fanout(Queue) of
+        true -> {error, {fanout_job_in_batch, Queue}};
+        false -> ok
+    end.
+
+is_fanout(Queue) ->
+    lists:keymember(Queue, 1, shigoto_config:fanout_queues()).
 
 %% The policy a job names for itself, if it names a valid one.
 -spec stated_policy(map()) -> {ok, run | cancel | discard | undefined} | {error, term()}.

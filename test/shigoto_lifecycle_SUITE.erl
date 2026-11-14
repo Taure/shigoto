@@ -45,6 +45,7 @@ the application does with it.
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
     every_fanout_consumer_runs_a_job/1,
+    a_fanout_job_cannot_join_a_batch/1,
     an_unknown_worker_fails_the_job_not_the_queue/1,
     a_module_that_is_not_a_worker_fails_the_job/1,
     a_worker_unknown_here_is_put_back_before_it_uses_an_attempt/1,
@@ -143,6 +144,7 @@ all() ->
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
         every_fanout_consumer_runs_a_job,
+        a_fanout_job_cannot_join_a_batch,
         an_unknown_worker_fails_the_job_not_the_queue,
         a_module_that_is_not_a_worker_fails_the_job,
         a_worker_unknown_here_is_put_back_before_it_uses_an_attempt,
@@ -280,7 +282,10 @@ overrides(one_process_rescues_for_every_queue_of_the_node) ->
     #{queues => [{?QUEUE, 5}, {~"second", 5}, {~"third", 5}, {~"fourth", 5}]};
 overrides(a_node_without_queues_rescues_nothing) ->
     #{queues => []};
-overrides(every_fanout_consumer_runs_a_job) ->
+overrides(TestCase) when
+    TestCase =:= every_fanout_consumer_runs_a_job;
+    TestCase =:= a_fanout_job_cannot_join_a_batch
+->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
     #{load_shedding => #{target => 60000, max_in_flight => 100}};
@@ -1222,6 +1227,23 @@ every_fanout_consumer_runs_a_job(_Config) ->
         unlink(Consumer),
         exit(Consumer, kill)
     end.
+
+%% No node ends a fanout job, so the batch would never see it end.
+a_fanout_job_cannot_join_a_batch(_Config) ->
+    BatchId = new_batch(),
+    Job = #{worker => shigoto_lifecycle_worker, args => #{}, batch => BatchId},
+    Refused = {error, {fanout_job_in_batch, ?FANOUT}},
+    ?assertEqual(Refused, shigoto:insert(Job#{queue => ?FANOUT})),
+    ?assertEqual(Refused, shigoto:insert(Job, #{queue => ?FANOUT})),
+    ?assertEqual(
+        Refused, shigoto:insert_all([Job#{queue => ~"elsewhere"}, Job#{queue => ?FANOUT}])
+    ),
+    ?assertMatch(
+        #{rows := [#{count := 0}]},
+        shigoto_db:query(?POOL, ~"SELECT count(*)::int AS count FROM shigoto_jobs", [])
+    ),
+    ?assertMatch({ok, #{total_jobs := 0}}, shigoto:get_batch(BatchId)),
+    ?assertMatch({ok, #{id := _}}, shigoto:insert(Job#{queue => ~"elsewhere"})).
 
 %%----------------------------------------------------------------------
 %% Workers that cannot run
