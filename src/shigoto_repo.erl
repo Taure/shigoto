@@ -93,80 +93,157 @@ insert_validated(Pool, JobParams1, Opts) ->
             Err
     end.
 
--doc "Bulk insert multiple jobs in a single SQL statement. Returns the inserted jobs in the order given.".
+-doc """
+Bulk insert multiple jobs in a single SQL statement. Returns the inserted jobs
+in the order given.
+
+Dependencies are checked as `insert_job/3` checks them, with one query for all
+the jobs: a missing dependency, or a failed one a job would not run without,
+refuses the whole call.
+
+A bulk insert takes no unique lock and looks for no existing job, so it cannot
+honour uniqueness. A job whose worker exports `unique/0`, or a `unique` map in
+`Opts`, is refused with `{error, {insert_all_unsupported, unique, Workers}}`
+instead of being inserted as a duplicate. Insert such jobs with `insert_job/3`,
+or pass `unique => false` in `Opts` to say that duplicates are wanted.
+""".
 -spec insert_all(atom(), [map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(_Pool, [], _Opts) ->
     {ok, []};
 insert_all(Pool, JobParamsList, Opts) ->
     Jobs = [apply_worker_defaults(J) || J <- JobParamsList],
-    case [Invalid || Job <- Jobs, {error, _} = Invalid <- [stated_policy(Job)]] of
-        [Invalid | _] -> Invalid;
-        [] -> insert_all_validated(Pool, Jobs, Opts)
+    case bulk_insertable(Jobs, Opts) of
+        ok ->
+            case with_dependencies(Pool, Jobs) of
+                {ok, Validated} -> insert_all_validated(Pool, Validated, Opts);
+                {error, _} = Refused -> Refused
+            end;
+        {error, _} = Refused ->
+            Refused
     end.
 
+bulk_insertable(Jobs, Opts) ->
+    case [Invalid || Job <- Jobs, {error, _} = Invalid <- [stated_policy(Job)]] of
+        [Invalid | _] ->
+            Invalid;
+        [] ->
+            case [maps:get(worker, Job) || Job <- Jobs, resolve_unique(Job, Opts) =/= none] of
+                [] -> ok;
+                Unique -> {error, {insert_all_unsupported, unique, lists:usort(Unique)}}
+            end
+    end.
+
+%% One read for the dependencies of every job, then each job is checked as a
+%% single insert would check it. No job has dependencies: no read.
+with_dependencies(Pool, Jobs) ->
+    case lists:usort(lists:append([maps:get(depends_on, Job, []) || Job <- Jobs])) of
+        [] ->
+            {ok, Jobs};
+        DepIds ->
+            case dependencies(Pool, DepIds) of
+                {ok, Found} -> with_dependencies(Jobs, Found, []);
+                {error, _} = Err -> Err
+            end
+    end.
+
+with_dependencies([], _Found, Validated) ->
+    {ok, lists:reverse(Validated)};
+with_dependencies([Job | Jobs], Found, Validated) ->
+    case resolved_dependencies(maps:get(depends_on, Job, []), Found, effective_policy(Job)) of
+        {ok, Pending, Results} ->
+            with_dependencies(Jobs, Found, [
+                Job#{depends_on => Pending, deps_results => Results} | Validated
+            ]);
+        {error, _} = Refused ->
+            Refused
+    end.
+
+-define(BULK_COLUMNS, [
+    queue,
+    worker,
+    args,
+    priority,
+    max_attempts,
+    scheduled_at,
+    tags,
+    batch_id,
+    partition_key,
+    depends_on
+]).
+
 insert_all_validated(Pool, Jobs, Opts) ->
-    %% The policy column is only named when a job sets one, so a plain insert
-    %% is the same statement as before the column existed.
-    WithPolicy = lists:any(fun(Job) -> policy_column(Job) =/= null end, Jobs),
-    {ParamsPerJob, PolicyColumn} =
-        case WithPolicy of
-            true -> {11, ~", on_dependency_failure"};
-            false -> {10, <<>>}
-        end,
-    {ValueClauses, AllParams, _} = lists:foldl(
-        fun(JobParams, {Clauses, Params, Idx}) ->
-            Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
-            Args = encode_json(maps:get(args, JobParams, #{})),
-            EncArgs = shigoto_crypto:encrypt(Args),
-            Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-            Priority = maps:get(priority, JobParams, 0),
-            MaxAttempts = maps:get(max_attempts, JobParams, 3),
-            ScheduledAt = maps:get(scheduled_at, JobParams, now_timestamptz()),
-            Tags = resolve_tags(JobParams),
-            TagsArr = encode_pg_array(Tags),
-            BatchId = maps:get(batch, JobParams, null),
-            PartitionKey = maps:get(partition_key, JobParams, null),
-            DependsOn = maps:get(depends_on, JobParams, []),
-            Placeholders = lists:join(~", ", [
-                <<"$", (integer_to_binary(Idx + N))/binary>>
-             || N <- lists:seq(0, ParamsPerJob - 1)
-            ]),
-            Clause = iolist_to_binary([~"(", Placeholders, ~")"]),
-            NewParams =
-                Params ++
-                    [
-                        Queue,
-                        Worker,
-                        EncArgs,
-                        Priority,
-                        MaxAttempts,
-                        ScheduledAt,
-                        TagsArr,
-                        BatchId,
-                        PartitionKey,
-                        DependsOn
-                    ] ++ [policy_column(JobParams) || WithPolicy],
-            {[Clause | Clauses], NewParams, Idx + ParamsPerJob}
-        end,
-        {[], [], 1},
-        Jobs
-    ),
-    ValuesSQL = lists:join(~", ", lists:reverse(ValueClauses)),
+    %% A column outside the base set is only named when a job sets it, so a
+    %% plain insert is the same statement as before the column existed.
+    Optional = [
+        Column
+     || {Column, true} <- [
+            {meta, lists:any(fun(Job) -> is_map_key(meta, Job) end, Jobs)},
+            {deps_results,
+                lists:any(fun(Job) -> maps:get(deps_results, Job, #{}) =/= #{} end, Jobs)},
+            {on_dependency_failure, lists:any(fun(Job) -> policy_column(Job) =/= null end, Jobs)}
+        ]
+    ],
+    Columns = ?BULK_COLUMNS ++ Optional,
+    Width = length(Columns),
+    Values = [
+        bulk_placeholders(Index * Width, Columns)
+     || Index <- lists:seq(0, length(Jobs) - 1)
+    ],
     Insert = [
-        <<
-            "INSERT INTO shigoto_jobs "
-            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on"
-        >>,
-        PolicyColumn,
+        ~"INSERT INTO shigoto_jobs (",
+        lists:join(~", ", [atom_to_binary(Column) || Column <- Columns]),
         ~") VALUES ",
-        ValuesSQL,
+        lists:join(~", ", Values),
         ~" RETURNING *"
     ],
+    Params = lists:append([[bulk_value(Column, Job, Opts) || Column <- Columns] || Job <- Jobs]),
     Batched = [Batch || #{batch := Batch} <- Jobs, Batch =/= null] =/= [],
-    case query(Pool, counting_its_batches(Insert, Batched), AllParams) of
+    case query(Pool, counting_its_batches(Insert, Batched), Params) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
     end.
+
+bulk_placeholders(Offset, Columns) ->
+    Placeholders = [
+        bulk_placeholder(Column, Offset + N)
+     || {N, Column} <- lists:enumerate(Columns)
+    ],
+    [~"(", lists:join(~", ", Placeholders), ~")"].
+
+bulk_placeholder(deps_results, N) -> [~"$", integer_to_binary(N), ~"::jsonb"];
+bulk_placeholder(_Column, N) -> [~"$", integer_to_binary(N)].
+
+bulk_value(queue, Job, Opts) ->
+    maps:get(queue, Job, maps:get(queue, Opts, ~"default"));
+bulk_value(worker, Job, _Opts) ->
+    atom_to_binary(maps:get(worker, Job));
+bulk_value(args, Job, _Opts) ->
+    sealed(args, Job, encode_json(maps:get(args, Job, #{})));
+bulk_value(meta, Job, _Opts) ->
+    sealed(meta, Job, encode_json(maps:get(meta, Job, #{})));
+bulk_value(priority, Job, _Opts) ->
+    maps:get(priority, Job, 0);
+bulk_value(max_attempts, Job, _Opts) ->
+    maps:get(max_attempts, Job, 3);
+bulk_value(scheduled_at, Job, _Opts) ->
+    maps:get(scheduled_at, Job, now_timestamptz());
+bulk_value(tags, Job, _Opts) ->
+    encode_pg_array(resolve_tags(Job));
+bulk_value(batch_id, Job, _Opts) ->
+    maps:get(batch, Job, null);
+bulk_value(partition_key, Job, _Opts) ->
+    maps:get(partition_key, Job, null);
+bulk_value(depends_on, Job, _Opts) ->
+    maps:get(depends_on, Job, []);
+bulk_value(deps_results, Job, _Opts) ->
+    encode_json(maps:get(deps_results, Job, #{}));
+bulk_value(on_dependency_failure, Job, _Opts) ->
+    policy_column(Job).
+
+%% The stored form of a job's args or meta: encrypted for its worker when a key
+%% is configured, as it is otherwise.
+sealed(Column, #{worker := Worker}, Json) when is_atom(Worker) ->
+    shigoto_crypto:seal(Json, {Column, atom_to_binary(Worker)}).
 
 %% A batch's total goes up in the statement that inserts its jobs. Counted
 %% afterwards, a job could be claimed and finished before its batch knew of it,
@@ -1018,20 +1095,31 @@ policy_column(JobParams) ->
 validate_dependencies(_Pool, [], _Policy) ->
     {ok, [], #{}};
 validate_dependencies(Pool, DepIds, Policy) ->
+    case dependencies(Pool, DepIds) of
+        {ok, Found} -> resolved_dependencies(DepIds, Found, Policy);
+        {error, _} = Err -> Err
+    end.
+
+-spec dependencies(atom(), [integer()]) -> {ok, #{integer() => map()}} | {error, term()}.
+dependencies(Pool, DepIds) ->
     SQL = ~"SELECT id, state, result FROM shigoto_jobs WHERE id = ANY($1::bigint[])",
     case query(Pool, SQL, [DepIds]) of
-        #{rows := Rows} ->
-            Jobs = #{Id => Row || #{id := Id} = Row <- Rows},
-            case [Id || Id <- DepIds, not is_map_key(Id, Jobs)] of
-                [] -> waited_for(DepIds, Jobs, Policy);
-                Missing -> {error, {missing_dependencies, Missing}}
-            end;
-        {error, _} = Err ->
-            Err
+        #{rows := Rows} -> {ok, #{Id => Row || #{id := Id} = Row <- Rows}};
+        {error, _} = Err -> Err
     end.
 
 %% There is no cycle to look for: a job has no id until it is inserted, so
 %% nothing can depend on it yet and an insert cannot close a circle.
+-spec resolved_dependencies([integer()], #{integer() => map()}, run | cancel | discard) ->
+    {ok, Pending :: [integer()], Results :: #{binary() => term()}} | {error, term()}.
+resolved_dependencies([], _Found, _Policy) ->
+    {ok, [], #{}};
+resolved_dependencies(DepIds, Found, Policy) ->
+    case [Id || Id <- DepIds, not is_map_key(Id, Found)] of
+        [] -> waited_for(DepIds, Found, Policy);
+        Missing -> {error, {missing_dependencies, Missing}}
+    end.
+
 waited_for(DepIds, Jobs, Policy) ->
     Finished = [Id || Id <- DepIds, is_finished(maps:get(Id, Jobs))],
     case [Id || Id <- Finished, Policy =/= run, has_failed(maps:get(Id, Jobs))] of
@@ -1084,6 +1172,8 @@ resolve_unique(JobParams, Opts) ->
     case Opts of
         #{unique := UniqueOpts} when is_map(UniqueOpts) ->
             maps:merge(?DEFAULT_UNIQUE, UniqueOpts);
+        #{unique := false} ->
+            none;
         _ ->
             Worker = maps:get(worker, JobParams),
             case erlang:function_exported(Worker, unique, 0) of
