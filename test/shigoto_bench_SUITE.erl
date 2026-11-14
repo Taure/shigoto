@@ -15,6 +15,7 @@
     bench_insert_bulk_100/1,
     bench_insert_bulk_1000/1,
     bench_insert_unique/1,
+    bench_insert_bulk_100_unique/1,
     bench_claim_and_complete/1,
     bench_claim_and_complete_concurrent/1,
     bench_full_lifecycle/1,
@@ -36,6 +37,7 @@ groups() ->
             bench_insert_bulk_100,
             bench_insert_bulk_1000,
             bench_insert_unique,
+            bench_insert_bulk_100_unique,
             bench_claim_and_complete,
             bench_claim_and_complete_concurrent,
             bench_full_lifecycle,
@@ -108,6 +110,25 @@ bench_insert_unique(Config) ->
         )
     end),
     report(Config, ~"insert_unique", N, Time).
+
+bench_insert_bulk_100_unique(Config) ->
+    Batches = 10,
+    BatchSize = 100,
+    N = Batches * BatchSize,
+    Unique = #{keys => [worker, args], states => [available]},
+    {Time, _} = timer:tc(fun() ->
+        lists:foreach(
+            fun(B) ->
+                Jobs = [
+                    #{worker => shigoto_test_worker, args => #{~"b" => B, ~"i" => I}}
+                 || I <- lists:seq(1, BatchSize)
+                ],
+                {ok, _} = shigoto_repo:insert_all(?POOL, Jobs, #{unique => Unique})
+            end,
+            lists:seq(1, Batches)
+        )
+    end),
+    report(Config, ~"insert_bulk_100_unique", N, Time).
 
 bench_insert_with_encryption(Config) ->
     Key = crypto:strong_rand_bytes(32),

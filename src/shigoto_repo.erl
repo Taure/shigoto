@@ -7,6 +7,7 @@ for safe multi-node job claiming.
 -export([
     insert_job/3,
     insert_all/3,
+    placed_all/3,
     claim_jobs/3,
     claim_jobs_fair/3,
     complete_job/2,
@@ -100,44 +101,95 @@ insert_validated(Pool, JobParams1, Opts) ->
     end.
 
 -doc """
-Bulk insert multiple jobs in a single SQL statement. Returns the inserted jobs
-in the order given.
+Bulk insert multiple jobs. Answers one job per job given, in the order given.
 
 Dependencies are checked as `insert_job/3` checks them, with one query for all
 the jobs: a missing dependency, or a failed one a job would not run without,
 refuses the whole call.
 
-A bulk insert takes no unique lock and looks for no existing job, so it cannot
-honour uniqueness. A job whose worker exports `unique/0`, or a `unique` map in
-`Opts`, is refused with `{error, {insert_all_unsupported, unique, Workers}}`
-instead of being inserted as a duplicate. Insert such jobs with `insert_job/3`,
-or pass `unique => false` in `Opts` to say that duplicates are wanted.
+Jobs that are not unique go in with a single statement. A job whose worker
+exports `unique/0`, or every job when `Opts` has a `unique` map, is inserted
+the way `insert_job/3` inserts it, and the whole call is then one transaction:
+the unique locks of every such job are taken first, and a lock that cannot be
+had in `advisory_lock_timeout` answers `{error, {lock_timeout, unique}}` with
+nothing inserted. A job that turns out to be a duplicate, of a stored job or of
+an earlier one in the same call, is answered as the job that is already there
+(replaced or debounced as its `unique` options say), in its place in the list.
+`unique => false` in `Opts` inserts every job without looking.
 """.
 -spec insert_all(atom(), [map()], map()) -> {ok, [map()]} | {error, term()}.
-insert_all(_Pool, [], _Opts) ->
-    {ok, []};
 insert_all(Pool, JobParamsList, Opts) ->
-    Carrier = shigoto_propagator:injected(),
-    Jobs = [shigoto_propagator:stamped(apply_worker_defaults(J), Carrier) || J <- JobParamsList],
-    case bulk_insertable(Jobs, Opts) of
-        ok ->
-            case with_dependencies(Pool, Jobs) of
-                {ok, Validated} -> insert_all_validated(Pool, Validated, Opts);
-                {error, _} = Refused -> Refused
-            end;
-        {error, _} = Refused ->
-            Refused
+    case placed_all(Pool, JobParamsList, Opts) of
+        {ok, Placed} -> {ok, [Job || {_Outcome, Job} <- Placed]};
+        {error, _} = Refused -> Refused
     end.
 
-bulk_insertable(Jobs, Opts) ->
+-doc false.
+-spec placed_all(atom(), [map()], map()) ->
+    {ok, [{inserted | conflict, map()}]} | {error, term()}.
+placed_all(_Pool, [], _Opts) ->
+    {ok, []};
+placed_all(Pool, JobParamsList, Opts) ->
+    Carrier = shigoto_propagator:injected(),
+    Jobs = [shigoto_propagator:stamped(apply_worker_defaults(J), Carrier) || J <- JobParamsList],
     case [Invalid || Job <- Jobs, {error, _} = Invalid <- [stated_policy(Job)]] of
         [Invalid | _] ->
             Invalid;
         [] ->
-            case [maps:get(worker, Job) || Job <- Jobs, resolve_unique(Job, Opts) =/= none] of
-                [] -> ok;
-                Unique -> {error, {insert_all_unsupported, unique, lists:usort(Unique)}}
+            case with_dependencies(Pool, Jobs) of
+                {ok, Validated} ->
+                    Resolved = [{Job, resolve_unique(Job, Opts)} || Job <- Validated],
+                    case [Job || {Job, none} <- Resolved] of
+                        Plain when length(Plain) =:= length(Resolved) ->
+                            inserted(insert_all_validated(Pool, Plain, Opts));
+                        _Mixed ->
+                            placed_with_unique(Pool, Resolved, Opts)
+                    end;
+                {error, _} = Refused ->
+                    Refused
             end
+    end.
+
+inserted({ok, Rows}) -> {ok, [{inserted, Row} || Row <- Rows]};
+inserted({error, _} = Refused) -> Refused.
+
+%% Every unique lock of the call is taken before anything is written, so a
+%% lock that cannot be had costs nothing. After that only a failed statement
+%% can stop the call, and the raise undoes what the call wrote. Joined to a
+%% transaction the caller opened there is nothing to undo here: PostgreSQL has
+%% already failed that transaction.
+placed_with_unique(Pool, Resolved, Opts) ->
+    Keyed = [keyed(Job, Unique, Opts) || {Job, Unique} <- Resolved],
+    LockKeys = [erlang:phash2(Key) || {_Job, _Unique, Keys} <- Keyed, Key <- Keys],
+    try
+        shigoto_db:transaction(Pool, fun() ->
+            case unique_locks(Pool, LockKeys) of
+                ok -> {ok, placed_in_order(Pool, Keyed, Opts)};
+                {error, _} = Refused -> Refused
+            end
+        end)
+    catch
+        throw:{?MODULE, insert_all_failed, Refused} -> Refused
+    end.
+
+keyed(Job, none, _Opts) -> {Job, none, []};
+keyed(Job, Unique, Opts) -> {Job, Unique, unique_keys(Job, Opts, Unique)}.
+
+%% Runs of jobs that are not unique keep their single statement; ids follow
+%% the order given.
+placed_in_order(_Pool, [], _Opts) ->
+    [];
+placed_in_order(Pool, [{_, none, []} | _] = Keyed, Opts) ->
+    {Run, Rest} = lists:splitwith(fun({_Job, Unique, _Keys}) -> Unique =:= none end, Keyed),
+    case insert_all_validated(Pool, [Job || {Job, none, []} <- Run], Opts) of
+        {ok, Rows} -> [{inserted, Row} || Row <- Rows] ++ placed_in_order(Pool, Rest, Opts);
+        {error, _} = Refused -> throw({?MODULE, insert_all_failed, Refused})
+    end;
+placed_in_order(Pool, [{Job, Unique, Keys} | Rest], Opts) ->
+    case placed_unique(Pool, Job, Opts, Unique, Keys) of
+        {ok, {conflict, Existing}} -> [{conflict, Existing} | placed_in_order(Pool, Rest, Opts)];
+        {ok, Row} -> [{inserted, Row} | placed_in_order(Pool, Rest, Opts)];
+        {error, _} = Refused -> throw({?MODULE, insert_all_failed, Refused})
     end.
 
 %% One read for the dependencies of every job, then each job is checked as a
@@ -164,6 +216,8 @@ with_dependencies([Job | Jobs], Found, Validated) ->
         {error, _} = Refused ->
             Refused
     end.
+
+-define(LOCKS_PER_STATEMENT, 64).
 
 -define(BULK_COLUMNS, [
     queue,
@@ -1382,34 +1436,55 @@ resolve_unique(JobParams, Opts) ->
     end.
 
 insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
+    UniqueKeys = unique_keys(JobParams, Opts, UniqueOpts),
+    shigoto_db:transaction(Pool, fun() ->
+        case unique_locks(Pool, [erlang:phash2(Key) || Key <- UniqueKeys]) of
+            ok -> placed_unique(Pool, JobParams, Opts, UniqueOpts, UniqueKeys);
+            {error, _} = Refused -> Refused
+        end
+    end).
+
+%% One key per configured encryption key, the current one first. The job is
+%% stored under the current one and looked for under all of them, so a job
+%% inserted before a key rotation still counts as the duplicate it is.
+-spec unique_keys(map(), map(), map()) -> [binary(), ...].
+unique_keys(JobParams, Opts, UniqueOpts) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-    %% One key per configured encryption key, the current one first. The job
-    %% is stored under the current one and looked for under all of them, so a
-    %% job inserted before a key rotation still counts as the duplicate it is.
-    [UniqueKey | _] = UniqueKeys = build_unique_keys(UniqueOpts, Worker, Args, Queue),
-    LockKeys = [erlang:phash2(Key) || Key <- UniqueKeys],
-    shigoto_db:transaction(Pool, fun() ->
-        case shigoto_lock:acquire_xact(Pool, LockKeys) of
-            ok ->
-                case find_existing_job(Pool, UniqueOpts, UniqueKeys) of
-                    {ok, Existing} ->
-                        case maybe_replace(Pool, Existing, JobParams, UniqueOpts) of
-                            gone -> do_insert(Pool, JobParams, Opts, UniqueKey);
-                            Answer -> Answer
-                        end;
-                    not_found ->
-                        do_insert(Pool, JobParams, Opts, UniqueKey);
-                    {error, _} = Err ->
-                        Err
-                end;
-            {error, lock_timeout} ->
-                {error, {lock_timeout, unique}};
-            {error, Reason} ->
-                {error, shigoto_db:reduced(Reason)}
-        end
-    end).
+    build_unique_keys(UniqueOpts, Worker, Args, Queue).
+
+%% Taken in ascending order, a statement's worth at a time, so two calls that
+%% want the same locks never each hold one the other waits for.
+-spec unique_locks(atom(), [integer()]) -> ok | {error, term()}.
+unique_locks(Pool, LockKeys) ->
+    Deadline = erlang:monotonic_time(millisecond) + shigoto_config:advisory_lock_timeout(),
+    unique_locks(Pool, lists:usort(LockKeys), Deadline).
+
+unique_locks(_Pool, [], _Deadline) ->
+    ok;
+unique_locks(Pool, LockKeys, Deadline) ->
+    {Now, Later} = lists:split(min(?LOCKS_PER_STATEMENT, length(LockKeys)), LockKeys),
+    Left = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    case shigoto_lock:acquire_xact(Pool, Now, Left) of
+        ok -> unique_locks(Pool, Later, Deadline);
+        {error, lock_timeout} -> {error, {lock_timeout, unique}};
+        {error, Reason} -> {error, shigoto_db:reduced(Reason)}
+    end.
+
+%% With the job's unique locks held.
+placed_unique(Pool, JobParams, Opts, UniqueOpts, [UniqueKey | _] = UniqueKeys) ->
+    case find_existing_job(Pool, UniqueOpts, UniqueKeys) of
+        {ok, Existing} ->
+            case maybe_replace(Pool, Existing, JobParams, UniqueOpts) of
+                gone -> do_insert(Pool, JobParams, Opts, UniqueKey);
+                Answer -> Answer
+            end;
+        not_found ->
+            do_insert(Pool, JobParams, Opts, UniqueKey);
+        {error, _} = Err ->
+            Err
+    end.
 
 build_unique_keys(#{keys := Keys}, Worker, Args, Queue) ->
     shigoto_crypto:unique_keys(unique_material(Keys, Worker, encode_json(Args), Queue)).

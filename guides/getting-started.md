@@ -236,11 +236,10 @@ shigoto:insert_all([
 ])
 ```
 
-`insert_all/1,2` does not deduplicate. Given a job whose worker defines
-`unique/0`, or `unique` in its options, it answers
-`{error, {insert_all_unsupported, unique, Workers}}` and inserts nothing. Use
-`insert/1,2` for unique jobs, or pass `#{unique => false}` to insert the list
-as it is. A `depends_on` that names a job that does not exist answers
+`insert_all/1,2` answers one job per job given, in the order given. A unique
+job in the list is deduplicated as `insert/1,2` would: its place in the answer
+holds the job already there. See [Unique Jobs](uniqueness.md). A `depends_on`
+that names a job that does not exist answers
 `{error, {missing_dependencies, Ids}}`.
 
 ## Transactional Enqueue

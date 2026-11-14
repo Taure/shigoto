@@ -35,7 +35,12 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_unique_job_is_still_found_after_key_rotation/1,
     a_unique_job_from_before_encryption_is_still_a_duplicate/1,
     a_unique_job_is_still_found_once_its_key_is_dropped/1,
-    insert_all_refuses_what_it_cannot_honour/1,
+    insert_all_inserts_a_unique_job_once/1,
+    insert_all_takes_uniqueness_from_its_options/1,
+    insert_all_inserts_nothing_when_a_unique_lock_is_held/1,
+    two_bulk_inserts_at_once_insert_each_unique_job_once/1,
+    a_bulk_insert_rolled_back_leaves_no_unique_job/1,
+    insert_all_encrypts_the_meta/1,
     insert_all_validates_dependencies/1,
     a_bad_key_stops_the_boot_without_printing_it/1,
     a_held_unique_lock_does_not_stall_the_insert/1,
@@ -88,7 +93,12 @@ all() ->
         a_unique_job_is_still_found_after_key_rotation,
         a_unique_job_from_before_encryption_is_still_a_duplicate,
         a_unique_job_is_still_found_once_its_key_is_dropped,
-        insert_all_refuses_what_it_cannot_honour,
+        insert_all_inserts_a_unique_job_once,
+        insert_all_takes_uniqueness_from_its_options,
+        insert_all_inserts_nothing_when_a_unique_lock_is_held,
+        two_bulk_inserts_at_once_insert_each_unique_job_once,
+        a_bulk_insert_rolled_back_leaves_no_unique_job,
+        insert_all_encrypts_the_meta,
         insert_all_validates_dependencies,
         a_bad_key_stops_the_boot_without_printing_it,
         a_held_unique_lock_does_not_stall_the_insert,
@@ -157,6 +167,8 @@ overrides(a_plaintext_job_is_refused_when_encryption_is_required) ->
 overrides(v1_is_still_written_and_read_when_set) ->
     #{encryption_write_format => v1};
 overrides(a_held_unique_lock_does_not_stall_the_insert) ->
+    #{advisory_lock_timeout => 200};
+overrides(insert_all_inserts_nothing_when_a_unique_lock_is_held) ->
     #{advisory_lock_timeout => 200};
 overrides(a_held_concurrency_lock_snoozes_the_job) ->
     #{advisory_lock_timeout => 200};
@@ -615,21 +627,92 @@ unique_key_under(Key, Material) ->
         end
     end.
 
-insert_all_refuses_what_it_cannot_honour(_Config) ->
-    Jobs = [#{worker => shigoto_unique_worker, args => #{~"n" => N}} || N <- [1, 1]],
+insert_all_inserts_a_unique_job_once(_Config) ->
+    {ok, #{id := Already}} = shigoto:insert(waiting(shigoto_unique_worker, 1)),
+    _ = captured(),
+    {ok, Answered} = shigoto:insert_all([
+        waiting(shigoto_canary_other_worker, 1),
+        waiting(shigoto_unique_worker, 1),
+        waiting(shigoto_unique_worker, 2),
+        waiting(shigoto_canary_other_worker, 1),
+        waiting(shigoto_unique_worker, 2)
+    ]),
+    [Plain, Duplicate, New, Other, Again] = [Id || #{id := Id} <- Answered],
+    ?assertEqual(Already, Duplicate),
+    ?assertEqual(New, Again),
+    %% Inserted in the order given, the duplicates answered where they stood.
+    ?assert(Already < Plain andalso Plain < New andalso New < Other),
+    ?assertEqual(4, job_count()),
+    ?assertEqual([Plain, New, Other], lists:sort(inserted_events())).
+
+insert_all_takes_uniqueness_from_its_options(_Config) ->
+    Plain = [waiting(shigoto_canary_other_worker, N) || N <- [1, 1, 2]],
+    {ok, [#{id := One}, #{id := One}, #{id := Two}]} =
+        shigoto:insert_all(Plain, #{unique => #{keys => [args]}}),
+    ?assertNotEqual(One, Two),
+    ?assertEqual(2, job_count()),
+    %% Saying that duplicates are wanted is the way to insert them.
+    Unique = [waiting(shigoto_unique_worker, N) || N <- [1, 1]],
+    {ok, [#{id := First}, #{id := Second}]} = shigoto:insert_all(Unique, #{unique => false}),
+    ?assertNotEqual(First, Second),
+    ?assertEqual(4, job_count()).
+
+insert_all_inserts_nothing_when_a_unique_lock_is_held(_Config) ->
+    Jobs = [
+        waiting(shigoto_canary_other_worker, 1),
+        waiting(shigoto_unique_worker, 2),
+        waiting(shigoto_unique_worker, 1)
+    ],
+    Key = erlang:phash2(shigoto_crypto:unique_key(~"{\"n\":1}:shigoto_unique_worker")),
+    Holder = hold_lock(~"SELECT pg_advisory_xact_lock($1)", [Key]),
+    _ = captured(),
+    T0 = erlang:monotonic_time(millisecond),
+    ?assertEqual({error, {lock_timeout, unique}}, shigoto:insert_all(Jobs)),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 2000),
+    ?assertEqual(0, job_count()),
+    ?assertEqual([], inserted_events()),
+    ok = release(Holder),
+    ?assertMatch({ok, [_, _, _]}, shigoto:insert_all(Jobs)),
+    ?assertEqual(3, job_count()).
+
+two_bulk_inserts_at_once_insert_each_unique_job_once(_Config) ->
+    Jobs = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 300)],
+    Test = self(),
+    Inserters = [
+        spawn_monitor(fun() -> Test ! {answered, self(), shigoto:insert_all(Order)} end)
+     || Order <- [Jobs, lists:reverse(Jobs)]
+    ],
+    [{ok, Forward}, {ok, Backward}] = [
+        receive
+            {answered, Pid, Answer} -> Answer;
+            {'DOWN', Monitor, process, Pid, Reason} -> ct:fail({inserter_died, Reason})
+        after 30000 -> ct:fail(insert_all_never_answered)
+        end
+     || {Pid, Monitor} <- Inserters
+    ],
+    ?assertEqual(300, job_count()),
     ?assertEqual(
-        {error, {insert_all_unsupported, unique, [shigoto_unique_worker]}},
-        shigoto:insert_all(Jobs)
+        [Id || #{id := Id} <- Forward], lists:reverse([Id || #{id := Id} <- Backward])
     ),
-    Plain = [#{worker => shigoto_canary_other_worker, args => #{~"n" => N}} || N <- [1, 1]],
-    ?assertMatch(
-        {error, {insert_all_unsupported, unique, _}},
-        shigoto:insert_all(Plain, #{unique => #{keys => [args]}})
+    ?assertEqual(300, length(inserted_events())).
+
+a_bulk_insert_rolled_back_leaves_no_unique_job(_Config) ->
+    _ = captured(),
+    ?assertError(
+        undone,
+        shigoto:transaction(fun() ->
+            {ok, [_, _]} = shigoto:insert_all([
+                waiting(shigoto_canary_other_worker, 1), waiting(shigoto_unique_worker, 1)
+            ]),
+            error(undone)
+        end)
     ),
     ?assertEqual(0, job_count()),
-    %% Saying that duplicates are wanted is the way to insert them.
-    ?assertMatch({ok, [_, _]}, shigoto:insert_all(Jobs, #{unique => false})),
-    %% A bulk insert keeps the meta it is given, encrypted like the args.
+    ?assertEqual([], inserted_events()),
+    %% The lock went with the transaction.
+    ?assertMatch({ok, [#{id := _}]}, shigoto:insert_all([waiting(shigoto_unique_worker, 1)])).
+
+insert_all_encrypts_the_meta(_Config) ->
     Canary = canary(),
     {ok, [#{id := Id}]} = shigoto:insert_all([
         #{
@@ -642,6 +725,15 @@ insert_all_refuses_what_it_cannot_honour(_Config) ->
     ?assertMatch(<<"\"enc:v2:", _/binary>>, stored(Id, meta)),
     {ok, #{meta := Meta}} = shigoto:get_job(Id),
     ?assertEqual(#{~"trace" => Canary}, json:decode(Meta)).
+
+waiting(Worker, N) ->
+    #{worker => Worker, args => #{~"n" => N}, scheduled_at => seconds_from_now(3600)}.
+
+inserted_events() ->
+    [
+        Id
+     || {telemetry, [shigoto, job, inserted], _Measurements, #{job_id := Id}} <- captured()
+    ].
 
 insert_all_validates_dependencies(_Config) ->
     Job = #{worker => shigoto_canary_other_worker, args => #{}},

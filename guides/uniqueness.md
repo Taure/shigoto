@@ -118,9 +118,20 @@ any other failed insert: retry, or surface it. See [Security](security.md).
 `#{unique => false}` in the options of `insert/2` skips the worker's `unique/0`
 for that insert.
 
-`insert_all/1,2` never deduplicates. Rather than insert duplicates silently it
-answers `{error, {insert_all_unsupported, unique, Workers}}` when a job in the
-list is unique; pass `#{unique => false}` to say that is what you want.
+`insert_all/1,2` deduplicates as `insert/1,2` does. A list with a unique job in
+it is inserted in one transaction: the unique locks of the whole list are taken
+first, then the jobs go in, in the order given. A lock that cannot be had
+answers `{error, {lock_timeout, unique}}` and nothing is inserted.
+
+The answer is still `{ok, Jobs}` with one job per job given. Where a job was a
+duplicate (of a stored job, or of an earlier one in the same list) its place
+holds the job that is already there, so the same id can appear twice, and no
+`[shigoto, job, inserted]` is emitted for it. Compare ids if you need to know
+which were new.
+
+Each unique job costs a lookup and a statement of its own, so a list of unique
+jobs is a few times faster than inserting them one by one, not the single
+statement a plain list is. `#{unique => false}` inserts the list as it is.
 
 ## Replacing Args
 

@@ -148,18 +148,28 @@ insert(JobParams, Opts) ->
 insert_all(JobParamsList) ->
     insert_all(JobParamsList, #{}).
 
--doc "Bulk insert multiple jobs with options.".
+-doc """
+Bulk insert multiple jobs with options. Answers one job per job given, in the
+order given.
+
+A job that is unique (its worker exports `unique/0`, or `Opts` has a `unique`
+map) is inserted as `insert/1,2` inserts it, and the call is then one
+transaction: all of it is inserted or none of it. Where such a job is a
+duplicate, the answer holds the job that is already there in its place, and no
+`[shigoto, job, inserted]` is emitted for it. `unique => false` in `Opts`
+inserts every job without looking.
+""".
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->
     case shigoto_config:testing_mode() of
         disabled ->
             Pool = txn_pool(),
-            case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
-                {ok, Jobs} ->
-                    lists:foreach(fun emit_or_defer/1, Jobs),
-                    {ok, Jobs};
-                Other ->
-                    Other
+            case shigoto_repo:placed_all(Pool, JobParamsList, Opts) of
+                {ok, Placed} ->
+                    _ = [emit_or_defer(Job) || {inserted, Job} <- Placed],
+                    {ok, [Job || {_Outcome, Job} <- Placed]};
+                {error, _} = Refused ->
+                    Refused
             end;
         Mode ->
             shigoto_testing:handle_insert_all(JobParamsList, Mode)

@@ -59,7 +59,7 @@ The steps for encryption are described in full in
 | A cancelled job in a batch | held the batch open | counts as ended; the callback gets `_batch_event => discard` |
 | Retrying a discarded job of a batch | the batch could finish one job early | the job is counted again when it ends |
 | `shigoto:cancel/1` on a job that cannot be cancelled | `ok`, and a `cancelled` event | `ok`, and no event |
-| `insert_all/1,2` with a unique worker | inserted duplicates | `{error, {insert_all_unsupported, unique, Workers}}`; pass `unique => false` to insert anyway |
+| `insert_all/1,2` with a unique worker | inserted duplicates | inserts each unique job once, in one transaction; a duplicate is answered as the job already there. Pass `unique => false` to insert duplicates |
 | A worker with `rate_limit/0` or `concurrency/0` when seki is not running | ran ungated | does not run; the job is snoozed |
 | `shigoto_crypto:decrypt/1` of a frame that does not open | answered the ciphertext | raises `{shigoto_crypto, decrypt_failed}` |
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
