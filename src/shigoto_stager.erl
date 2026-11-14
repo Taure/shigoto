@@ -3,7 +3,7 @@
 Latency accelerator for delayed jobs. On a short interval it finds
 queues with work due to run now (a job's `scheduled_at` has elapsed,
 including a `retryable` job whose backoff is over) and issues a
-`pg_notify('shigoto_jobs_insert', Queue)` so the existing notifier
+`pg_notify(Channel, Queue)` on `shigoto_config:notify_channel/0` so the notifier
 wakes the matching queue immediately instead of waiting up to
 `poll_interval`.
 
@@ -23,7 +23,6 @@ never crashes the supervision tree.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(STAGE_LOCK_ID, 839274629).
--define(CHANNEL, ~"shigoto_jobs_insert").
 %% A peer holds the lock for one pass, a few milliseconds of each interval, and
 %% its ticks drift against ours, so a follower misses now and then but not for a
 %% minute on end. At least ten passes, and at least a minute of them.
@@ -152,5 +151,7 @@ due_queues(Pool) ->
     end.
 
 notify(Pool, Queue) ->
-    _ = shigoto_db:query(Pool, ~"SELECT pg_notify($1, $2)", [?CHANNEL, Queue]),
+    _ = shigoto_db:query(Pool, ~"SELECT pg_notify($1, $2)", [
+        shigoto_config:notify_channel(), Queue
+    ]),
     ok.

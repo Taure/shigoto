@@ -801,8 +801,7 @@ seconds_from_now(Seconds) ->
 
 notifier_listening() ->
     case sys:get_state(shigoto_notifier) of
-        {state, undefined} -> false;
-        {state, _Listener} -> true
+        State when is_tuple(State) -> element(2, State) =/= undefined
     end.
 
 connection() ->

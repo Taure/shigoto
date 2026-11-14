@@ -32,6 +32,8 @@ Configuration access for Shigoto. Reads from application env.
     workers/0,
     instance/0,
     advisory_lock_timeout/0,
+    notify_min_interval/0,
+    notify_channel/0,
     fanout_queues/0,
     check/0
 ]).
@@ -286,6 +288,28 @@ advisory_lock_timeout() ->
     end.
 
 -doc """
+The shortest time, in milliseconds, between two polls of one queue caused by
+notifications. Default: 10.
+""".
+-spec notify_min_interval() -> non_neg_integer().
+notify_min_interval() ->
+    case application:get_env(shigoto, notify_min_interval, 10) of
+        Ms when is_integer(Ms), Ms >= 0 -> Ms;
+        _Invalid -> 10
+    end.
+
+-doc """
+The `NOTIFY` channel jobs are announced on: `shigoto_jobs_insert`, or
+`shigoto_jobs_insert_<instance>` when an instance is named.
+""".
+-spec notify_channel() -> binary().
+notify_channel() ->
+    case instance() of
+        undefined -> ~"shigoto_jobs_insert";
+        Instance -> <<"shigoto_jobs_insert_", Instance/binary>>
+    end.
+
+-doc """
 Check the settings that are dangerous to get wrong, before anything starts.
 
 Answers `{error, {shigoto_config, Reason}}` for the first problem. `Reason`
@@ -300,7 +324,8 @@ check() ->
         ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
         ok = checked(workers_checked(setting(workers, undefined))),
         ok = checked(instance_checked(setting(instance, undefined))),
-        ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000)))
+        ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000))),
+        ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10)))
     catch
         error:{shigoto_config, Reason} -> {error, {shigoto_config, Reason}}
     end.

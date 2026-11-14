@@ -98,7 +98,8 @@ locked(Pool) ->
                                 v7_statements() ++ [version_statement()]
                         )
                     )
-            end
+            end,
+            announced_on(Pool, shigoto_config:notify_channel())
         end)
     catch
         throw:{?MODULE, lock_timeout} -> {error, lock_timeout};
@@ -212,6 +213,46 @@ lock_statement([First | Rest]) ->
         ~" IN ACCESS EXCLUSIVE MODE"
     ]).
 
+%% The trigger function announces inserts on one channel, written into its
+%% body. It is the default channel unless an `instance` is configured, and is
+%% replaced here when the configured channel is another one. That is not part
+%% of a schema version because it follows configuration: it is checked on every
+%% `up/1` with one catalog read, and replacing a function takes no table lock.
+%% Only the function's owner can replace it.
+announced_on(Pool, Channel) ->
+    SQL =
+        ~"""
+        SELECT p.prosrc AS source
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.proname = 'shigoto_notify_insert' AND n.nspname = current_schema()
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{source := Source}]} when is_binary(Source) ->
+            case binary:match(Source, <<"'", Channel/binary, "'">>) of
+                nomatch -> answered(shigoto_db:query(Pool, notify_function(Channel), []));
+                _Found -> ok
+            end;
+        #{rows := _NoFunction} ->
+            ok;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% `Channel` is `shigoto_config:notify_channel/0`, whose instance part is
+%% checked at boot to be lower-case letters, digits and `_`.
+-spec notify_function(binary()) -> binary().
+notify_function(Channel) ->
+    iolist_to_binary([
+        ~"CREATE OR REPLACE FUNCTION shigoto_notify_insert() RETURNS trigger AS $$\n",
+        ~"BEGIN\n",
+        ~"  PERFORM pg_notify('",
+        Channel,
+        ~"', NEW.queue);\n",
+        ~"  RETURN NEW;\n",
+        ~"END;\n",
+        ~"$$ LANGUAGE plpgsql"
+    ]).
+
 answered({error, Reason}) -> throw({?MODULE, Reason});
 answered(_Ran) -> ok.
 
@@ -292,14 +333,7 @@ v2_statements() ->
 
 v3_statements() ->
     [
-        <<
-            "CREATE OR REPLACE FUNCTION shigoto_notify_insert() RETURNS trigger AS $$\n"
-            "BEGIN\n"
-            "  PERFORM pg_notify('shigoto_jobs_insert', NEW.queue);\n"
-            "  RETURN NEW;\n"
-            "END;\n"
-            "$$ LANGUAGE plpgsql"
-        >>,
+        notify_function(~"shigoto_jobs_insert"),
         <<
             "DO $$ BEGIN\n"
             "  IF NOT EXISTS (\n"
