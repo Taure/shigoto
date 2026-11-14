@@ -41,6 +41,7 @@
     test_unique_states_filter/1,
     test_unique_replace_fields/1,
     test_replace_leaves_a_job_that_finished_meanwhile/1,
+    test_a_job_ending_during_the_archive_pass_is_not_lost/1,
     test_unique_worker_callback/1,
     test_unique_opts_override/1,
     test_unique_different_queues_allowed/1,
@@ -117,6 +118,7 @@ all() ->
         test_unique_states_filter,
         test_unique_replace_fields,
         test_replace_leaves_a_job_that_finished_meanwhile,
+        test_a_job_ending_during_the_archive_pass_is_not_lost,
         test_unique_worker_callback,
         test_unique_opts_override,
         test_unique_different_queues_allowed,
@@ -665,6 +667,52 @@ test_replace_leaves_a_job_that_finished_meanwhile(_Config) ->
     ?assertEqual(#{~"x" => 2}, json:decode(NewArgs)),
     {ok, #{state := ~"completed", args := OldArgs}} = shigoto_repo:get_job(?POOL, Id),
     ?assertEqual(#{~"x" => 1}, json:decode(OldArgs)).
+
+%% The archive pass copies finished jobs and deletes them. A job that finishes
+%% between the two must still be in one of the tables afterwards. The trigger
+%% finishes the job right after the copy, as its own node could.
+test_a_job_ending_during_the_archive_pass_is_not_lost(_Config) ->
+    {ok, #{id := Id}} = shigoto_repo:insert_job(
+        ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+    ),
+    {ok, [_Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 1),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE OR REPLACE FUNCTION shigoto_test_finish() RETURNS trigger AS $$
+        BEGIN
+          UPDATE shigoto_jobs SET state = 'completed' WHERE state = 'executing';
+          RETURN NULL;
+        END
+        $$ LANGUAGE plpgsql
+        """,
+        []
+    ),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE TRIGGER shigoto_test_finish AFTER INSERT ON shigoto_jobs_archive
+        FOR EACH STATEMENT EXECUTE FUNCTION shigoto_test_finish()
+        """,
+        []
+    ),
+    try
+        ?assertMatch({ok, _}, shigoto_repo:archive_jobs(?POOL, 0))
+    after
+        #{} = shigoto_db:query(
+            ?POOL, ~"DROP TRIGGER IF EXISTS shigoto_test_finish ON shigoto_jobs_archive", []
+        ),
+        #{} = shigoto_db:query(?POOL, ~"DROP FUNCTION IF EXISTS shigoto_test_finish()", [])
+    end,
+    #{rows := [#{kept := Kept}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT (SELECT count(*) FROM shigoto_jobs WHERE id = $1)
+          + (SELECT count(*) FROM shigoto_jobs_archive WHERE id = $1) AS kept
+        """,
+        [Id]
+    ),
+    ?assertEqual(1, Kept).
 
 lock_waiters() ->
     #{rows := [#{waiting := Waiting}]} = shigoto_db:query(

@@ -954,38 +954,39 @@ state_filter_clause(States, Idx) when is_list(States) ->
     IBin = integer_to_binary(Idx),
     {[<<"state = ANY($", IBin/binary, ")">>], [encode_pg_array(States)], Idx + 1}.
 
--doc "Archive completed/discarded/cancelled jobs older than given days. Moves to archive table then deletes.".
+-doc """
+Move the completed, discarded and cancelled jobs older than `Days` days to the
+archive table. One statement deletes them and inserts what it deleted, so a
+job is never deleted without having been copied. Answers how many it moved.
+""".
 -spec archive_jobs(atom(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
 archive_jobs(Pool, Days) ->
-    InsertSQL =
-        <<
-            "INSERT INTO shigoto_jobs_archive\n"
-            "(id, queue, worker, args, state, priority, attempt, max_attempts,\n"
-            " scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,\n"
-            " inserted_at, errors, meta, unique_key, tags, progress, batch_id,\n"
-            " heartbeat_at, partition_key, depends_on, result, deps_results)\n"
-            "SELECT id, queue, worker, args, state, priority, attempt, max_attempts,\n"
-            " scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,\n"
-            " inserted_at, errors, meta, unique_key, tags, progress, batch_id,\n"
-            " heartbeat_at, partition_key, depends_on, result, deps_results\n"
-            "FROM shigoto_jobs\n"
-            "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
-            "AND inserted_at < now() - make_interval(days => $1)\n"
-            "ON CONFLICT (id) DO NOTHING"
-        >>,
-    DeleteSQL =
-        <<
-            "DELETE FROM shigoto_jobs\n"
-            "WHERE state IN ('completed', 'discarded', 'cancelled')\n"
-            "AND inserted_at < now() - make_interval(days => $1)"
-        >>,
-    shigoto_db:transaction(Pool, fun() ->
-        _ = query(Pool, InsertSQL, [Days]),
-        case query(Pool, DeleteSQL, [Days]) of
-            #{num_rows := Count} -> {ok, Count};
-            {error, _} = Err -> Err
-        end
-    end).
+    SQL =
+        ~"""
+        WITH moved AS (
+          DELETE FROM shigoto_jobs
+          WHERE state IN ('completed', 'discarded', 'cancelled')
+          AND inserted_at < now() - make_interval(days => $1)
+          RETURNING *
+        ), archived AS (
+          INSERT INTO shigoto_jobs_archive
+          (id, queue, worker, args, state, priority, attempt, max_attempts,
+           scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,
+           inserted_at, errors, meta, unique_key, tags, progress, batch_id,
+           heartbeat_at, partition_key, depends_on, result, deps_results)
+          SELECT id, queue, worker, args, state, priority, attempt, max_attempts,
+           scheduled_at, attempted_at, completed_at, discarded_at, cancelled_at,
+           inserted_at, errors, meta, unique_key, tags, progress, batch_id,
+           heartbeat_at, partition_key, depends_on, result, deps_results
+          FROM moved
+          ON CONFLICT (id) DO NOTHING
+        )
+        SELECT count(*) AS moved FROM moved
+        """,
+    case query(Pool, SQL, [Days]) of
+        #{rows := [#{moved := Count}]} when is_integer(Count) -> {ok, Count};
+        {error, _} = Err -> Err
+    end.
 
 -doc """
 Upsert a cron entry, keyed by `name`.
