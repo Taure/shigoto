@@ -66,9 +66,10 @@ tables, trigger, and notify function. Edit the versioned statements in
 `fmt --check` -> `xref` -> `dialyzer` -> `elp eqwalize-all` -> `elp lint` -> `hank` -> `eunit` ->
 `ct` (against Docker Postgres) -> `ex_doc`, all green. Lint with `elp lint`;
 there is no elvis config and no `rebar3_lint` plugin. CI (`Taure/erlang-ci`
-ci.yml `@v2.1.7`) runs ct, ex_doc, hank, coverage, elp-lint, dependency
-submission, and SBOM generation plus a Trivy scan of it (`rebar3_sbom`, the
-Taure fork); `audit` and `elp-eqwalize` are disabled for this repo.
+ci.yml `@v2.1.7`) runs ct, ex_doc, hank, coverage, elp-lint, elp-eqwalize
+(on pull requests, the whole tree), dependency submission, and SBOM generation
+plus a Trivy scan of it (`rebar3_sbom`, the Taure fork); `audit` is disabled
+for this repo.
 Every push to `main` runs release.yml.
 
 ## Conventions
@@ -245,8 +246,10 @@ rescues jobs that are still running here.
   V}]}`, never tuple rows; tuple matches silently never match.
 - CT suites need Docker Postgres (`:5556`, or set `SHIGOTO_TEST_DB_PORT`); they exercise the real locking and
   transactions - do not stub the DB out of them.
-- `elp eqwalize-all` reports no errors (after `rebar3 as test compile`); keep
-  it there. It is still off in CI (`enable-elp-eqwalize`), so run it by hand.
+- `elp eqwalize-all` reports no errors (after `rebar3 as test compile`), src
+  and test, and CI fails a pull request that adds one. CI runs it on OTP 28:
+  `mise exec erlang@28.4.1 -- elp eqwalize-all`. `max/2` and `min/2` answer
+  `term()` to it: use a guard or a small specced function.
   No `eqwalizer:fixme`/`ignore`, no `nowarn`. `dynamic()` only where a value
   comes from outside (kura, connection options, a configured fun). eqwalizer
   loses the element type through `lists:foreach/usort/join/enumerate/sublist`
