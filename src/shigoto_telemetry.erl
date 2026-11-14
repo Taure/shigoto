@@ -242,7 +242,7 @@ job_exception(Job, Carrier, Duration, {Class, Reason}) ->
         [shigoto, job, exception],
         #{duration => Duration, monotonic_time => erlang:monotonic_time()},
         (job_meta(Job))#{
-            carrier => Carrier, kind => Class, reason => shigoto_error:text({Class, Reason})
+            carrier => Carrier, kind => Class, reason => shigoto_error:text({Class, Reason, []})
         }
     ).
 

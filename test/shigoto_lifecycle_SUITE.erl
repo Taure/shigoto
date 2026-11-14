@@ -17,6 +17,7 @@ the application does with it.
     a_scheduled_job_runs_when_due/1,
     a_snoozed_job_runs_again_later/1,
     a_failed_job_runs_again_after_its_backoff/1,
+    an_error_perform_answers_is_not_recorded_as_one_it_raised/1,
     a_retry_is_woken_by_the_stager/1,
     a_job_out_of_attempts_is_discarded/1,
     a_crash_in_perform_is_recorded_without_its_args/1,
@@ -114,6 +115,7 @@ all() ->
         a_scheduled_job_runs_when_due,
         a_snoozed_job_runs_again_later,
         a_failed_job_runs_again_after_its_backoff,
+        an_error_perform_answers_is_not_recorded_as_one_it_raised,
         a_retry_is_woken_by_the_stager,
         a_job_out_of_attempts_is_discarded,
         a_crash_in_perform_is_recorded_without_its_args,
@@ -356,6 +358,30 @@ a_failed_job_runs_again_after_its_backoff(_Config) ->
     Done = await(Id, ~"completed"),
     ?assertMatch(#{attempt := 2}, Done),
     ?assertMatch([_], errors(Done)).
+
+an_error_perform_answers_is_not_recorded_as_one_it_raised(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, job, failed], fun ?MODULE:forward/4, self()),
+    Answered = enqueue(~"answered", #{max_attempts => 1}),
+    instruct(performing(~"answered"), {return, {error, {error, quota}}}),
+    [Entry] = errors(await(Answered, ~"discarded")),
+    ?assertMatch(#{~"error" := ~"{error,quota}"}, Entry),
+    ?assertNot(is_map_key(~"stacktrace", Entry)),
+    receive
+        {telemetry, [shigoto, job, failed], _, #{job_id := Answered, reason := Reason}} ->
+            ?assertEqual(~"{error,quota}", Reason)
+    after 2000 -> ct:fail(no_failed_event)
+    end,
+    Raised = enqueue(~"raised", #{max_attempts => 1}),
+    instruct(performing(~"raised"), crash),
+    ?assertMatch(
+        [#{~"error" := ~"error:deliberate_crash", ~"stacktrace" := _}],
+        errors(await(Raised, ~"discarded"))
+    ),
+    receive
+        {telemetry, [shigoto, job, failed], _, #{job_id := Raised, reason := RaisedReason}} ->
+            ?assertEqual(~"error:deliberate_crash", RaisedReason)
+    after 2000 -> ct:fail(no_failed_event)
+    end.
 
 a_retry_is_woken_by_the_stager(_Config) ->
     Id = enqueue(~"staged"),

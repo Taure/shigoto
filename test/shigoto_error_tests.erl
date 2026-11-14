@@ -94,7 +94,7 @@ text_is_as_given_without_a_key() ->
     ?assertEqual(
         ~"{card_declined,<<\"4111\">>,3}", shigoto_error:text({card_declined, ~"4111", 3})
     ),
-    ?assertEqual(~"error:<<\"4111\">>", shigoto_error:text({error, ~"4111"})),
+    ?assertEqual(~"{error,<<\"4111\">>}", shigoto_error:text({error, ~"4111"})),
     %% A stack never keeps its arguments, key or no key.
     Stack = [{my_worker, perform, [#{~"card" => ?SECRET}], []}],
     Text = stacktrace(shigoto_error:entry(#{}, {error, failed, Stack})),
@@ -111,9 +111,14 @@ text_is_bounded_and_always_valid() ->
 
 only_a_caught_class_prints_as_class_and_reason() ->
     application:unset_env(shigoto, encryption_key),
-    ?assertEqual(~"error:badarg", shigoto_error:text({error, badarg})),
-    ?assertEqual(~"exit:normal", shigoto_error:text({exit, normal})),
-    ?assertEqual(~"throw:oops", shigoto_error:text({throw, oops})),
+    ?assertEqual(~"error:badarg", shigoto_error:text({error, badarg, []})),
+    ?assertEqual(~"exit:normal", shigoto_error:text({exit, normal, []})),
+    ?assertEqual(~"throw:oops", shigoto_error:text({throw, oops, [{m, f, 1, []}]})),
+    %% A catch gives a stacktrace. Without one it is what perform/1 answered
+    %% in `{error, Reason}`, and `{error, {error, quota}}` raised nothing.
+    ?assertEqual(~"{error,quota}", shigoto_error:text({error, quota})),
+    ?assertEqual(~"{exit,normal}", shigoto_error:text({exit, normal})),
+    ?assertEqual(~"{throw,oops}", shigoto_error:text({throw, oops})),
     ?assertEqual(~"{rejected,<<\"quota\">>}", shigoto_error:text({rejected, ~"quota"})),
     ?assertEqual(~"{unknown_worker,<<\"lists\">>}", shigoto_error:text({unknown_worker, ~"lists"})),
     ?assertEqual(~"{http,503,\"body\"}", shigoto_error:text({http, 503, "body"})),

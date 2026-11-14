@@ -87,6 +87,10 @@ values:
 That goes for the `Reason` of `{error, Reason}` returned from `perform/1` as
 well. Return an atom, or a tuple of atoms, for what you want to read later.
 
+What `perform/1` raised is recorded as `Class:Reason`, with a `stacktrace`. What
+it returned is recorded as the term: `{error, {error, quota}}` gives
+`{error,quota}` and no stacktrace, not `error:quota`.
+
 Without a key the reason is recorded as it is; the args are in the clear in the
 same row. Stack frames lose their arguments either way.
 

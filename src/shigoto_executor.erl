@@ -182,7 +182,7 @@ crashed(Job, Class, Reason, Stack) ->
         msg => ~"shigoto_executor_crashed",
         job_id => maps:get(id, Job, undefined),
         attempt => maps:get(attempt, Job, undefined),
-        reason => shigoto_error:text({Class, Reason}),
+        reason => shigoto_error:text({Class, Reason, Stack}),
         stacktrace => shigoto_error:stack(Stack),
         note => ~"the row stays executing until the stale-job rescue returns it to the queue"
     }).
@@ -386,8 +386,8 @@ released(Job, Pool) ->
 announced({completed, _Result}, Job, Duration) ->
     _ = shigoto_telemetry:job_completed(Job, Duration),
     ok;
-announced({failed, _Stored, Reported}, Job, Duration) ->
-    _ = shigoto_telemetry:job_failed(Job, Reported, Duration),
+announced({failed, Stored, Reported}, Job, Duration) ->
+    _ = shigoto_telemetry:job_failed(Job, Stored, Duration),
     {error, Reported};
 announced({snooze, Seconds}, Job, _Duration) ->
     _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
@@ -432,7 +432,7 @@ recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
     Backoff = compute_backoff(Worker, Job, Stored),
     case shigoto_repo:fail_job(Pool, Job, Stored, Backoff) of
         ok ->
-            _ = shigoto_telemetry:job_failed(Job, Reported, Duration),
+            _ = shigoto_telemetry:job_failed(Job, Stored, Duration),
             _ = maybe_emit_discarded(Job),
             {error, Reported};
         {error, Reason} ->
