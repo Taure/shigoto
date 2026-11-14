@@ -155,6 +155,14 @@ shigoto_sup (one_for_one)
   sees the dependents committed before it began, so the rescue tick also runs
   `shigoto_repo:release_stuck_dependents/1` for jobs waiting on a job that has
   ended or is gone.
+- **Context propagation.** `shigoto_propagator` is a behaviour (`inject/0`,
+  `attach/1`, `detach/1`) named by the `propagator` setting; shigoto has no
+  tracing dependency. The carrier is stamped into `meta` under
+  `<<"_shigoto_carrier">>` in `shigoto_repo:insert_job/3` and `insert_all/3`
+  (the only two ways a job gets in), attached in the executor and in the
+  `perform/1` process, and is in the metadata of `[shigoto, job, start|stop|
+  exception]`. Bounded (32 entries, 4096 bytes); a propagator that raises or
+  oversteps is logged and never fails an insert or a job.
 - **Stale rescue.** Heartbeats + a per-queue `rescue` tick (`rescue_interval`)
   take back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
   claiming counts as the first heartbeat). A rescued job is re-queued, or

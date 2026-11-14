@@ -10,7 +10,7 @@ the application does with it.
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
--export([forward/4]).
+-export([forward/4, span_event/4]).
 -export([
     polling_alone_runs_an_inserted_job/1,
     a_notification_wakes_the_queue/1,
@@ -43,6 +43,16 @@ the application does with it.
     a_retried_job_does_not_finish_its_batch_early/1,
     a_batch_left_unsettled_is_settled_by_the_sweep/1,
     a_job_waiting_on_an_ended_job_is_released_by_the_sweep/1,
+    a_job_runs_in_the_context_it_was_inserted_in/1,
+    every_attempt_gets_the_same_context/1,
+    a_job_inserted_by_a_job_carries_on_from_it/1,
+    a_released_dependent_keeps_its_own_context/1,
+    a_bulk_and_a_transactional_insert_carry_the_context/1,
+    a_batch_callback_carries_on_from_the_job_that_finished_the_batch/1,
+    a_cron_job_gets_what_the_scheduler_injects/1,
+    a_crash_ends_the_attempt_with_an_exception_event/1,
+    a_propagator_that_misbehaves_fails_nothing/1,
+    without_a_propagator_nothing_is_carried/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1,
@@ -68,7 +78,8 @@ the application does with it.
     shutdown_timeout,
     encryption_key,
     encryption_write_format,
-    load_shedding
+    load_shedding,
+    propagator
 ]).
 
 all() ->
@@ -104,6 +115,16 @@ all() ->
         a_retried_job_does_not_finish_its_batch_early,
         a_batch_left_unsettled_is_settled_by_the_sweep,
         a_job_waiting_on_an_ended_job_is_released_by_the_sweep,
+        a_job_runs_in_the_context_it_was_inserted_in,
+        every_attempt_gets_the_same_context,
+        a_job_inserted_by_a_job_carries_on_from_it,
+        a_released_dependent_keeps_its_own_context,
+        a_bulk_and_a_transactional_insert_carry_the_context,
+        a_batch_callback_carries_on_from_the_job_that_finished_the_batch,
+        a_cron_job_gets_what_the_scheduler_injects,
+        a_crash_ends_the_attempt_with_an_exception_event,
+        a_propagator_that_misbehaves_fails_nothing,
+        without_a_propagator_nothing_is_carried,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete,
@@ -163,6 +184,20 @@ env(TestCase) ->
         overrides(TestCase)
     ).
 
+overrides(without_a_propagator_nothing_is_carried) ->
+    #{};
+overrides(TestCase) when
+    TestCase =:= a_job_runs_in_the_context_it_was_inserted_in;
+    TestCase =:= every_attempt_gets_the_same_context;
+    TestCase =:= a_job_inserted_by_a_job_carries_on_from_it;
+    TestCase =:= a_released_dependent_keeps_its_own_context;
+    TestCase =:= a_bulk_and_a_transactional_insert_carry_the_context;
+    TestCase =:= a_batch_callback_carries_on_from_the_job_that_finished_the_batch;
+    TestCase =:= a_cron_job_gets_what_the_scheduler_injects;
+    TestCase =:= a_crash_ends_the_attempt_with_an_exception_event;
+    TestCase =:= a_propagator_that_misbehaves_fails_nothing
+->
+    #{propagator => shigoto_fake_propagator};
 overrides(a_notification_wakes_the_queue) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_scheduled_job_runs_when_due) ->
@@ -500,6 +535,239 @@ performing_any(Tags) ->
             ?assert(lists:member(Tag, Tags)),
             Worker
     after 5000 -> ct:fail({never_performed, Tags})
+    end.
+
+%%----------------------------------------------------------------------
+%% Context
+%%----------------------------------------------------------------------
+
+a_job_runs_in_the_context_it_was_inserted_in(_Config) ->
+    ok = spans_to_self(),
+    Id = in_trace(~"trace-1", fun() -> enqueue(~"traced") end),
+    ?assertEqual(#{~"traceparent" => ~"trace-1"}, stored_carrier(Id)),
+    Worker = performing(~"traced"),
+    ?assertEqual(~"trace-1", trace_seen_by(Worker, ~"traced")),
+    instruct(Worker, {return, ok}),
+    _ = await(Id, ~"completed"),
+    Carrier = #{~"traceparent" => ~"trace-1"},
+    ?assertMatch({#{system_time := _}, #{job_id := Id, carrier := Carrier}}, span(start)),
+    ?assertMatch(
+        {#{duration := _}, #{job_id := Id, carrier := Carrier, outcome := completed}}, span(stop)
+    ),
+    %% The test process was never attached to.
+    ?assertEqual(undefined, shigoto_fake_propagator:trace()).
+
+every_attempt_gets_the_same_context(_Config) ->
+    ok = spans_to_self(),
+    Id = in_trace(~"trace-retried", fun() -> enqueue(~"traced-retry") end),
+    First = performing(~"traced-retry"),
+    ?assertEqual(~"trace-retried", trace_seen_by(First, ~"traced-retry")),
+    instruct(First, {return, {error, first_try}}),
+    _ = await(Id, ~"retryable"),
+    Second = performing(~"traced-retry"),
+    ?assertEqual(~"trace-retried", trace_seen_by(Second, ~"traced-retry")),
+    instruct(Second, {return, {snooze, 1}}),
+    Third = performing(~"traced-retry"),
+    ?assertEqual(~"trace-retried", trace_seen_by(Third, ~"traced-retry")),
+    instruct(Third, {return, ok}),
+    _ = await(Id, ~"completed"),
+    ?assertMatch({_, #{attempt := 1}}, span(start)),
+    ?assertMatch({_, #{attempt := 1, outcome := failed}}, span(stop)),
+    ?assertMatch({_, #{outcome := snoozed}}, span(stop)),
+    ?assertMatch({_, #{outcome := completed}}, span(stop)).
+
+a_job_inserted_by_a_job_carries_on_from_it(_Config) ->
+    Parent = in_trace(~"trace-parent", fun() -> enqueue(~"traced-parent") end),
+    Worker = performing(~"traced-parent"),
+    Me = list_to_binary(pid_to_list(self())),
+    instruct(
+        Worker,
+        {insert, #{
+            worker => shigoto_lifecycle_worker,
+            args => #{~"test" => Me, ~"tag" => ~"traced-child"}
+        }}
+    ),
+    Child =
+        receive
+            {inserted, ~"traced-parent", Id} -> Id
+        after 5000 -> ct:fail(no_child_inserted)
+        end,
+    ?assertEqual(#{~"traceparent" => ~"trace-parent"}, stored_carrier(Child)),
+    instruct(Worker, {return, ok}),
+    _ = await(Parent, ~"completed"),
+    ChildWorker = performing(~"traced-child"),
+    ?assertEqual(~"trace-parent", trace_seen_by(ChildWorker, ~"traced-child")),
+    instruct(ChildWorker, {return, ok}),
+    _ = await(Child, ~"completed").
+
+a_released_dependent_keeps_its_own_context(_Config) ->
+    Parent = in_trace(~"trace-first", fun() -> enqueue(~"traced-first") end),
+    Child = in_trace(
+        ~"trace-second", fun() -> enqueue(~"traced-second", #{depends_on => [Parent]}) end
+    ),
+    instruct(performing(~"traced-first"), {return, {ok, #{~"rows" => 1}}}),
+    {Worker, Args} = performing_with_args(~"traced-second"),
+    ?assertEqual(#{Parent => #{~"rows" => 1}}, maps:get(deps_results, Args)),
+    ?assertEqual(~"trace-second", trace_seen_by(Worker, ~"traced-second")),
+    instruct(Worker, {return, ok}),
+    _ = await(Child, ~"completed").
+
+a_bulk_and_a_transactional_insert_carry_the_context(_Config) ->
+    Me = list_to_binary(pid_to_list(self())),
+    Params = fun(Tag) ->
+        #{worker => shigoto_lifecycle_worker, args => #{~"test" => Me, ~"tag" => Tag}}
+    end,
+    {ok, Bulk} = in_trace(~"trace-bulk", fun() ->
+        shigoto:insert_all([Params(~"bulk-1"), Params(~"bulk-2")])
+    end),
+    [
+        ?assertEqual(#{~"traceparent" => ~"trace-bulk"}, stored_carrier(Id))
+     || #{id := Id} <- Bulk
+    ],
+    {ok, #{id := InTxn}} = in_trace(~"trace-txn", fun() ->
+        shigoto:transaction(fun() -> shigoto:insert(Params(~"txn")) end)
+    end),
+    ?assertEqual(#{~"traceparent" => ~"trace-txn"}, stored_carrier(InTxn)),
+    %% A carrier the caller put there itself is kept.
+    {ok, #{id := Own}} = in_trace(~"trace-ignored", fun() ->
+        shigoto:insert(
+            (Params(~"own"))#{
+                meta => #{shigoto_propagator:key() => #{~"traceparent" => ~"trace-own"}}
+            }
+        )
+    end),
+    ?assertEqual(#{~"traceparent" => ~"trace-own"}, stored_carrier(Own)),
+    ok = answer_all(4).
+
+a_batch_callback_carries_on_from_the_job_that_finished_the_batch(_Config) ->
+    BatchId = new_batch(),
+    Id = in_trace(~"trace-batch", fun() -> enqueue(~"traced-batch", #{batch => BatchId}) end),
+    instruct(performing(~"traced-batch"), {return, ok}),
+    _ = await(Id, ~"completed"),
+    receive
+        {batch_callback, _Args} -> ok
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    #{rows := [#{id := Callback}]} = shigoto_db:query(
+        ?POOL, ~"SELECT id FROM shigoto_jobs WHERE worker = 'shigoto_batch_callback_worker'", []
+    ),
+    ?assertEqual(#{~"traceparent" => ~"trace-batch"}, stored_carrier(Callback)).
+
+a_cron_job_gets_what_the_scheduler_injects(_Config) ->
+    Me = list_to_binary(pid_to_list(self())),
+    application:set_env(shigoto, cron, [
+        {~"traced-cron", ~"* * * * *", shigoto_lifecycle_worker, #{
+            ~"test" => Me, ~"tag" => ~"traced-cron"
+        }}
+    ]),
+    try
+        %% The pass runs in this process: with a context, as the scheduler
+        %% would have one if the propagator gave it one, and without.
+        _ = in_trace(~"trace-cron", fun shigoto_cron:schedule_once/0),
+        {Worker, _} = performing_with_args(~"traced-cron"),
+        ?assertEqual(~"trace-cron", trace_seen_by(Worker, ~"traced-cron")),
+        instruct(Worker, {return, ok}),
+        #{rows := [#{id := Id}]} = shigoto_db:query(
+            ?POOL, ~"SELECT id FROM shigoto_jobs WHERE worker = 'shigoto_lifecycle_worker'", []
+        ),
+        ?assertEqual(#{~"traceparent" => ~"trace-cron"}, stored_carrier(Id))
+    after
+        application:unset_env(shigoto, cron),
+        shigoto_db:query(?POOL, ~"DELETE FROM shigoto_cron", [])
+    end.
+
+a_crash_ends_the_attempt_with_an_exception_event(_Config) ->
+    ok = spans_to_self(),
+    Id = in_trace(~"trace-crash", fun() -> enqueue(~"traced-crash", #{max_attempts => 1}) end),
+    instruct(performing(~"traced-crash"), crash),
+    _ = await(Id, ~"discarded"),
+    Carrier = #{~"traceparent" => ~"trace-crash"},
+    ?assertMatch({_, #{job_id := Id, carrier := Carrier}}, span(start)),
+    ?assertMatch(
+        {#{duration := _}, #{
+            job_id := Id,
+            carrier := Carrier,
+            kind := error,
+            reason := <<"error:deliberate_crash", _/binary>>
+        }},
+        span(exception)
+    ).
+
+a_propagator_that_misbehaves_fails_nothing(_Config) ->
+    ok = spans_to_self(),
+    Raised = in_trace(raise, fun() -> enqueue(~"inject-raises") end),
+    ?assertEqual(#{}, stored_carrier(Raised)),
+    Oversized = in_trace(oversized, fun() -> enqueue(~"inject-oversized") end),
+    ?assertEqual(#{}, stored_carrier(Oversized)),
+    Unattachable = in_trace(~"unattachable", fun() -> enqueue(~"attach-raises") end),
+    ?assertEqual(#{~"traceparent" => ~"unattachable"}, stored_carrier(Unattachable)),
+    ok = answer_all(3),
+    [_ = await(Id, ~"completed") || Id <- [Raised, Oversized, Unattachable]],
+    %% What a writer to the table put where a carrier goes is not attached.
+    Me = list_to_binary(pid_to_list(self())),
+    #{rows := [#{id := Forged}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, meta)
+        VALUES ($1, 'shigoto_lifecycle_worker', $2::jsonb, $3::jsonb) RETURNING id
+        """,
+        [
+            ?QUEUE,
+            iolist_to_binary(json:encode(#{~"test" => Me, ~"tag" => ~"forged"})),
+            ~"{\"_shigoto_carrier\": {\"traceparent\": 7}}"
+        ]
+    ),
+    Worker = performing(~"forged"),
+    ?assertEqual(undefined, trace_seen_by(Worker, ~"forged")),
+    instruct(Worker, {return, ok}),
+    _ = await(Forged, ~"completed").
+
+without_a_propagator_nothing_is_carried(_Config) ->
+    ok = spans_to_self(),
+    Id = in_trace(~"trace-unused", fun() -> enqueue(~"untraced") end),
+    ?assertEqual(#{}, stored_carrier(Id)),
+    ?assertMatch(#{meta := ~"{}"}, row(Id)),
+    Worker = performing(~"untraced"),
+    ?assertEqual(undefined, trace_seen_by(Worker, ~"untraced")),
+    instruct(Worker, {return, ok}),
+    _ = await(Id, ~"completed"),
+    ?assertMatch({_, #{job_id := Id, carrier := #{}}}, span(start)),
+    ?assertMatch({_, #{job_id := Id, carrier := #{}, outcome := completed}}, span(stop)).
+
+in_trace(Trace, Insert) ->
+    _ = shigoto_fake_propagator:trace(Trace),
+    try
+        Insert()
+    after
+        shigoto_fake_propagator:clear()
+    end.
+
+stored_carrier(Id) ->
+    shigoto_propagator:carrier(row(Id)).
+
+trace_seen_by(Worker, Tag) ->
+    instruct(Worker, report_trace),
+    receive
+        {trace, Tag, Trace} -> Trace
+    after 5000 -> ct:fail({no_trace_reported, Tag})
+    end.
+
+spans_to_self() ->
+    telemetry:attach_many(
+        ?MODULE,
+        [[shigoto, job, start], [shigoto, job, stop], [shigoto, job, exception]],
+        fun ?MODULE:span_event/4,
+        self()
+    ).
+
+span_event([shigoto, job, Edge], Measurements, Metadata, Owner) when is_pid(Owner) ->
+    Owner ! {span, Edge, Measurements, Metadata},
+    ok.
+
+span(Edge) ->
+    receive
+        {span, Edge, Measurements, Metadata} -> {Measurements, Metadata}
+    after 5000 -> ct:fail({no_span_event, Edge})
     end.
 
 %%----------------------------------------------------------------------

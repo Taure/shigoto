@@ -74,6 +74,7 @@ config :shigoto,
 | `workers` | `undefined` | Modules allowed to run as workers (see [Security](security.md)) |
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
 | `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
+| `propagator` | `undefined` | Module that carries a trace context from insert to run (see [Context Propagation](context-propagation.md)) |
 | `on_dependency_failure` | `run` | What a waiting job does when a dependency fails, unless the job sets it (see [Dependencies](dependencies.md)) |
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |

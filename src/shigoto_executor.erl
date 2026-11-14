@@ -208,17 +208,38 @@ unrunnable_message(_Unreadable) -> ~"shigoto_job_unreadable".
 %% made with. `Opened` is its decrypted form, used for the run and nothing else.
 performed_by(Worker, Job, Opened, Pool, Timeout, Run) ->
     set_logger_metadata(Job, Worker),
+    Carrier = shigoto_propagator:carrier(Opened),
+    Attachment = shigoto_propagator:attached(Carrier),
+    _ = shigoto_telemetry:job_start(Job, Carrier),
     T0 = erlang:monotonic_time(native),
     try
         Outcome = outcome(Opened, Worker, Timeout, caller(Run)),
         Duration = erlang:monotonic_time(native) - T0,
+        _ = run_over(Outcome, Job, Carrier, Duration),
         Answer = concluded(Run, Outcome, Job, Pool, Worker, Duration),
         ok = gates_told(Outcome, Worker, Run),
         Answer
     after
         shigoto_resilience:release_bulkhead(Worker),
+        shigoto_propagator:detached(Attachment),
         clear_logger_metadata()
     end.
+
+%% The attempt is over, before its outcome is written: `exception` when
+%% perform/1 or a middleware raised, `stop` for everything else.
+-spec run_over(outcome(), map(), shigoto_propagator:carrier(), integer()) -> ok.
+run_over({failed, {Class, Reason, Stack}, {Class, Reason}}, Job, Carrier, Duration) when
+    is_atom(Class), is_list(Stack)
+->
+    shigoto_telemetry:job_exception(Job, Carrier, Duration, {Class, Reason});
+run_over({completed, _Result}, Job, Carrier, Duration) ->
+    shigoto_telemetry:job_stop(Job, Carrier, Duration, completed);
+run_over({failed, _Stored, _Reported}, Job, Carrier, Duration) ->
+    shigoto_telemetry:job_stop(Job, Carrier, Duration, failed);
+run_over({stopped, _Why}, Job, Carrier, Duration) ->
+    shigoto_telemetry:job_stop(Job, Carrier, Duration, stopped);
+run_over(_Snoozed, Job, Carrier, Duration) ->
+    shigoto_telemetry:job_stop(Job, Carrier, Duration, snoozed).
 
 caller(drained) -> drain;
 caller(_Queued) -> {executor, supervisor()}.
@@ -577,10 +598,13 @@ spawn_worker(Module, Function, Args, Options) ->
     Self = self(),
     Metadata = logger:get_process_metadata(),
     IgnoresSandbox = shigoto_db:ignores_sandbox(),
+    Carrier = shigoto_propagator:current(),
     spawn_opt(
         fun() ->
             ok = inherit_sandbox_scope(IgnoresSandbox),
             inherit_logger_metadata(Metadata),
+            %% Never detached: the context goes when the process does.
+            _ = shigoto_propagator:attached(Carrier),
             Self ! {self(), applied(Module, Function, Args)}
         end,
         Options

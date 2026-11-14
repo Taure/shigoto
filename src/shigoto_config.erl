@@ -35,6 +35,7 @@ Configuration access for Shigoto. Reads from application env.
     notify_min_interval/0,
     notify_channel/0,
     fanout_queues/0,
+    propagator/0,
     check/0
 ]).
 
@@ -248,6 +249,18 @@ fanout_queues() ->
     [Queue || {_Name, _Concurrency, _Opts} = Queue <- list_setting(fanout_queues)].
 
 -doc """
+The module that carries a context from the process that inserts a job to the
+processes that run it (`m:shigoto_propagator`). Default: `undefined`, nothing
+is carried.
+""".
+-spec propagator() -> module() | undefined.
+propagator() ->
+    case setting(propagator, undefined) of
+        Module when is_atom(Module) -> Module;
+        _NotAModule -> undefined
+    end.
+
+-doc """
 The frame `m:shigoto_crypto` writes: `v2` (the default) or `v1`.
 
 `v1` is what releases up to 1.10 write and is all they can read. Set it for
@@ -362,7 +375,8 @@ check() ->
         ok = checked(workers_checked(setting(workers, undefined))),
         ok = checked(instance_checked(setting(instance, undefined))),
         ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000))),
-        ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10)))
+        ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10))),
+        ok = checked(shigoto_propagator:check(setting(propagator, undefined)))
     catch
         error:{shigoto_config, Reason} -> {error, {shigoto_config, Reason}}
     end.

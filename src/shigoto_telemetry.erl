@@ -18,7 +18,8 @@ Measurement units:
 Every event carries `domain => [shigoto]` in its metadata (used by the OTP
 logger for filtering); it is omitted from the tables below for brevity.
 
-No event carries a job's `args`, `meta`, `result` or `deps_results`. The
+No event carries a job's `args`, `meta`, `result` or `deps_results`, apart from
+the carrier a propagator put in `meta` (`start`, `stop`, `exception`). The
 `reason` of `[shigoto, job, failed]` is text written by `shigoto_error:text/1`:
 at most 1024 bytes, and with an encryption key configured only the shape
 of the failure, with every value that is not an atom replaced by `'_'`.
@@ -29,6 +30,9 @@ of the failure, with every value that is not an atom replaced by `'_'`.
 |-------|-------------|----------|
 | `[shigoto, job, inserted]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, claimed]` | `count, queue_wait_ms` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, start]` | `system_time, monotonic_time` | job_id, worker, queue, attempt, priority, carrier |
+| `[shigoto, job, stop]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, outcome |
+| `[shigoto, job, exception]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, kind, reason |
 | `[shigoto, job, completed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, failed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority, reason |
 | `[shigoto, job, snoozed]` | `count` | job_id, worker, queue, attempt, priority, snooze_reason |
@@ -38,6 +42,16 @@ of the failure, with every value that is not an atom replaced by `'_'`.
 | `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
 | `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
 | `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
+
+`start`, `stop` and `exception` bracket one attempt, in the shape
+`telemetry:span/3` gives: `start` before the gates and `perform/1`, then
+exactly one of `stop` (`outcome`: `completed`, `failed` for an `{error, _}`
+answer, `snoozed`, or `stopped`) or `exception` (`kind` is `error`, `exit` or
+`throw`; `reason` is text as for `failed`). They fire before the outcome is
+written, so `completed`, `failed` or `snoozed` still follows, or `lost`.
+`carrier` is the job's context as `m:shigoto_propagator` stored it at insert,
+`#{}` without one. A job that cannot be run (unknown worker, a column that does
+not open) has no `start`.
 
 `lost` fires when a run's claim no longer held: the job had been rescued and
 claimed again, or cancelled on another node, while this run was going. Either
@@ -142,6 +156,9 @@ insert behaviour is active. See `shigoto_config:testing_mode/0`.
     %% Job events
     job_inserted/1,
     job_claimed/1,
+    job_start/2,
+    job_stop/4,
+    job_exception/4,
     job_completed/2,
     job_failed/3,
     job_snoozed/2,
@@ -190,6 +207,35 @@ job_claimed(Job) ->
     QueueWait = queue_wait_ms(Job),
     Meta = job_meta(Job),
     telemetry:execute([shigoto, job, claimed], #{count => 1, queue_wait_ms => QueueWait}, Meta).
+
+-spec job_start(map(), shigoto_propagator:carrier()) -> ok.
+job_start(Job, Carrier) ->
+    telemetry:execute(
+        [shigoto, job, start],
+        #{system_time => erlang:system_time(), monotonic_time => erlang:monotonic_time()},
+        (job_meta(Job))#{carrier => Carrier}
+    ).
+
+-spec job_stop(
+    map(), shigoto_propagator:carrier(), integer(), completed | failed | snoozed | stopped
+) ->
+    ok.
+job_stop(Job, Carrier, Duration, Outcome) ->
+    telemetry:execute(
+        [shigoto, job, stop],
+        #{duration => Duration, monotonic_time => erlang:monotonic_time()},
+        (job_meta(Job))#{carrier => Carrier, outcome => Outcome}
+    ).
+
+-spec job_exception(map(), shigoto_propagator:carrier(), integer(), {atom(), term()}) -> ok.
+job_exception(Job, Carrier, Duration, {Class, Reason}) ->
+    telemetry:execute(
+        [shigoto, job, exception],
+        #{duration => Duration, monotonic_time => erlang:monotonic_time()},
+        (job_meta(Job))#{
+            carrier => Carrier, kind => Class, reason => shigoto_error:text({Class, Reason})
+        }
+    ).
 
 -spec job_completed(map(), integer()) -> ok.
 job_completed(Job, Duration) ->

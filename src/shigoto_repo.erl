@@ -75,7 +75,9 @@ that has already failed is not inserted: `{error, {dependency_failed, Ids}}`.
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert_job(Pool, JobParams0, Opts) ->
-    JobParams1 = apply_worker_defaults(JobParams0),
+    JobParams1 = shigoto_propagator:stamped(
+        apply_worker_defaults(JobParams0), shigoto_propagator:injected()
+    ),
     case stated_policy(JobParams1) of
         {error, _} = Invalid -> Invalid;
         {ok, _Policy} -> insert_validated(Pool, JobParams1, Opts)
@@ -114,7 +116,8 @@ or pass `unique => false` in `Opts` to say that duplicates are wanted.
 insert_all(_Pool, [], _Opts) ->
     {ok, []};
 insert_all(Pool, JobParamsList, Opts) ->
-    Jobs = [apply_worker_defaults(J) || J <- JobParamsList],
+    Carrier = shigoto_propagator:injected(),
+    Jobs = [shigoto_propagator:stamped(apply_worker_defaults(J), Carrier) || J <- JobParamsList],
     case bulk_insertable(Jobs, Opts) of
         ok ->
             case with_dependencies(Pool, Jobs) of

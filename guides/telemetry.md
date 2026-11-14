@@ -27,6 +27,9 @@ logger for filtering); it is omitted from the tables below for brevity.
 |-------|-------------|----------|
 | `[shigoto, job, inserted]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, claimed]` | `count, queue_wait_ms` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, start]` | `system_time, monotonic_time` | job_id, worker, queue, attempt, priority, carrier |
+| `[shigoto, job, stop]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, outcome |
+| `[shigoto, job, exception]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, kind, reason |
 | `[shigoto, job, completed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, failed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority, reason |
 | `[shigoto, job, snoozed]` | `count` | job_id, worker, queue, attempt, priority, snooze_reason |
@@ -36,6 +39,13 @@ logger for filtering); it is omitted from the tables below for brevity.
 | `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
 | `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
 | `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
+
+`start`, `stop` and `exception` bracket one attempt, as `telemetry:span/3`
+would: `start`, then exactly one of `stop` (`outcome`: `completed`, `failed`,
+`snoozed` or `stopped`) or `exception` (`kind`, `reason`). They fire before
+the outcome is written, so `completed`, `failed` or `snoozed` still follows.
+`carrier` is the job's context, see
+[Context Propagation](context-propagation.md).
 
 `lost` fires when a run's claim no longer held: the job had been rescued and
 claimed again, or cancelled on another node, while this run was going. Either

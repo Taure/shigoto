@@ -91,7 +91,9 @@ Bounds, with or without a key: 1024 bytes per reason, 16 frames and 4096
 bytes per stack, the 50 newest entries per job.
 
 Log events and telemetry metadata carry the job's id, worker, queue, attempt
-and priority, never its args, meta or result.
+and priority, never its args, meta or result. The one exception is the carrier
+a [propagator](context-propagation.md) put in `meta`, which the `start`, `stop`
+and `exception` events carry: keep secrets out of it.
 
 ## Advisory locks
 

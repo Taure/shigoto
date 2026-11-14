@@ -9,15 +9,29 @@ does what it is told.
 
 perform(#{~"test" := Test, ~"tag" := Tag} = Args) ->
     owner(Test) ! {performing, Tag, self(), Args},
+    instructed(Args).
+
+instructed(Args) ->
     receive
         {instruct, Instruction} -> follow(Instruction, Args)
     after 30000 -> {error, no_instruction}
     end.
 
-follow({return, Value}, _Args) -> Value;
-follow(crash, _Args) -> error(deliberate_crash);
-follow(no_clause, Args) -> only_absent(Args);
-follow(die, _Args) -> exit(self(), kill).
+follow({return, Value}, _Args) ->
+    Value;
+follow(report_trace, #{~"test" := Test, ~"tag" := Tag} = Args) ->
+    owner(Test) ! {trace, Tag, shigoto_fake_propagator:trace()},
+    instructed(Args);
+follow({insert, Params}, #{~"test" := Test, ~"tag" := Tag} = Args) ->
+    {ok, #{id := Id}} = shigoto:insert(Params),
+    owner(Test) ! {inserted, Tag, Id},
+    instructed(Args);
+follow(crash, _Args) ->
+    error(deliberate_crash);
+follow(no_clause, Args) ->
+    only_absent(Args);
+follow(die, _Args) ->
+    exit(self(), kill).
 
 only_absent(#{~"absent" := _}) -> ok.
 

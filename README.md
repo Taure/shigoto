@@ -266,6 +266,8 @@ shigoto_sup (one_for_one)
 - [Job Dependencies](guides/dependencies.md)
 - [Encryption](guides/encryption.md)
 - [Security](guides/security.md)
+- [Telemetry](guides/telemetry.md)
+- [Context Propagation](guides/context-propagation.md)
 - [Testing](guides/testing.md)
 
 ## Ecosystem
