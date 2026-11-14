@@ -9,6 +9,10 @@ calling process, for `shigoto:drain_queue/1,2`, with one difference: it does not
 report the outcome to the worker's circuit breaker, so a test that drains
 failing jobs does not open the breaker for the jobs after it.
 
+A job from a fanout queue is run without a claim, by every node. Its row is not
+this node's to change, so the executor writes nothing for it: the outcome goes
+to telemetry only and the row stays `available` for the other nodes.
+
 The outcome is written under the claim the job was started with (see
 `t:shigoto_repo:claim/0`). When that claim no longer holds, because the job was
 rescued and claimed again or cancelled while this run was going, the write
@@ -22,14 +26,21 @@ stale-job rescue returns it to the queue.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/3, execute_sync/3, run_perform/4, running/1]).
+-export([start_link/3, start_link/4, execute_sync/3, run_perform/4, running/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
     job :: map(),
     pool :: atom(),
-    queue_pid :: pid()
+    queue_pid :: pid(),
+    run :: run()
 }).
+
+-doc """
+How a job is being run: `claimed` by a queue, `drained` in the calling process,
+or `fanout`, where every node runs it and none owns the row.
+""".
+-type run() :: claimed | drained | fanout.
 
 -type outcome() ::
     {completed, term()}
@@ -39,7 +50,12 @@ stale-job rescue returns it to the queue.
 
 -doc false.
 start_link(Job, Pool, QueuePid) ->
-    gen_server:start_link(?MODULE, {Job, Pool, QueuePid}, []).
+    start_link(Job, Pool, QueuePid, claimed).
+
+-doc false.
+-spec start_link(map(), atom(), pid(), claimed | fanout) -> gen_server:start_ret().
+start_link(Job, Pool, QueuePid, Run) ->
+    gen_server:start_link(?MODULE, {Job, Pool, QueuePid, Run}, []).
 
 -doc """
 Execute a claimed job in the calling process (for `shigoto:drain_queue/1,2`).
@@ -50,7 +66,7 @@ instead: `{error, lost}` when the claim no longer held, or the database error.
 """.
 -spec execute_sync(map(), atom(), timeout()) -> ok | {snooze, pos_integer()} | {error, term()}.
 execute_sync(Job, Pool, Timeout) ->
-    executed(Job, Pool, Timeout, leave_breaker).
+    executed(Job, Pool, Timeout, drained).
 
 -doc "The executor processes running a job on this node.".
 -spec running(integer()) -> [pid()].
@@ -61,19 +77,19 @@ running(JobId) ->
     end.
 
 -doc false.
-init({Job, Pool, QueuePid}) ->
+init({Job, Pool, QueuePid, Run}) ->
     ok = shigoto_db:ignore_sandbox(),
-    ets:insert(shigoto_executors, {registered_as(Job), self()}),
+    ets:insert(shigoto_executors, {registered_as(Job, Run), self()}),
     gen_server:cast(self(), execute),
-    {ok, #state{job = Job, pool = Pool, queue_pid = QueuePid}}.
+    {ok, #state{job = Job, pool = Pool, queue_pid = QueuePid, run = Run}}.
 
 -doc false.
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 -doc false.
-handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid} = State) ->
-    _ = executed(Job, Pool, worker_timeout, tell_breaker),
+handle_cast(execute, #state{job = Job, pool = Pool, queue_pid = QueuePid, run = Run} = State) ->
+    _ = executed(Job, Pool, worker_timeout, Run),
     gen_server:cast(QueuePid, {job_finished, maps:get(id, Job), self()}),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
@@ -84,30 +100,33 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -doc false.
-terminate(_Reason, #state{job = Job}) ->
-    ets:delete(shigoto_executors, registered_as(Job)),
+terminate(_Reason, #state{job = Job, run = Run}) ->
+    ets:delete(shigoto_executors, registered_as(Job, Run)),
     ok.
 
 %% A job that is rescued and claimed again while its first run is still going
-%% has two executors for a while; the attempt tells them apart.
-registered_as(Job) ->
-    {maps:get(id, Job), maps:get(attempt, Job, 0)}.
+%% has two executors for a while; the attempt tells them apart. A fanout run
+%% holds no claim, which also keeps it out of the heartbeat.
+registered_as(Job, claimed) ->
+    {maps:get(id, Job), maps:get(attempt, Job, 0)};
+registered_as(Job, fanout) ->
+    {maps:get(id, Job), fanout}.
 
 %%----------------------------------------------------------------------
 %% Internal: run, then record
 %%----------------------------------------------------------------------
 
--spec executed(map(), atom(), timeout() | worker_timeout, tell_breaker | leave_breaker) ->
+-spec executed(map(), atom(), timeout() | worker_timeout, run()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
-executed(Job, Pool, Timeout, Breaker) ->
+executed(Job, Pool, Timeout, Run) ->
     Worker = resolve_worker(Job),
     set_logger_metadata(Job, Worker),
     T0 = erlang:monotonic_time(native),
     try
         Outcome = outcome(Job, Worker, Timeout),
         Duration = erlang:monotonic_time(native) - T0,
-        Answer = recorded(Outcome, Job, Pool, Worker, Duration),
-        ok = gates_told(Outcome, Job, Worker, Duration, Breaker),
+        Answer = concluded(Run, Outcome, Job, Pool, Worker, Duration),
+        ok = gates_told(Outcome, Job, Worker, Duration, Run),
         Answer
     after
         shigoto_resilience:release_bulkhead(Worker),
@@ -129,6 +148,24 @@ outcome(Job, Worker, Timeout) ->
 
 timeout_of(worker_timeout, Worker) -> resolve_timeout(Worker);
 timeout_of(Timeout, _Worker) -> Timeout.
+
+-spec concluded(run(), outcome(), map(), atom(), module(), integer()) ->
+    ok | {snooze, pos_integer()} | {error, term()}.
+concluded(fanout, Outcome, Job, _Pool, _Worker, Duration) ->
+    announced(Outcome, Job, Duration);
+concluded(_Claimed, Outcome, Job, Pool, Worker, Duration) ->
+    recorded(Outcome, Job, Pool, Worker, Duration).
+
+-spec announced(outcome(), map(), integer()) -> ok | {snooze, pos_integer()} | {error, term()}.
+announced({completed, _Result}, Job, Duration) ->
+    _ = shigoto_telemetry:job_completed(Job, Duration),
+    ok;
+announced({failed, _Stored, Reported}, Job, Duration) ->
+    _ = shigoto_telemetry:job_failed(Job, Reported, Duration),
+    {error, Reported};
+announced({_Snooze, Seconds}, Job, _Duration) ->
+    _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
+    {snooze, Seconds}.
 
 -spec recorded(outcome(), map(), atom(), module(), integer()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
@@ -164,14 +201,14 @@ recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
 
 %% The load shedder and the circuit breaker hear how the run went, whether or
 %% not its outcome could be written.
--spec gates_told(outcome(), map(), module(), integer(), tell_breaker | leave_breaker) -> ok.
-gates_told({completed, _Result}, Job, Worker, Duration, Breaker) ->
+-spec gates_told(outcome(), map(), module(), integer(), run()) -> ok.
+gates_told({completed, _Result}, Job, Worker, Duration, Run) ->
     _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
-    breaker_told(Breaker, Worker, ok);
-gates_told({failed, _Stored, _Reported}, Job, Worker, Duration, Breaker) ->
+    breaker_told(Run, Worker, ok);
+gates_told({failed, _Stored, _Reported}, Job, Worker, Duration, Run) ->
     _ = shigoto_resilience:complete_load(Job, milliseconds(Duration)),
-    breaker_told(Breaker, Worker, {error, job_failed});
-gates_told(_Snoozed, _Job, _Worker, _Duration, _Breaker) ->
+    breaker_told(Run, Worker, {error, job_failed});
+gates_told(_Snoozed, _Job, _Worker, _Duration, _Run) ->
     ok.
 
 milliseconds(Duration) ->
@@ -317,9 +354,9 @@ to_id(K) when is_binary(K) ->
 to_id(K) ->
     K.
 
-breaker_told(leave_breaker, _Worker, _Result) ->
+breaker_told(drained, _Worker, _Result) ->
     ok;
-breaker_told(tell_breaker, Worker, Result) ->
+breaker_told(_Queued, Worker, Result) ->
     case whereis(seki_sup) of
         undefined ->
             ok;

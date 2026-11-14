@@ -54,7 +54,8 @@ update_heartbeats() ->
             Running = ets:tab2list(shigoto_executors),
             Alive = [Entry || {_Claim, Pid} = Entry <- Running, is_process_alive(Pid)],
             ok = forget(Running -- Alive),
-            _ = shigoto_repo:heartbeat(shigoto_config:pool(), [Claim || {Claim, _Pid} <- Alive]),
+            Claims = [Claim || {{_JobId, Attempt} = Claim, _Pid} <- Alive, is_integer(Attempt)],
+            _ = shigoto_repo:heartbeat(shigoto_config:pool(), Claims),
             ok
     end.
 

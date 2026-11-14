@@ -29,6 +29,7 @@ the application does with it.
     a_heartbeat_keeps_a_live_job_from_rescue/1,
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
+    every_fanout_consumer_runs_a_job/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_burst_of_jobs_all_complete/1
@@ -36,6 +37,7 @@ the application does with it.
 
 -define(POOL, shigoto_test_pool).
 -define(QUEUE, ~"default").
+-define(FANOUT, ~"broadcast").
 -define(ENV_KEYS, [
     queues,
     poll_interval,
@@ -65,6 +67,7 @@ all() ->
         a_heartbeat_keeps_a_live_job_from_rescue,
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
+        every_fanout_consumer_runs_a_job,
         a_batch_callback_runs_after_its_jobs,
         a_child_runs_after_its_parent_with_the_result,
         a_burst_of_jobs_all_complete
@@ -128,6 +131,8 @@ overrides(a_burst_of_notifications_leaves_one_poll_timer) ->
     #{poll_interval => 200, notifier => connection()};
 overrides(a_heartbeat_keeps_a_live_job_from_rescue) ->
     #{heartbeat_interval => 300};
+overrides(every_fanout_consumer_runs_a_job) ->
+    #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(_TestCase) ->
     #{}.
 
@@ -360,6 +365,30 @@ the_pruner_archives_old_finished_jobs(_Config) ->
     ?assertMatch(#{state := ~"completed"}, row(Recent)).
 
 %%----------------------------------------------------------------------
+%% Fanout
+%%----------------------------------------------------------------------
+
+every_fanout_consumer_runs_a_job(_Config) ->
+    Id = enqueue(~"broadcast", #{queue => ?FANOUT}),
+    First = performing(~"broadcast"),
+    instruct(First, {return, {error, this_node_failed}}),
+    ok = stopped(First, 2000),
+    ok = wait_for(fun() -> executors_of(Id) =:= [] end),
+    %% A second node's consumer, polling after the first one finished.
+    {ok, Consumer} = shigoto_fanout_queue:start_link(?FANOUT, 5, #{window => 60}),
+    try
+        Second = performing(~"broadcast"),
+        instruct(Second, {return, ok}),
+        ok = stopped(Second, 2000),
+        ok = wait_for(fun() -> executors_of(Id) =:= [] end),
+        ok = idle(~"broadcast", 500),
+        ?assertMatch(#{state := ~"available", attempt := 0, errors := ~"[]"}, row(Id))
+    after
+        unlink(Consumer),
+        exit(Consumer, kill)
+    end.
+
+%%----------------------------------------------------------------------
 %% Batches and dependencies
 %%----------------------------------------------------------------------
 
@@ -462,6 +491,15 @@ answer_all(Left) ->
             instruct(Worker, {return, ok}),
             answer_all(Left - 1)
     after 10000 -> ct:fail({unanswered, Left})
+    end.
+
+stopped(Pid, Ms) ->
+    Ref = monitor(process, Pid),
+    receive
+        {'DOWN', Ref, process, Pid, _Reason} -> ok
+    after Ms ->
+        demonitor(Ref, [flush]),
+        ct:fail({still_running, Pid})
     end.
 
 node_dies(Id) ->

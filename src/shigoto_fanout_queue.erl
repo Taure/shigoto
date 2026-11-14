@@ -13,6 +13,10 @@ window are re-processed — workers must be idempotent.
 
 The source of truth is always the database. Fanout is best-effort
 push; if a node misses a job, the client catches up on reconnect.
+
+No node owns a fanout job, so running one changes nothing in its row: it stays
+`available` until the cleanup deletes it, whatever `perform/1` returned on this
+node. A failure or a snooze is reported through telemetry and is not retried.
 """.
 -behaviour(gen_server).
 
@@ -109,7 +113,7 @@ handle_info(
                         {Started, Execs1} = lists:foldl(
                             fun(Job, {Count, AccExecs}) ->
                                 case
-                                    shigoto_executor_sup:start_executor(
+                                    shigoto_executor_sup:start_fanout_executor(
                                         Job, Pool, self()
                                     )
                                 of
