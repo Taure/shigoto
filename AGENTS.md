@@ -41,7 +41,7 @@ port without Erlang-idiom adaptation.
 rebar3 compile
 docker compose up -d        # Postgres 16 on :5556 (db shigoto_test, pw root)
 rebar3 eunit                # shigoto_cron_parser_tests
-rebar3 ct                   # core / features / integration CT suites (needs DB)
+rebar3 ct                   # CT suites, incl. the lifecycle suite on the real app (needs DB)
 rebar3 dialyzer
 elp lint                    # ELP lints (~/.local/bin/elp)
 rebar3 hank                 # dead-code; ignores worker + middleware behaviours
@@ -169,11 +169,21 @@ shigoto_sup (one_for_one)
 
 ## Tests
 
-`test/` holds three CT suites (`shigoto_core_SUITE`, `shigoto_features_SUITE`,
-`shigoto_integration_SUITE`), a bench suite (`shigoto_bench_SUITE`), the eunit
-`shigoto_cron_parser_tests`, and small `*_worker.erl` fixtures. Add or update
-tests alongside every change. Use `shigoto:drain_queue/1,2` for deterministic
-synchronous processing in tests. Keep the fixture workers minimal.
+`test/` holds the CT suites (`shigoto_core_SUITE`, `shigoto_features_SUITE`,
+`shigoto_integration_SUITE`, `shigoto_lifecycle_SUITE`, `shigoto_boot_SUITE`,
+`shigoto_cron_SUITE`, `shigoto_kura_SUITE`), a bench suite
+(`shigoto_bench_SUITE`), the eunit modules, and small `*_worker.erl` fixtures.
+Add or update tests alongside every change. Use `shigoto:drain_queue/1,2` for
+deterministic synchronous processing in tests. Keep the fixture workers minimal.
+
+Most suites call `shigoto_repo` directly to move a job along. That proves the
+statements, not the system: a queue that never claims `retryable` jobs passes
+every one of them. `shigoto_lifecycle_SUITE` is the suite that runs the real
+application (queue, executor, heartbeat, rescue, stager, notifier, pruner)
+and only inserts a job and watches what happens to it. A change to how a job
+moves between states needs a case there, written to fail first.
+`shigoto_lifecycle_worker` reports each run to the test process and does what
+it is told (`return`, `crash`, `die`), so a case controls a job from outside.
 
 ## Git and PRs
 
