@@ -214,15 +214,16 @@ fanout_queues() ->
     application:get_env(shigoto, fanout_queues, []).
 
 -doc """
-The frame `m:shigoto_crypto` writes: `v1` (the default) or `v2`.
+The frame `m:shigoto_crypto` writes: `v2` (the default) or `v1`.
 
-`v1` is what releases up to 1.10 write and is all they can read, so it stays
-the default until every node runs a release that reads `v2`. See the
-[Encryption](encryption.md#upgrading-encryption) guide for the upgrade steps.
+`v1` is what releases up to 1.10 write and is all they can read. Set it for
+the time 1.10 nodes run beside this release, and remove it once every node is
+upgraded. See the [Encryption](encryption.md#upgrading-encryption) guide for
+the upgrade steps.
 """.
 -spec encryption_write_format() -> v1 | v2.
 encryption_write_format() ->
-    case application:get_env(shigoto, encryption_write_format, v1) of
+    case application:get_env(shigoto, encryption_write_format, v2) of
         Format when Format =:= v1; Format =:= v2 -> Format;
         Other -> error({shigoto_config, {invalid_encryption_write_format, Other}})
     end.
@@ -251,6 +252,8 @@ require_encrypted() ->
 The worker modules this node runs. Default: `undefined`, any module that
 exports `perform/1`. With a list, a job naming a module outside it fails with
 `unknown_worker` and the module is never loaded or called.
+
+Optional in 1.x and required from 2.0: set it now.
 """.
 -spec workers() -> [term()] | undefined.
 workers() ->

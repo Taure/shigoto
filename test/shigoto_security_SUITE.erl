@@ -22,7 +22,8 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_frame_that_does_not_open_fails_the_job/1,
     a_plaintext_job_is_refused_when_encryption_is_required/1,
     a_v1_frame_is_refused_once_only_v2_is_read/1,
-    v1_is_still_written_and_read_by_default/1,
+    v1_is_still_written_and_read_when_set/1,
+    v2_is_written_unless_v1_is_set/1,
     no_failure_stores_or_emits_the_args/1,
     random_args_and_failures_never_leak/1,
     a_running_job_is_held_encrypted/1,
@@ -72,7 +73,8 @@ all() ->
         a_frame_that_does_not_open_fails_the_job,
         a_plaintext_job_is_refused_when_encryption_is_required,
         a_v1_frame_is_refused_once_only_v2_is_read,
-        v1_is_still_written_and_read_by_default,
+        v1_is_still_written_and_read_when_set,
+        v2_is_written_unless_v1_is_set,
         no_failure_stores_or_emits_the_args,
         random_args_and_failures_never_leak,
         a_running_job_is_held_encrypted,
@@ -148,7 +150,7 @@ overrides(a_worker_outside_the_allow_list_is_never_called) ->
     #{workers => [shigoto_canary_worker]};
 overrides(a_plaintext_job_is_refused_when_encryption_is_required) ->
     #{require_encrypted => true};
-overrides(v1_is_still_written_and_read_by_default) ->
+overrides(v1_is_still_written_and_read_when_set) ->
     #{encryption_write_format => v1};
 overrides(a_held_unique_lock_does_not_stall_the_insert) ->
     #{advisory_lock_timeout => 200};
@@ -253,7 +255,7 @@ a_v1_frame_is_refused_once_only_v2_is_read(_Config) ->
     ?assertMatch([#{~"error" := ~"format_refused"}], errors(Row)),
     ok = not_performed(shigoto_canary_worker).
 
-v1_is_still_written_and_read_by_default(_Config) ->
+v1_is_still_written_and_read_when_set(_Config) ->
     Canary = canary(),
     Id = enqueue(~"result", Canary),
     {_Worker, Args} = performed(),
@@ -274,6 +276,35 @@ opened_by_1_10(Key, <<IV:12/binary, Tag:16/binary, Cipher/binary>>) ->
 %%----------------------------------------------------------------------
 %% Failures
 %%----------------------------------------------------------------------
+
+v2_is_written_unless_v1_is_set(_Config) ->
+    Insert = fun() ->
+        {ok, #{args := Args}} = shigoto:insert(#{
+            worker => shigoto_canary_other_worker, args => #{~"n" => 1}, queue => ~"parked"
+        }),
+        Args
+    end,
+    ok = application:stop(shigoto),
+    application:unset_env(shigoto, encryption_write_format),
+    _ = shigoto_event_probe:captured(),
+    {ok, _} = application:ensure_all_started(shigoto),
+    ?assertMatch(<<"\"enc:v2:", _/binary>>, Insert()),
+    ?assertEqual([], boot_warnings(~"shigoto_encryption_write_format_v1")),
+    ok = application:stop(shigoto),
+    application:set_env(shigoto, encryption_write_format, v1),
+    {ok, _} = application:ensure_all_started(shigoto),
+    Stored = Insert(),
+    ?assertMatch(<<"\"enc:", _/binary>>, Stored),
+    ?assertNotMatch(<<"\"enc:v2:", _/binary>>, Stored),
+    ?assertMatch([_], boot_warnings(~"shigoto_encryption_write_format_v1")).
+
+boot_warnings(Msg) ->
+    [
+        Event
+     || {log, #{level := warning, msg := {report, #{msg := Logged}}} = Event} <-
+            shigoto_event_probe:captured(),
+        Logged =:= Msg
+    ].
 
 no_failure_stores_or_emits_the_args(_Config) ->
     [ok = fails_without_leaking(Mode, canary()) || Mode <- shigoto_canary_worker:modes()],

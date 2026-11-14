@@ -17,6 +17,7 @@ crypto_test_() ->
         fun(_) -> set(#{}) end, [
             fun v2_round_trip/0,
             fun v1_round_trip/0,
+            fun v2_is_the_default_write_format/0,
             fun v2_is_the_documented_frame/0,
             fun v2_is_bound_to_worker_and_column/0,
             fun a_result_is_bound_to_its_job/0,
@@ -48,6 +49,13 @@ v2_round_trip() ->
     ?assert(shigoto_crypto:is_frame(Sealed)),
     ?assertNot(shigoto_crypto:is_frame(?PLAIN)),
     ?assertEqual({ok, ?PLAIN}, shigoto_crypto:open(Sealed, ?ARGS)).
+
+v2_is_the_default_write_format() ->
+    set(#{encryption_key => key(1)}),
+    ?assertEqual(v2, shigoto_config:encryption_write_format()),
+    ?assertEqual([v1, v2], shigoto_config:encryption_read_formats()),
+    ?assertMatch(<<"\"enc:v2:", _/binary>>, shigoto_crypto:seal(?PLAIN, ?ARGS)),
+    ?assertMatch(<<"\"enc:v2:", _/binary>>, shigoto_crypto:seal(~"1", {result, 1})).
 
 v1_round_trip() ->
     set(#{encryption_key => key(1), encryption_write_format => v1}),

@@ -32,7 +32,7 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 - **Load shedding** — CoDel-based system-level protection, shedding low-priority jobs first.
 
 ### Operations
-- **Encryption** — AES-256-GCM for job `args`, `meta` and cron args at rest, plus results and batch callback args with `encryption_write_format` `v2`. Key rotation, `shigoto:reencrypt/0`. `errors`, `worker`, `queue` and `tags` are not encrypted; see [Encryption](guides/encryption.md).
+- **Encryption** — AES-256-GCM for job `args`, `meta`, cron args, results and batch callback args at rest (`encryption_write_format` `v1`, for a rolling upgrade from 1.10, leaves results and callback args in the clear). Key rotation, `shigoto:reencrypt/0`. `errors`, `worker`, `queue` and `tags` are not encrypted; see [Encryption](guides/encryption.md).
 - **Hardened against the database** — the worker a row names is checked (optionally against an allow-list) before anything is decrypted or called, failures are recorded without job data, and no advisory lock is waited for without a bound. See [Security](guides/security.md).
 - **Middleware** — Composable before/after hooks for logging, metrics, authorization.
 - **Telemetry** — 16+ telemetry events covering job lifecycle, queue operations, resilience, batches, and cron.
@@ -224,7 +224,7 @@ All optional except `perform/1`:
 | `middleware` | `[]` | Global middleware chain |
 | `encryption_key` | — | 32-byte AES-256-GCM key |
 | `encryption_keys` | `[]` | Ordered key list for rotation (newest first) |
-| `encryption_write_format` | `v1` | Frame written: `v1` (what 1.10 reads) or `v2` (bound to column and worker; also covers results and batch callback args) |
+| `encryption_write_format` | `v2` | Frame written: `v2` (bound to column and worker; also covers results and batch callback args) or `v1` (what 1.10 reads, for a rolling upgrade) |
 | `encryption_read_formats` | `[v1, v2]` | Frames that are opened |
 | `require_encrypted` | `false` | Refuse to run a job with plaintext args or meta when a key is configured |
 | `workers` | `undefined` | Modules allowed to run as workers; `undefined` allows any module exporting `perform/1` |

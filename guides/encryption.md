@@ -26,22 +26,21 @@ repository. The application does not start with a key of another size.
 
 ## What is encrypted
 
-| Column | `encryption_write_format` `v1` (default) | `v2` |
+| Column | `encryption_write_format` `v2` (default) | `v1` |
 |---|---|---|
-| job `args` | encrypted | encrypted, bound to the worker |
-| job `meta` | encrypted | encrypted, bound to the worker |
-| cron entry `args` | encrypted | encrypted, bound to the worker |
-| job `result` | **plaintext** | encrypted, bound to the job |
-| `deps_results` (results handed to a waiting job) | **plaintext** | encrypted, bound to the job each came from |
-| batch `callback_args` | **plaintext** | encrypted, bound to the callback worker |
+| job `args` | encrypted, bound to the worker | encrypted |
+| job `meta` | encrypted, bound to the worker | encrypted |
+| cron entry `args` | encrypted, bound to the worker | encrypted |
+| job `result` | encrypted, bound to the job | **plaintext** |
+| `deps_results` (results handed to a waiting job) | encrypted, bound to the job each came from | **plaintext** |
+| batch `callback_args` | encrypted, bound to the callback worker | **plaintext** |
 | `unique_key` | HMAC-SHA256 of the unique fields | the same |
 | `errors` | plaintext, values removed (see [Security](security.md#what-is-recorded-about-a-failure)) | the same |
 | `worker`, `queue`, `tags`, `partition_key`, `state`, timestamps, cron `name` and `schedule` | plaintext | plaintext |
 
-`v1` is the frame releases up to 1.10 write, and covers what they covered. It
-stays the default for one release so that a rolling deploy is safe: a 1.10
-node handed a v2 frame does not fail the job, it passes the frame to the
-worker as if it were the args.
+`v2` is written unless `{encryption_write_format, v1}` is set. `v1` is the
+frame releases up to 1.10 write, and covers what they covered. It exists for a
+rolling upgrade from 1.10: a 1.10 node cannot open a v2 frame.
 
 ## How it works
 
@@ -64,16 +63,30 @@ Insert functions answer the row as stored: `args` in the map returned by
 
 From a release that writes v1 (1.10 and earlier), with a key configured:
 
-1. Deploy this release to every node. Nothing changes on disk.
-2. Set `{encryption_write_format, v2}` on every node, then run
-   `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
+1. If 1.10 nodes and nodes on this release will run side by side (a rolling
+   deploy), set `{encryption_write_format, v1}` in the configuration this
+   release is deployed with. If every node is stopped and upgraded together,
+   skip this step and step 3.
+2. Deploy this release to every node. It reads v1 and v2.
+3. Once no 1.10 node is left, remove `{encryption_write_format, v1}` on every
+   node. New values are written as v2.
+4. Run `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
    batches as v2 and encrypts what was plaintext.
-3. When it reports `failed => 0` and `skipped => 0`, set
+5. When it reports `failed => 0` and `skipped => 0`, set
    `{encryption_read_formats, [v2]}` and `{require_encrypted, true}`.
 
-After step 3 a v1 frame, or a plaintext row inserted by hand, is refused
-instead of run. `v2` becomes the default write format in the next minor
-release.
+After step 5 a v1 frame, or a plaintext row inserted by hand, is refused
+instead of run.
+
+What happens without step 1: a 1.10 node that claims a job written as v2
+cannot open its args. It does not fail the job itself; it passes the stored
+string to `perform/1` in place of the args map. A worker that matches on a
+map fails with `function_clause`, the attempt is counted and the job is
+retried, on whichever node claims it next. A job that only 1.10 nodes claim
+runs out of attempts and is discarded. No plaintext is exposed.
+
+While `v1` is set, `shigoto_encryption_write_format_v1` is logged once per
+boot.
 
 `shigoto:reencrypt/0,1` is safe while the queue runs and can be run again at
 any time: each value is written back only if the row still holds what was

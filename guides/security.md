@@ -28,8 +28,9 @@ decrypted and nothing in the module is called. The check is remembered per
 name: a known worker costs one ETS read and one `erlang:function_exported/3`
 per job.
 
-Set `workers` in production. Without it every loaded module that exports
-`perform/1` can be run by whoever can insert a row:
+Set `workers` in production. It is optional in 1.x and will be required in
+2.0. Without it every loaded module that exports `perform/1` can be run by
+whoever can insert a row:
 
 ```erlang
 {shigoto, [
@@ -42,8 +43,9 @@ and cron workers go through the same check, so list them too.
 
 ## What a moved ciphertext does
 
-With `encryption_write_format` set to `v2`, a ciphertext is bound to the column
-it was written to and to the worker its row names. A job's result is bound to
+In the `v2` format, which is what is written unless `encryption_write_format`
+is set to `v1`, a ciphertext is bound to the column it was written to and to
+the worker its row names. A job's result is bound to
 the id of the job that produced it.
 
 | Moved from | To | Outcome |
@@ -58,7 +60,8 @@ id of a job is not known when its args are encrypted, and binding to it would
 cost a second statement per insert. Make workers idempotent, which
 at-least-once delivery asks for anyway.
 
-A v1 ciphertext, the default until you switch, is bound to nothing. See
+A v1 ciphertext, written by 1.10 and by this release while
+`encryption_write_format` is `v1`, is bound to nothing. See
 [Upgrading encryption](encryption.md#upgrading-encryption).
 
 A value that does not open never reaches a worker. The job fails with one of
@@ -156,15 +159,16 @@ twice, an unknown `encryption_write_format` or `encryption_read_formats`, a
 letters, digits and `_`. The error names the setting and never contains a key.
 
 With a key configured, two warnings are logged once per boot until you act on
-them: `shigoto_encryption_write_format_v1` and
-`shigoto_plaintext_jobs_accepted`.
+them: `shigoto_encryption_write_format_v1` while `encryption_write_format` is
+set to `v1`, and `shigoto_plaintext_jobs_accepted` while `require_encrypted`
+is not set.
 
 ## Options
 
 | Option | Default | |
 |---|---|---|
-| `workers` | `undefined` | Modules that may run as workers. `undefined` allows every module that exports `perform/1` |
-| `encryption_write_format` | `v1` | `v2` binds ciphertexts and also encrypts results and batch callback args |
+| `workers` | `undefined` | Modules that may run as workers. `undefined` allows every module that exports `perform/1`. Optional in 1.x, required from 2.0: set it now |
+| `encryption_write_format` | `v2` | `v2` binds ciphertexts and also encrypts results and batch callback args. `v1` is for a rolling upgrade from 1.10 |
 | `encryption_read_formats` | `[v1, v2]` | Frames that are opened. Drop `v1` once `shigoto:reencrypt/0` has rewritten everything |
 | `require_encrypted` | `false` | Refuse to run a job whose args or meta are plaintext (and, in `v2`, to hand on a plaintext result) |
 | `instance` | `undefined` | Name of this installation, for its own locks and notification channel |
