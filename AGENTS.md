@@ -42,7 +42,8 @@ port without Erlang-idiom adaptation.
 ```bash
 rebar3 compile
 docker compose up -d        # Postgres 16 on :5556 (db shigoto_test, pw root); SHIGOTO_PG_VERSION picks another
-rebar3 eunit                # shigoto_cron_parser_tests
+rebar3 eunit                # the *_tests modules; no database
+rebar3 mutate -m shigoto_job  # one module at a time, against its own shigoto_job_tests
 rebar3 ct                   # CT suites, incl. the lifecycle suite on the real app (needs DB)
 rebar3 dialyzer
 elp lint                    # ELP lints (~/.local/bin/elp)
@@ -67,9 +68,19 @@ tables, trigger, and notify function. Edit the versioned statements in
 `ct` (against Docker Postgres) -> `ex_doc`, all green. Lint with `elp lint`;
 there is no elvis config and no `rebar3_lint` plugin. CI (`Taure/erlang-ci`
 ci.yml `@v2.1.7`) runs ct, ex_doc, hank, coverage, elp-lint, elp-eqwalize
-(on pull requests, the whole tree), dependency submission, and SBOM generation
-plus a Trivy scan of it (`rebar3_sbom`, the Taure fork); `audit` is disabled
-for this repo.
+(on pull requests, the whole tree), mutation testing (on pull requests),
+dependency submission, and SBOM generation plus a Trivy scan of it
+(`rebar3_sbom`, the Taure fork); `audit` is disabled for this repo.
+
+Mutation testing (`rebar3_mutate`) scores a module against its own
+`<module>_tests`, so only modules with one can be measured. CI mutates
+`shigoto_config`, `shigoto_job`, `shigoto_crypto`, `shigoto_error`,
+`shigoto_propagator` and `shigoto_cron_parser` whole and fails below 88% (each
+is at 90% or above). A change to one of them comes with the eunit cases that
+kill its mutants. The modules whose behaviour is a statement or a process
+(`shigoto_repo`, `shigoto_executor`, `shigoto_lock`'s wait, `shigoto_callbacks`,
+`shigoto_cron`, ...) are covered by the CT suites, which the plugin cannot scope
+to a module, and are left out.
 Every push to `main` runs release.yml.
 
 ## Conventions

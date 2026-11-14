@@ -21,6 +21,11 @@ jobs:
       enable-coverage: true
       enable-elp-lint: true
       enable-elp-eqwalize: true
+      # Whole modules, not the diff: the threshold is the score these modules
+      # have, and a diff of three lines is three mutants.
+      enable-mutate: true
+      mutate-min-score: '88'
+      mutate-args: '-m shigoto_config,shigoto_job,shigoto_crypto,shigoto_error,shigoto_propagator,shigoto_cron_parser'
       enable-sbom: true
       enable-sbom-scan: true
       enable-dependency-submission: true
