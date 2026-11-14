@@ -4,7 +4,7 @@ Dynamic supervisor for job executor processes.
 """.
 -behaviour(supervisor).
 
--export([start_link/0, start_executor/3, start_fanout_executor/3]).
+-export([start_link/0, start_executor/3, start_fanout_executor/3, stop_timeout/0]).
 -export([init/1]).
 
 -doc false.
@@ -32,6 +32,13 @@ started({ok, _NoProcess, _Info}) -> {error, not_started};
 started({error, _} = Error) -> Error.
 
 -doc false.
+-spec stop_timeout() -> pos_integer().
+stop_timeout() ->
+    %% An executor that is stopped waits up to six seconds for its worker
+    %% process and then gives its claim back.
+    8000.
+
+-doc false.
 init([]) ->
     _ =
         case ets:whereis(shigoto_executors) of
@@ -47,8 +54,6 @@ init([]) ->
         start => {shigoto_executor, start_link, []},
         restart => temporary,
         type => worker,
-        %% An executor that is stopped waits up to six seconds for its worker
-        %% process and then gives its claim back.
-        shutdown => 8000
+        shutdown => stop_timeout()
     },
     {ok, {#{strategy => simple_one_for_one, intensity => 10, period => 10}, [ChildSpec]}}.

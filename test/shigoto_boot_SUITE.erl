@@ -12,7 +12,9 @@
     boot_does_not_retry_a_refused_migration/1,
     the_migrator_stops_before_the_queue_supervisor/1,
     retries_asked_together_run_once/1,
-    an_unstamped_schema_boots_with_a_dml_role/1
+    an_unstamped_schema_boots_with_a_dml_role/1,
+    the_heartbeat_stops_after_the_queues_and_executors/1,
+    a_node_that_cuts_the_shutdown_short_is_warned_about/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -26,7 +28,9 @@ all() ->
         boot_does_not_retry_a_refused_migration,
         the_migrator_stops_before_the_queue_supervisor,
         retries_asked_together_run_once,
-        an_unstamped_schema_boots_with_a_dml_role
+        an_unstamped_schema_boots_with_a_dml_role,
+        the_heartbeat_stops_after_the_queues_and_executors,
+        a_node_that_cuts_the_shutdown_short_is_warned_about
     ].
 
 init_per_suite(Config) ->
@@ -56,7 +60,44 @@ end_per_testcase(_TestCase, _Config) ->
     _ = persistent_term:erase({shigoto_migrator, pending}),
     application:unset_env(shigoto, notifier),
     application:unset_env(shigoto, fanout_queues),
+    application:unset_env(shigoto, shutdown_timeout),
+    application:unset_env(kernel, shutdown_timeout),
     ok = shigoto_migration:up(?POOL).
+
+%% A supervisor stops its children last started first.
+the_heartbeat_stops_after_the_queues_and_executors(_Config) ->
+    {ok, _} = application:ensure_all_started(shigoto),
+    StopOrder = [Id || {Id, _Pid, _Type, _Modules} <- supervisor:which_children(shigoto_sup)],
+    Before = fun(First, Then) ->
+        lists:member(Then, lists:dropwhile(fun(Id) -> Id =/= First end, StopOrder))
+    end,
+    ?assert(Before(shigoto_queue_sup, shigoto_executor_sup)),
+    ?assert(Before(shigoto_executor_sup, shigoto_heartbeat)),
+    ?assertEqual(shigoto_heartbeat, lists:last(StopOrder)).
+
+a_node_that_cuts_the_shutdown_short_is_warned_about(_Config) ->
+    application:set_env(shigoto, shutdown_timeout, 15000),
+    ?assertEqual(16000 + shigoto_executor_sup:stop_timeout(), shigoto_config:shutdown_budget()),
+    ok = shigoto_log_probe:attach(),
+    try
+        application:set_env(kernel, shutdown_timeout, 60000),
+        {ok, _} = application:ensure_all_started(shigoto),
+        receive
+            {log, warning, #{msg := ~"shigoto_shutdown_cut_short"} = Unexpected} ->
+                ct:fail({warned_with_time_to_stop, Unexpected})
+        after 200 -> ok
+        end,
+        ok = application:stop(shigoto),
+        application:set_env(kernel, shutdown_timeout, 10000),
+        {ok, _} = application:ensure_all_started(shigoto),
+        receive
+            {log, warning, #{msg := ~"shigoto_shutdown_cut_short"} = Report} ->
+                ?assertMatch(#{kernel_shutdown_timeout := 10000, needed := 24000}, Report)
+        after 2000 -> ct:fail(no_shutdown_warning)
+        end
+    after
+        shigoto_log_probe:detach()
+    end.
 
 queues_wait_for_the_migration(_Config) ->
     #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),

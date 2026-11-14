@@ -28,6 +28,7 @@ the application does with it.
     a_killed_executor_takes_its_worker_down/1,
     stopping_the_application_stops_a_running_worker/1,
     a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt/1,
+    a_job_draining_at_shutdown_keeps_its_heartbeat/1,
     a_dead_nodes_job_is_rescued_and_rerun/1,
     a_rescued_job_is_not_rescued_again_while_it_runs/1,
     a_job_that_kills_its_node_is_discarded_at_max_attempts/1,
@@ -107,6 +108,7 @@ all() ->
         a_killed_executor_takes_its_worker_down,
         stopping_the_application_stops_a_running_worker,
         a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt,
+        a_job_draining_at_shutdown_keeps_its_heartbeat,
         a_dead_nodes_job_is_rescued_and_rerun,
         a_rescued_job_is_not_rescued_again_while_it_runs,
         a_job_that_kills_its_node_is_discarded_at_max_attempts,
@@ -234,6 +236,8 @@ overrides(stopping_the_application_stops_a_running_worker) ->
     #{shutdown_timeout => 200};
 overrides(a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt) ->
     #{shutdown_timeout => 200};
+overrides(a_job_draining_at_shutdown_keeps_its_heartbeat) ->
+    #{shutdown_timeout => 8000, heartbeat_interval => 300};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
@@ -418,6 +422,24 @@ a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt(_Config) ->
         {discarded, ~"deployed-over", _Errors} -> ct:fail(discarded_by_a_shutdown)
     after 0 -> ok
     end.
+
+a_job_draining_at_shutdown_keeps_its_heartbeat(_Config) ->
+    Id = enqueue(~"draining"),
+    Worker = performing(~"draining"),
+    Self = self(),
+    _ = spawn_link(fun() -> Self ! {application_stopped, application:stop(shigoto)} end),
+    %% Well past the stale threshold of twice the heartbeat interval, with the
+    %% queue still waiting for the job.
+    timer:sleep(1500),
+    %% What the rescue of another node would do now.
+    ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, shigoto_config:stale_after())),
+    ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id)),
+    instruct(Worker, {return, ok}),
+    receive
+        {application_stopped, Answer} -> ?assertEqual(ok, Answer)
+    after 10000 -> ct:fail(application_never_stopped)
+    end,
+    ?assertMatch(#{state := ~"completed", attempt := 1, errors := ~"[]"}, row(Id)).
 
 %%----------------------------------------------------------------------
 %% A node that dies

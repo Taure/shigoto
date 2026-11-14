@@ -90,13 +90,17 @@ Every push to `main` runs release.yml.
 
 ```
 shigoto_sup (one_for_one)
+  ├─ shigoto_heartbeat      periodic heartbeat writes; first, so it stops last
   ├─ shigoto_executor_sup   simple_one_for_one; one process per running job
   ├─ shigoto_queue_sup      one shigoto_queue gen_server per queue
   ├─ shigoto_cron           cron + leader election
   ├─ shigoto_pruner         hourly archive -> prune
-  ├─ shigoto_heartbeat      periodic heartbeat writes
   └─ shigoto_notifier       LISTEN/NOTIFY wake-ups (optional)
 ```
+
+The start order is the stop order reversed, and it is load-bearing: the
+heartbeat has to outlive the queues' drain and the executors, or another node
+rescues jobs that are still running here.
 
 - **Enqueue.** `shigoto:insert/1,2` -> `shigoto_repo:insert_job` on the
   configured minato pool. With `{repo, Repo}` that is the pool kura_postgres

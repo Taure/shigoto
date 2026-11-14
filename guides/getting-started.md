@@ -81,6 +81,20 @@ config :shigoto,
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
 | `fanout_queues` | `[]` | Broadcast queues where all nodes process every job (see [Fanout Queues](fanout-queues.md)) |
 
+### Stopping a node
+
+When the application stops, each queue waits up to `shutdown_timeout` for its
+running jobs, one queue after the other, and stops claiming. Jobs keep their
+heartbeat for all of that time, so no other node takes them over. A job still
+running at the end is stopped and given back: it is `available` again and the
+interrupted run uses no attempt.
+
+The node has to allow that much time. `kernel`'s `shutdown_timeout` is
+`infinity` unless set; if you set it, keep it above
+`shigoto_config:shutdown_budget()`. Below that the node kills shigoto in the
+middle, the cut-off jobs wait for the stale-job rescue, and shigoto logs
+`shigoto_shutdown_cut_short` at boot.
+
 ## Run the Migration
 
 The shigoto application creates or updates its tables when it starts. It tries

@@ -15,6 +15,7 @@ Configuration access for Shigoto. Reads from application env.
     prune_after_days/0,
     archive_after_days/0,
     shutdown_timeout/0,
+    shutdown_budget/0,
     notifier_config/0,
     middleware/0,
     encryption_key/0,
@@ -156,6 +157,22 @@ still running after that is stopped and its claim given back: it is
 -spec shutdown_timeout() -> pos_integer().
 shutdown_timeout() ->
     integer_setting(shutdown_timeout, 15000).
+
+-doc """
+The longest the application can take to stop, in milliseconds: every queue
+waits `shutdown_timeout` for its jobs, one queue after the other, and the
+executor supervisor then stops what is still running.
+
+The node has to allow this much. When the `kernel` setting `shutdown_timeout`
+is shorter, the node kills shigoto in the middle of it: jobs are cut off
+without giving their claims back, and one on its last attempt is discarded by
+the rescue. The application logs `shigoto_shutdown_cut_short` at boot for
+that.
+""".
+-spec shutdown_budget() -> pos_integer().
+shutdown_budget() ->
+    Queues = length(queues()) + length(fanout_queues()),
+    Queues * (shutdown_timeout() + 1000) + shigoto_executor_sup:stop_timeout().
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].

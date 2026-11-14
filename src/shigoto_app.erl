@@ -18,7 +18,8 @@ listed twice, an unknown `encryption_write_format`, a malformed `instance` or
 names the setting, never a key. With a key configured it logs, once per boot,
 `shigoto_encryption_write_format_v1` while `encryption_write_format` is set to
 `v1`, and `shigoto_plaintext_jobs_accepted` while `require_encrypted` is not
-set.
+set, and `shigoto_shutdown_cut_short` when `kernel`'s `shutdown_timeout` is
+shorter than shigoto needs to stop (`shigoto_config:shutdown_budget/0`).
 
 An error a retry cannot fix (SQLSTATE class 42, such as
 `42501 insufficient_privilege`) skips the sleeps. On Kubernetes, give the pod a
@@ -37,6 +38,7 @@ start(_StartType, _StartArgs) ->
         ok ->
             warn_if_testing_mode(),
             warn_about_encryption(),
+            warn_if_shutdown_is_cut_short(),
             _ = shigoto_config:on_dependency_failure(),
             _ = shigoto_db:kura_available(),
             ok = shigoto_db:ignore_sandbox(),
@@ -77,6 +79,25 @@ warn_if_plaintext_accepted(false) ->
         action =>
             ~"once shigoto:reencrypt/0 reports no plaintext left, set {require_encrypted, true}"
     }).
+
+%% The node gives an application `kernel`'s `shutdown_timeout` to stop
+%% (`infinity` unless set) and kills it after that.
+warn_if_shutdown_is_cut_short() ->
+    Budget = shigoto_config:shutdown_budget(),
+    case application:get_env(kernel, shutdown_timeout) of
+        {ok, Allowed} when is_integer(Allowed), Allowed < Budget ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_shutdown_cut_short",
+                kernel_shutdown_timeout => Allowed,
+                needed => Budget,
+                warning =>
+                    ~"the node kills shigoto before its queues have waited shutdown_timeout for their jobs: a job cut off that way is not given back, and one on its last attempt is discarded by the rescue",
+                action =>
+                    ~"raise kernel's shutdown_timeout to at least `needed`, or lower shigoto's shutdown_timeout"
+            });
+        _ ->
+            ok
+    end.
 
 warn_if_testing_mode() ->
     case shigoto_config:testing_mode() of
