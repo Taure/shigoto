@@ -292,16 +292,23 @@ propagator() ->
     end.
 
 -doc """
-The frame `m:shigoto_crypto` writes: `v2` (the default) or `v1`.
+The frame `m:shigoto_crypto` writes: `v1` (the default) or `v2`.
 
-`v1` is what releases up to 1.10 write and is all they can read. Set it for
-the time 1.10 nodes run beside this release, and remove it once every node is
-upgraded. See the [Encryption](encryption.md#upgrading-encryption) guide for
-the upgrade steps.
+`v1` is what releases up to 1.10 write and is all they can read, so with the
+default a 1.10 node can run what this release writes: nodes can be upgraded
+one at a time and a rollback to 1.10 loses nothing. `v2` binds a ciphertext to
+its column and worker and also encrypts results and batch callback args.
+
+Set `v2` only once every node runs this release and you will not go back to
+1.10. A 1.10 node cannot open a `v2` frame: it hands the stored string to
+`perform/1`, the attempt fails, and after `max_attempts` the job is discarded.
+`v2` is planned to become the default in a later release. Both formats are
+read whichever is written. See the
+[Encryption](encryption.md#upgrading-encryption) guide for the steps.
 """.
 -spec encryption_write_format() -> v1 | v2.
 encryption_write_format() ->
-    case application:get_env(shigoto, encryption_write_format, v2) of
+    case application:get_env(shigoto, encryption_write_format, v1) of
         Format when Format =:= v1; Format =:= v2 -> Format;
         Other -> error({shigoto_config, {invalid_encryption_write_format, Other}})
     end.

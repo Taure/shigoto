@@ -38,11 +38,11 @@ worker, which runs that worker again with args it has already been given.
 `KeyId` names the key, so a v2 frame is opened with that key alone. A v1 frame
 is tried under every configured key.
 
-Which frame is written is `shigoto_config:encryption_write_format/0`: `v2`
-unless `v1` is set. Releases up to 1.10 cannot open a v2 frame, so `v1` is for
-the time such nodes run beside this release. In `v1` only what those releases
-encrypt is encrypted: `args`, `meta` and cron entry args. In `v2` job results
-and batch callback args are as well.
+Which frame is written is `shigoto_config:encryption_write_format/0`: `v1`
+unless `v2` is set. Releases up to 1.10 cannot open a v2 frame, so set `v2`
+only once every node runs this release and none will go back. In `v1` only
+what those releases encrypt is encrypted: `args`, `meta` and cron entry args.
+In `v2` job results and batch callback args are as well.
 
 Which frames are read is `shigoto_config:encryption_read_formats/0`.
 

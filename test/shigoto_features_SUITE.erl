@@ -6,6 +6,9 @@
     all/0,
     init_per_suite/1,
     end_per_suite/1,
+    groups/0,
+    init_per_group/2,
+    end_per_group/2,
     init_per_testcase/2,
     end_per_testcase/2
 ]).
@@ -75,10 +78,6 @@ all() ->
         test_batch_event_is_discard_whichever_job_is_last,
         test_batch_total_is_counted_with_the_insert,
         test_get_job,
-        test_encryption_roundtrip,
-        test_encrypted_unique_key_hides_args,
-        test_encrypted_unique_key_is_keyed,
-        test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
         test_dependents_follow_their_policy_when_a_parent_fails,
         test_dependency_policy_defaults_to_the_application_setting,
@@ -98,8 +97,33 @@ all() ->
         test_depends_on_resolved_when_attempts_exhausted,
         test_depends_on_held_while_parent_retryable,
         test_depends_on_chain,
-        test_on_discard_callback
+        test_on_discard_callback,
+        {group, frames_v1},
+        {group, frames_v2}
     ].
+
+%% The cases that store something encrypted run once with each
+%% `encryption_write_format`: `v1`, the default, and `v2`.
+groups() ->
+    [{frames_v1, [], encrypting()}, {frames_v2, [], encrypting()}].
+
+encrypting() ->
+    [
+        test_encryption_roundtrip,
+        test_encrypted_unique_key_hides_args,
+        test_encrypted_unique_key_is_keyed,
+        test_encrypted_args_filter_is_refused
+    ].
+
+init_per_group(frames_v1, Config) ->
+    application:set_env(shigoto, encryption_write_format, v1),
+    Config;
+init_per_group(frames_v2, Config) ->
+    application:set_env(shigoto, encryption_write_format, v2),
+    Config.
+
+end_per_group(_Group, _Config) ->
+    application:unset_env(shigoto, encryption_write_format).
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(minato),

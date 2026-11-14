@@ -5,13 +5,10 @@ things in. Nothing here needs a change in a worker.
 
 ## Before you deploy
 
-1. **Encryption, rolling deploy.** If a key is configured and 1.10 nodes will
-   run beside the new release for a while, set
-   `{encryption_write_format, v1}` in the configuration the new release is
-   deployed with. The default is now `v2`, which 1.10 cannot read: a 1.10 node
-   that claims a `v2` job passes the stored string to `perform/1` instead of
-   the args, and the attempt fails. Stopping every node and upgrading them
-   together needs no setting.
+1. **Encryption.** Nothing to set. With a key configured this release writes
+   what 1.10 writes (`v1`) and reads both formats, so 1.10 nodes can run beside
+   it and a rollback to 1.10 loses nothing. The stronger `v2` format is opt-in,
+   after the upgrade: step 6.
 2. **Workers.** Set `workers` to the list of your worker, batch callback and
    cron worker modules. It is optional in 1.x and will be required in 2.0.
 3. **Settings are checked.** The application does not start with an
@@ -42,7 +39,10 @@ things in. Nothing here needs a change in a worker.
 
 ## After every node is upgraded
 
-6. Remove `{encryption_write_format, v1}` if you set it in step 1.
+6. With a key configured, set `{encryption_write_format, v2}` on every node,
+   once every node runs this release and you will not roll back to 1.10. See
+   [Encryption](encryption.md#upgrading-encryption) for what `v2` adds and why
+   it must wait.
 7. Run `shigoto:reencrypt()` once. It rewrites jobs, archived jobs and batches
    as `v2`, encrypts what was stored in the clear, and replaces every
    `unique_key` with the HMAC under the current key. It is safe while queues

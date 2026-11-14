@@ -6,6 +6,9 @@
     all/0,
     init_per_suite/1,
     end_per_suite/1,
+    groups/0,
+    init_per_group/2,
+    end_per_group/2,
     init_per_testcase/2,
     end_per_testcase/2
 ]).
@@ -127,8 +130,6 @@ all() ->
         test_unique_opts_override,
         test_unique_different_queues_allowed,
         test_unique_key_stored,
-        test_replace_args_stay_encrypted,
-        test_error_stacktrace_redacts_args,
         test_unique_concurrent_insert,
         test_non_unique_has_null_key,
         test_worker_defaults_applied,
@@ -162,8 +163,31 @@ all() ->
         test_deps_results_passed_to_dependent,
         test_deps_results_null_for_plain_ok_predecessor,
         test_deps_results_integer_key,
-        test_deps_results_fan_in
+        test_deps_results_fan_in,
+        {group, frames_v1},
+        {group, frames_v2}
     ].
+
+%% The cases that store something encrypted run once with each
+%% `encryption_write_format`: `v1`, the default, and `v2`.
+groups() ->
+    [{frames_v1, [], encrypting()}, {frames_v2, [], encrypting()}].
+
+encrypting() ->
+    [
+        test_replace_args_stay_encrypted,
+        test_error_stacktrace_redacts_args
+    ].
+
+init_per_group(frames_v1, Config) ->
+    application:set_env(shigoto, encryption_write_format, v1),
+    Config;
+init_per_group(frames_v2, Config) ->
+    application:set_env(shigoto, encryption_write_format, v2),
+    Config.
+
+end_per_group(_Group, _Config) ->
+    application:unset_env(shigoto, encryption_write_format).
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(minato),

@@ -15,11 +15,11 @@ Before any of that it checks the settings that are dangerous to get wrong
 (`shigoto_config:check/0`): an encryption key that is not 32 bytes or is
 listed twice, an unknown `encryption_write_format`, a malformed `instance` or
 `workers`. The application does not start with one of those, and the reason
-names the setting, never a key. With a key configured it logs, once per boot,
-`shigoto_encryption_write_format_v1` while `encryption_write_format` is set to
-`v1`, and `shigoto_plaintext_jobs_accepted` while `require_encrypted` is not
-set, and `shigoto_shutdown_cut_short` when `kernel`'s `shutdown_timeout` is
-shorter than shigoto needs to stop (`shigoto_config:shutdown_budget/0`).
+names the setting, never a key. Once per boot it logs
+`shigoto_plaintext_jobs_accepted` while a key is configured and
+`require_encrypted` is not set, and `shigoto_shutdown_cut_short` when
+`kernel`'s `shutdown_timeout` is shorter than shigoto needs to stop
+(`shigoto_config:shutdown_budget/0`).
 
 An error a retry cannot fix (SQLSTATE class 42, such as
 `42501 insufficient_privilege`) skips the sleeps. On Kubernetes, give the pod a
@@ -47,27 +47,13 @@ start(_StartType, _StartArgs) ->
             {error, Reason}
     end.
 
-%% Once per boot, and only with a key configured: `v1` set for a rolling
-%% upgrade and not yet removed, and plaintext rows still being accepted.
+%% Once per boot, and only with a key configured: plaintext rows still being
+%% accepted.
 warn_about_encryption() ->
     case shigoto_crypto:is_enabled() of
-        false ->
-            ok;
-        true ->
-            warn_if_v1(shigoto_config:encryption_write_format()),
-            warn_if_plaintext_accepted(shigoto_config:require_encrypted())
+        false -> ok;
+        true -> warn_if_plaintext_accepted(shigoto_config:require_encrypted())
     end.
-
-warn_if_v1(v2) ->
-    ok;
-warn_if_v1(v1) ->
-    ?LOG_WARNING(#{
-        msg => ~"shigoto_encryption_write_format_v1",
-        warning =>
-            ~"v1 ciphertext is not bound to its row: someone who can write to the jobs table can move it to another job or column and have it decrypted there. Job results and batch callback args are not encrypted in v1.",
-        action =>
-            ~"once every node runs this release, remove {encryption_write_format, v1} and run shigoto:reencrypt/0"
-    }).
 
 warn_if_plaintext_accepted(true) ->
     ok;

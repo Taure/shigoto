@@ -26,7 +26,7 @@ repository. The application does not start with a key of another size.
 
 ## What is encrypted
 
-| Column | `encryption_write_format` `v2` (default) | `v1` |
+| Column | `encryption_write_format` `v2` | `v1` (default) |
 |---|---|---|
 | job `args` | encrypted, bound to the worker | encrypted |
 | job `meta` | encrypted, bound to the worker | encrypted |
@@ -38,9 +38,18 @@ repository. The application does not start with a key of another size.
 | `errors` | plaintext, values removed (see [Security](security.md#what-is-recorded-about-a-failure)) | the same |
 | `worker`, `queue`, `tags`, `partition_key`, `state`, timestamps, cron `name` and `schedule` | plaintext | plaintext |
 
-`v2` is written unless `{encryption_write_format, v1}` is set. `v1` is the
-frame releases up to 1.10 write, and covers what they covered. It exists for a
-rolling upgrade from 1.10: a 1.10 node cannot open a v2 frame.
+`v1` is written unless `{encryption_write_format, v2}` is set. `v1` is the
+frame releases up to 1.10 write, and covers what they covered, so a node on
+1.10 can run whatever this release writes by default. `v2` is planned to become
+the default in a later release.
+
+> #### Set `v2` only when no node can be on 1.10 again {: .warning}
+>
+> Releases up to 1.10 cannot read a `v2` frame. A 1.10 node that claims a job
+> written as `v2` (a node not yet upgraded, or one rolled back) hands the stored
+> string to `perform/1` in place of the args. The attempt fails, and a job that
+> only such nodes claim runs out of attempts and is discarded. Upgrade every
+> node first, be sure you will not roll back, then set `v2`.
 
 ## How it works
 
@@ -63,31 +72,31 @@ Insert functions answer the row as stored: `args` in the map returned by
 
 From a release that writes v1 (1.10 and earlier), with a key configured:
 
-1. If 1.10 nodes and nodes on this release will run side by side (a rolling
-   deploy), set `{encryption_write_format, v1}` in the configuration this
-   release is deployed with. If every node is stopped and upgraded together,
-   skip this step and step 3.
-2. Deploy this release to every node. It reads v1 and v2.
-3. Once no 1.10 node is left, remove `{encryption_write_format, v1}` on every
-   node. New values are written as v2.
-4. Run `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
+1. Deploy this release to every node, in any order and with no encryption
+   setting. It writes v1, as 1.10 does, and reads v1 and v2. While both
+   releases run, and after a rollback, every node can run every job.
+2. Once every node runs this release and you will not go back to 1.10, set
+   `{encryption_write_format, v2}` on every node. New values are written as
+   v2; nodes that have not got the setting yet still read them.
+3. Run `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
    batches as v2, encrypts what was plaintext and moves every `unique_key` to
    the HMAC under the current key.
-5. When it reports `failed => 0` and `skipped => 0`, set
+4. When it reports `failed => 0` and `skipped => 0`, set
    `{encryption_read_formats, [v2]}` and `{require_encrypted, true}`.
 
-After step 5 a v1 frame, or a plaintext row inserted by hand, is refused
+After step 4 a v1 frame, or a plaintext row inserted by hand, is refused
 instead of run.
 
-What happens without step 1: a 1.10 node that claims a job written as v2
-cannot open its args. It does not fail the job itself; it passes the stored
-string to `perform/1` in place of the args map. A worker that matches on a
-map fails with `function_clause`, the attempt is counted and the job is
-retried, on whichever node claims it next. A job that only 1.10 nodes claim
-runs out of attempts and is discarded. No plaintext is exposed.
+What happens when step 2 is done too early: a 1.10 node that claims a job
+written as v2 cannot open its args. It does not fail the job itself; it passes
+the stored string to `perform/1` in place of the args map. A worker that
+matches on a map fails with `function_clause`, the attempt is counted and the
+job is retried, on whichever node claims it next. A job that only 1.10 nodes
+claim runs out of attempts and is discarded. No plaintext is exposed. The same
+happens after a rollback to 1.10 with v2 jobs still waiting.
 
-While `v1` is set, `shigoto_encryption_write_format_v1` is logged once per
-boot.
+Until step 2, values are as 1.10 left them: a v1 ciphertext is not bound to
+its row, and results and batch callback args are not encrypted.
 
 `shigoto:reencrypt/0,1` is safe while the queue runs and can be run again at
 any time: each value is written back only if the row still holds what was

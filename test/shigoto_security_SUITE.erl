@@ -13,7 +13,16 @@ event (with metadata) and every shigoto telemetry event the case produced.
 
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
+-export([
+    all/0,
+    groups/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_group/2,
+    end_per_group/2,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
 -export([
     args_moved_to_another_worker_are_not_decrypted/1,
     args_moved_to_a_module_that_is_no_worker_are_not_decrypted/1,
@@ -23,7 +32,8 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_plaintext_job_is_refused_when_encryption_is_required/1,
     a_v1_frame_is_refused_once_only_v2_is_read/1,
     v1_is_still_written_and_read_when_set/1,
-    v2_is_written_unless_v1_is_set/1,
+    v1_is_written_unless_v2_is_set/1,
+    v1_leaves_results_and_callback_args_as_1_10_reads_them/1,
     no_failure_stores_or_emits_the_args/1,
     random_args_and_failures_never_leak/1,
     a_running_job_is_held_encrypted/1,
@@ -72,6 +82,15 @@ event (with metadata) and every shigoto telemetry event the case produced.
 ]).
 
 all() ->
+    [{group, v2}, {group, v1}].
+
+%% Every case runs with `encryption_write_format` `v2`. The ones that do not
+%% assert what only `v2` gives (binding to column and worker, encrypted results
+%% and callback args) run again with `v1`, the default.
+groups() ->
+    [{v2, [], cases() -- v1_only()}, {v1, [], cases() -- v2_only()}].
+
+cases() ->
     [
         args_moved_to_another_worker_are_not_decrypted,
         args_moved_to_a_module_that_is_no_worker_are_not_decrypted,
@@ -81,7 +100,8 @@ all() ->
         a_plaintext_job_is_refused_when_encryption_is_required,
         a_v1_frame_is_refused_once_only_v2_is_read,
         v1_is_still_written_and_read_when_set,
-        v2_is_written_unless_v1_is_set,
+        v1_is_written_unless_v2_is_set,
+        v1_leaves_results_and_callback_args_as_1_10_reads_them,
         no_failure_stores_or_emits_the_args,
         random_args_and_failures_never_leak,
         a_running_job_is_held_encrypted,
@@ -110,6 +130,23 @@ all() ->
         errors_are_bounded
     ].
 
+v1_only() ->
+    [v1_leaves_results_and_callback_args_as_1_10_reads_them].
+
+%% What only `v2` gives, and the cases that set the format themselves.
+v2_only() ->
+    [
+        args_moved_to_another_worker_are_not_decrypted,
+        args_moved_to_another_column_are_not_decrypted,
+        a_result_is_encrypted_and_reaches_the_dependent,
+        a_result_moved_to_another_job_is_not_decrypted,
+        batch_callback_args_are_encrypted,
+        a_v1_frame_is_refused_once_only_v2_is_read,
+        v1_is_still_written_and_read_when_set,
+        v1_is_written_unless_v2_is_set,
+        reencrypt_moves_every_value_to_v2
+    ].
+
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(minato),
     {ok, _} = application:ensure_all_started(telemetry),
@@ -125,9 +162,18 @@ end_per_suite(_Config) ->
     shigoto_migration:down(?POOL),
     ok.
 
+init_per_group(Format, Config) ->
+    [{write_format, Format} | Config].
+
+end_per_group(_Format, _Config) ->
+    ok.
+
 init_per_testcase(TestCase, Config) ->
     ok = clean(),
-    [application:set_env(shigoto, Key, Value) || Key := Value <- env(TestCase)],
+    [
+        application:set_env(shigoto, Key, Value)
+     || Key := Value <- env(TestCase, proplists:get_value(write_format, Config))
+    ],
     application:set_env(shigoto, pool, ?POOL),
     case TestCase of
         a_bad_key_stops_the_boot_without_printing_it ->
@@ -147,7 +193,7 @@ end_per_testcase(_TestCase, _Config) ->
     [application:unset_env(shigoto, Key) || Key <- ?ENV_KEYS],
     ok = clean().
 
-env(TestCase) ->
+env(TestCase, Format) ->
     maps:merge(
         #{
             queues => [{?QUEUE, 5}],
@@ -155,7 +201,7 @@ env(TestCase) ->
             heartbeat_interval => 5000,
             rescue_interval => 60000,
             encryption_key => key(1),
-            encryption_write_format => v2
+            encryption_write_format => Format
         },
         overrides(TestCase)
     ).
@@ -293,7 +339,9 @@ opened_by_1_10(Key, <<IV:12/binary, Tag:16/binary, Cipher/binary>>) ->
 %% Failures
 %%----------------------------------------------------------------------
 
-v2_is_written_unless_v1_is_set(_Config) ->
+%% The default is what 1.10 can read. A node that does not say `v2` writes
+%% nothing a 1.10 node beside it, or one rolled back to, would fail on.
+v1_is_written_unless_v2_is_set(_Config) ->
     Insert = fun() ->
         {ok, #{args := Args}} = shigoto:insert(#{
             worker => shigoto_canary_other_worker, args => #{~"n" => 1}, queue => ~"parked"
@@ -304,15 +352,40 @@ v2_is_written_unless_v1_is_set(_Config) ->
     application:unset_env(shigoto, encryption_write_format),
     _ = shigoto_event_probe:captured(),
     {ok, _} = application:ensure_all_started(shigoto),
-    ?assertMatch(<<"\"enc:v2:", _/binary>>, Insert()),
+    <<"\"enc:", Rest/binary>> = Stored = Insert(),
+    ?assertNotMatch(<<"\"enc:v2:", _/binary>>, Stored),
+    Encoded = binary:part(Rest, 0, byte_size(Rest) - 1),
+    ?assertEqual(#{~"n" => 1}, opened_by_1_10(key(1), base64:decode(Encoded))),
+    %% Not a setting to be warned about: it is the default.
     ?assertEqual([], boot_warnings(~"shigoto_encryption_write_format_v1")),
     ok = application:stop(shigoto),
-    application:set_env(shigoto, encryption_write_format, v1),
+    application:set_env(shigoto, encryption_write_format, v2),
     {ok, _} = application:ensure_all_started(shigoto),
-    Stored = Insert(),
-    ?assertMatch(<<"\"enc:", _/binary>>, Stored),
-    ?assertNotMatch(<<"\"enc:v2:", _/binary>>, Stored),
-    ?assertMatch([_], boot_warnings(~"shigoto_encryption_write_format_v1")).
+    ?assertMatch(<<"\"enc:v2:", _/binary>>, Insert()),
+    %% Both are read whichever is written.
+    ?assertEqual(
+        {ok, ~"{\"n\":1}"}, shigoto_crypto:open(Stored, {args, ~"shigoto_canary_other_worker"})
+    ).
+
+v1_leaves_results_and_callback_args_as_1_10_reads_them(_Config) ->
+    Canary = canary(),
+    {ok, #{id := BatchId}} = shigoto:new_batch(#{
+        callback_worker => shigoto_canary_other_worker,
+        callback_args => #{~"canary" => Canary}
+    }),
+    #{rows := [#{callback_args := StoredArgs}]} = shigoto_db:query(
+        ?POOL, ~"SELECT callback_args FROM shigoto_batches WHERE id = $1", [BatchId]
+    ),
+    ?assertEqual(#{~"canary" => Canary}, json:decode(StoredArgs)),
+    {ok, #{id := Id}} = shigoto:insert(#{
+        worker => shigoto_canary_worker, args => args(~"result", Canary), batch => BatchId
+    }),
+    _ = performed(shigoto_canary_worker),
+    Row = await(Id, ~"completed"),
+    ?assert(written_frame(maps:get(args, Row))),
+    ?assertEqual(#{~"secret" => Canary}, json:decode(maps:get(result, Row))),
+    {_Worker, CallbackArgs} = performed(shigoto_canary_other_worker),
+    ?assertEqual(#{~"canary" => Canary}, CallbackArgs).
 
 boot_warnings(Msg) ->
     [
@@ -528,7 +601,7 @@ replaced_args_are_bound_to_the_existing_row(_Config) ->
     {ok, {conflict, #{id := Id}}} = shigoto:insert(
         Later#{worker => shigoto_canary_worker, args => #{~"canary" => Canary}}, Unique
     ),
-    ?assertMatch(<<"\"enc:v2:", _/binary>>, stored(Id, args)),
+    ?assert(written_frame(stored(Id, args))),
     ok = no_canary(Canary, [row(Id)]),
     ok = due(Id),
     {_Worker, Args} = performed(shigoto_canary_other_worker),
@@ -722,9 +795,14 @@ insert_all_encrypts_the_meta(_Config) ->
             scheduled_at => seconds_from_now(3600)
         }
     ]),
-    ?assertMatch(<<"\"enc:v2:", _/binary>>, stored(Id, meta)),
+    ?assert(written_frame(stored(Id, meta))),
     {ok, #{meta := Meta}} = shigoto:get_job(Id),
     ?assertEqual(#{~"trace" => Canary}, json:decode(Meta)).
+
+%% Whether `Stored` is a frame of the format the case runs with.
+written_frame(<<"\"enc:v2:", _/binary>>) -> shigoto_config:encryption_write_format() =:= v2;
+written_frame(<<"\"enc:", _/binary>>) -> shigoto_config:encryption_write_format() =:= v1;
+written_frame(_Plain) -> false.
 
 waiting(Worker, N) ->
     #{worker => Worker, args => #{~"n" => N}, scheduled_at => seconds_from_now(3600)}.

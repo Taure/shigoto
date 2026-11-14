@@ -43,9 +43,9 @@ and cron workers go through the same check, so list them too.
 
 ## What a moved ciphertext does
 
-In the `v2` format, which is what is written unless `encryption_write_format`
-is set to `v1`, a ciphertext is bound to the column it was written to and to
-the worker its row names. A job's result is bound to
+In the `v2` format, which is written once `encryption_write_format` is set to
+`v2`, a ciphertext is bound to the column it was written to and to the worker
+its row names. A job's result is bound to
 the id of the job that produced it.
 
 | Moved from | To | Outcome |
@@ -60,9 +60,12 @@ id of a job is not known when its args are encrypted, and binding to it would
 cost a second statement per insert. Make workers idempotent, which
 at-least-once delivery asks for anyway.
 
-A v1 ciphertext, written by 1.10 and by this release while
-`encryption_write_format` is `v1`, is bound to nothing. See
-[Upgrading encryption](encryption.md#upgrading-encryption).
+A v1 ciphertext, written by 1.10 and by this release until
+`encryption_write_format` is set to `v2`, is bound to nothing: none of the
+rows above fail for it. `v1` is the default because a 1.10 node cannot read
+`v2`. Set `v2` once every node runs this release and none will go back to
+1.10; a 1.10 node that claims a `v2` job fails it, and after `max_attempts` the
+job is discarded. See [Upgrading encryption](encryption.md#upgrading-encryption).
 
 A value that does not open never reaches a worker. The job fails with one of
 `decrypt_failed`, `format_refused` or `plaintext_refused`, retries like any
@@ -160,17 +163,15 @@ twice, an unknown `encryption_write_format` or `encryption_read_formats`, a
 `workers` that is not a list of atoms, or an `instance` that is not lower-case
 letters, digits and `_`. The error names the setting and never contains a key.
 
-With a key configured, two warnings are logged once per boot until you act on
-them: `shigoto_encryption_write_format_v1` while `encryption_write_format` is
-set to `v1`, and `shigoto_plaintext_jobs_accepted` while `require_encrypted`
-is not set.
+With a key configured, `shigoto_plaintext_jobs_accepted` is logged once per
+boot while `require_encrypted` is not set.
 
 ## Options
 
 | Option | Default | |
 |---|---|---|
 | `workers` | `undefined` | Modules that may run as workers. `undefined` allows every module that exports `perform/1`. Optional in 1.x, required from 2.0: set it now |
-| `encryption_write_format` | `v2` | `v2` binds ciphertexts and also encrypts results and batch callback args. `v1` is for a rolling upgrade from 1.10 |
+| `encryption_write_format` | `v1` | `v1` is what 1.10 writes and reads. `v2` binds ciphertexts and also encrypts results and batch callback args, and 1.10 cannot read it: set it once every node runs this release and none will be rolled back, or the 1.10 nodes fail those jobs and in the end discard them. Planned to become the default in a later release |
 | `encryption_read_formats` | `[v1, v2]` | Frames that are opened. Drop `v1` once `shigoto:reencrypt/0` has rewritten everything |
 | `require_encrypted` | `false` | Refuse to run a job whose args or meta are plaintext (and, in `v2`, to hand on a plaintext result) |
 | `instance` | `undefined` | Name of this installation, for its own locks and notification channel |
@@ -191,8 +192,9 @@ is not set.
   [Unique jobs](encryption.md#unique-jobs)).
 - Do not remove an old key from `encryption_keys` before
   `shigoto:reencrypt/0` reports `failed => 0` and `skipped => 0`.
-- With `encryption_write_format` `v1`: `result`, `deps_results` and batch
-  `callback_args` are in the clear.
+- With `encryption_write_format` `v1`, the default: `result`, `deps_results`
+  and batch `callback_args` are in the clear, and a ciphertext can be moved
+  between rows and columns.
 - Someone who can write to the table can still delete jobs, change their
   state, schedule or priority, and replay a job's args to the same worker.
 - Job data is plaintext in the memory of the node while a job runs.

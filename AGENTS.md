@@ -198,9 +198,10 @@ rescues jobs that are still running here.
   reason through `shigoto_error`.
 - **Encryption.** `shigoto_crypto:seal/2` and `open/2` take the context a value
   belongs to (`{args | meta | cron_args | callback_args, Worker}` or
-  `{result, JobId}`). v2 frames (the default write format) are bound to it;
-  v1 frames (`encryption_write_format` `v1`, for 1.10 nodes in a rolling
-  deploy) are not. A value that does not
+  `{result, JobId}`). v2 frames (`encryption_write_format` `v2`, opt-in) are
+  bound to it; v1 frames, the default write format because 1.10 reads nothing
+  else, are not. Do not make v2 the default in a release whose predecessor
+  cannot read it. A value that does not
   open is an error, never passed on. `shigoto_reencrypt` rewrites stored
   values in the current format.
 - **Advisory locks.** Every lock goes through `shigoto_lock`, which only uses

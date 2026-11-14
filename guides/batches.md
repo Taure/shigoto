@@ -75,7 +75,7 @@ statement at a time, the first job can finish while it is still the only one in
 the batch, and the callback fires before the rest exist.
 
 With `encryption_write_format` `v2`, `callback_args` are encrypted like job
-args.
+args. With `v1`, the default, they are stored in the clear, as in 1.10.
 
 ### A callback a node cannot run
 
