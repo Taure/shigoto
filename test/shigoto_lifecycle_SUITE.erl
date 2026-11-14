@@ -32,6 +32,9 @@ the application does with it.
     a_dead_nodes_job_is_rescued_and_rerun/1,
     a_rescued_job_is_not_rescued_again_while_it_runs/1,
     a_job_that_kills_its_node_is_discarded_at_max_attempts/1,
+    a_slow_on_discard_does_not_hold_up_the_queue_or_the_rescue/1,
+    a_slow_on_discard_does_not_hold_up_a_cancel/1,
+    a_crashing_on_discard_is_logged_and_harms_nothing/1,
     a_stale_executor_cannot_complete_a_reclaimed_job/1,
     a_superseded_run_is_stopped_at_the_next_heartbeat/1,
     a_heartbeat_keeps_a_live_job_from_rescue/1,
@@ -87,7 +90,8 @@ the application does with it.
     encryption_key,
     encryption_write_format,
     load_shedding,
-    propagator
+    propagator,
+    on_discard_timeout
 ]).
 
 all() ->
@@ -112,6 +116,9 @@ all() ->
         a_dead_nodes_job_is_rescued_and_rerun,
         a_rescued_job_is_not_rescued_again_while_it_runs,
         a_job_that_kills_its_node_is_discarded_at_max_attempts,
+        a_slow_on_discard_does_not_hold_up_the_queue_or_the_rescue,
+        a_slow_on_discard_does_not_hold_up_a_cancel,
+        a_crashing_on_discard_is_logged_and_harms_nothing,
         a_stale_executor_cannot_complete_a_reclaimed_job,
         a_superseded_run_is_stopped_at_the_next_heartbeat,
         a_heartbeat_keeps_a_live_job_from_rescue,
@@ -238,6 +245,11 @@ overrides(a_job_stopped_by_a_shutdown_runs_again_on_its_last_attempt) ->
     #{shutdown_timeout => 200};
 overrides(a_job_draining_at_shutdown_keeps_its_heartbeat) ->
     #{shutdown_timeout => 8000, heartbeat_interval => 300};
+overrides(TestCase) when
+    TestCase =:= a_slow_on_discard_does_not_hold_up_the_queue_or_the_rescue;
+    TestCase =:= a_slow_on_discard_does_not_hold_up_a_cancel
+->
+    #{on_discard_timeout => 1500};
 overrides(every_fanout_consumer_runs_a_job) ->
     #{fanout_queues => [{?FANOUT, 5, #{window => 60}}]};
 overrides(a_snoozed_job_gives_its_place_in_the_load_shedder_back) ->
@@ -1104,6 +1116,70 @@ a_module_that_is_not_a_worker_fails_the_job(_Config) ->
     ?assertEqual(nomatch, binary:match(maps:get(errors, Row), ~"191212121212")).
 
 %%----------------------------------------------------------------------
+%% on_discard/2
+%%----------------------------------------------------------------------
+
+a_slow_on_discard_does_not_hold_up_the_queue_or_the_rescue(_Config) ->
+    Poison = enqueue_with(~"slow-poison", #{~"on_discard" => ~"hang"}, #{max_attempts => 1}),
+    _ = performing(~"slow-poison"),
+    ok = node_dies(Poison),
+    _ = await(Poison, ~"discarded"),
+    Callback = discarding(~"slow-poison"),
+    %% While that callback hangs, the queue claims and the rescue rescues.
+    Next = enqueue(~"after-slow"),
+    _ = performing(~"after-slow"),
+    ok = node_dies(Next),
+    instruct(performing(~"after-slow"), {return, ok}),
+    ?assertMatch(#{attempt := 2}, await(Next, ~"completed")),
+    %% It is stopped once on_discard_timeout is over.
+    ok = stopped(Callback, 3000).
+
+a_slow_on_discard_does_not_hold_up_a_cancel(_Config) ->
+    Parent = enqueue(~"cancelled-parent", #{scheduled_at => seconds_from_now(3600)}),
+    Child = enqueue_with(~"slow-child", #{~"on_discard" => ~"hang"}, #{
+        depends_on => [Parent], on_dependency_failure => discard
+    }),
+    Self = self(),
+    Caller = spawn_link(fun() -> Self ! {cancel_answered, shigoto:cancel(Parent)} end),
+    receive
+        {cancel_answered, Answer} -> ?assertEqual(ok, Answer)
+    after 1000 -> ct:fail(cancel_waits_for_on_discard)
+    end,
+    _ = await(Child, ~"discarded"),
+    Callback = discarding(~"slow-child"),
+    ?assertNotEqual(Caller, Callback),
+    ok = stopped(Callback, 3000).
+
+a_crashing_on_discard_is_logged_and_harms_nothing(_Config) ->
+    ok = shigoto_log_probe:attach(),
+    try
+        Crashes = enqueue_with(~"crash-discard", #{~"on_discard" => ~"crash"}, #{max_attempts => 1}),
+        instruct(performing(~"crash-discard"), {return, {error, gone}}),
+        _ = await(Crashes, ~"discarded"),
+        receive
+            {log, warning, #{msg := ~"shigoto_on_discard_failed"} = Report} ->
+                ?assertMatch(
+                    #{job_id := Crashes, worker := ~"shigoto_lifecycle_worker", reason := _}, Report
+                ),
+                ?assertEqual(nomatch, string:find(io_lib:format("~p", [Report]), "crash-discard"))
+        after 2000 -> ct:fail(no_on_discard_failed_log)
+        end
+    after
+        shigoto_log_probe:detach()
+    end,
+    Next = enqueue(~"after-crash", #{max_attempts => 1}),
+    instruct(performing(~"after-crash"), {return, {error, gone}}),
+    _ = await(Next, ~"discarded"),
+    ?assertEqual(1, on_discards(~"after-crash")).
+
+%% The process a hanging on_discard/2 runs in.
+discarding(Tag) ->
+    receive
+        {on_discard_by, Tag, Pid} -> Pid
+    after 2000 -> ct:fail({on_discard_not_called, Tag})
+    end.
+
+%%----------------------------------------------------------------------
 %% Batches and dependencies
 %%----------------------------------------------------------------------
 
@@ -1453,10 +1529,13 @@ enqueue(Tag) ->
     enqueue(Tag, #{}).
 
 enqueue(Tag, Extra) ->
+    enqueue_with(Tag, #{}, Extra).
+
+enqueue_with(Tag, Args, Extra) ->
     Params = maps:merge(
         #{
             worker => shigoto_lifecycle_worker,
-            args => #{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag}
+            args => Args#{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag}
         },
         Extra
     ),

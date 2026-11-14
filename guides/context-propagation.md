@@ -55,8 +55,8 @@ that key already in its `meta` keeps it, which is how to hand over a context
 by hand.
 
 During an attempt the context is attached in the executor process, where
-middleware, `backoff/2` and `on_discard/2` run, and in the process that runs
-`perform/1`.
+middleware and `backoff/2` run, and in the process that runs `perform/1`. It
+is also attached in the process that runs `on_discard/2`.
 
 ## Telemetry
 

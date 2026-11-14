@@ -37,8 +37,18 @@ only_absent(#{~"absent" := _}) -> ok.
 
 backoff(_Attempt, _Error) -> 1.
 
-on_discard(#{~"test" := Test, ~"tag" := Tag}, Errors) ->
+on_discard(#{~"test" := Test, ~"tag" := Tag} = Args, Errors) ->
     owner(Test) ! {discarded, Tag, Errors},
+    discarded(Args).
+
+discarded(#{~"on_discard" := ~"hang", ~"test" := Test, ~"tag" := Tag}) ->
+    owner(Test) ! {on_discard_by, Tag, self()},
+    receive
+        never -> ok
+    end;
+discarded(#{~"on_discard" := ~"crash"}) ->
+    error(deliberate_on_discard_crash);
+discarded(_Args) ->
     ok.
 
 owner(Test) -> list_to_pid(binary_to_list(Test)).

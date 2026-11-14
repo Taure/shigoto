@@ -447,7 +447,7 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
             {error, lost};
         #{rows := Rows} ->
             {[Updated], Cascaded} = moved(Rows),
-            _ = maybe_on_discard(Job, Updated),
+            ok = shigoto_callbacks:discarded(Updated),
             ok = batches_settled(Pool, [Updated]),
             dependents_followed(Pool, Cascaded);
         {error, _} = Err ->
@@ -758,7 +758,7 @@ rescue_stale_jobs(Pool, StaleSeconds) ->
 
 rescued(Pool, #{state := ~"discarded"} = Job) ->
     _ = shigoto_telemetry:job_rescued(Job),
-    _ = maybe_on_discard(Job, Job),
+    ok = shigoto_callbacks:discarded(Job),
     ok = batches_settled(Pool, [Job]),
     _ = shigoto_telemetry:job_discarded(Job),
     ok;
@@ -1254,7 +1254,7 @@ dependents_followed(Pool, Cascaded) ->
     batches_settled(Pool, Cascaded).
 
 followed(#{state := ~"discarded"} = Job) ->
-    _ = maybe_on_discard(Job, Job),
+    ok = shigoto_callbacks:discarded(Job),
     shigoto_telemetry:job_discarded(Job);
 followed(Job) ->
     shigoto_telemetry:job_cancelled(Job).
@@ -1661,42 +1661,6 @@ state_names(State) -> [state_name(State)].
 
 state_name(State) when is_atom(State) -> atom_to_binary(State);
 state_name(State) when is_binary(State) -> State.
-
-%%----------------------------------------------------------------------
-%% Internal: batch helpers
-%%----------------------------------------------------------------------
-
-%% on_discard/2 gets the job's args, so they are only decrypted for a row whose
-%% worker passes the check, and only when that worker has the callback. A job
-%% discarded on a node without its worker module, or whose args do not open,
-%% has no callback to run.
-maybe_on_discard(OrigJob, #{state := ~"discarded", errors := Errors}) ->
-    case shigoto_job:worker(OrigJob) of
-        {ok, Worker} ->
-            case erlang:function_exported(Worker, on_discard, 2) of
-                true -> discarded(Worker, OrigJob, Errors);
-                false -> ok
-            end;
-        {error, _} ->
-            ok
-    end;
-maybe_on_discard(_OrigJob, _Updated) ->
-    ok.
-
-discarded(Worker, Job, Errors) ->
-    case shigoto_job:opened(Job) of
-        {ok, _Worker, #{args := Args}} ->
-            try
-                Worker:on_discard(Args, decoded_errors(Errors))
-            catch
-                _:_ -> ok
-            end;
-        {error, _} ->
-            ok
-    end.
-
-decoded_errors(Errors) when is_binary(Errors) -> json:decode(Errors);
-decoded_errors(Errors) -> Errors.
 
 %%----------------------------------------------------------------------
 %% Internal: helpers

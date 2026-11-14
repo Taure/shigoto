@@ -91,6 +91,7 @@ Every push to `main` runs release.yml.
 ```
 shigoto_sup (one_for_one)
   ├─ shigoto_heartbeat      periodic heartbeat writes; first, so it stops last
+  ├─ shigoto_callbacks      runs on_discard/2 in processes of its own
   ├─ shigoto_executor_sup   simple_one_for_one; one process per running job
   ├─ shigoto_queue_sup      one shigoto_queue gen_server per queue
   ├─ shigoto_cron           cron + leader election
@@ -124,7 +125,9 @@ rescues jobs that are still running here.
   alike, so nothing has to promote it. Delay is the
   worker's `backoff/2` or the default `min(round(Attempt^4) + jitter(1..30),
   1800)` seconds. At `max_attempts` the job is `discarded` and `on_discard/2`
-  fires. `{snooze, Secs}` reschedules and raises `max_attempts` by one, giving
+  fires, through `shigoto_callbacks:discarded/1`: a user callback never runs
+  in a queue, a sweep or the process of an API caller, and is bounded in time
+  and number. `{snooze, Secs}` reschedules and raises `max_attempts` by one, giving
   back the attempt the claim counted.
 - **Executor.** One `shigoto_executor` per running job. It traps exits and
   runs `perform/1` in a linked process, so neither outlives the other.

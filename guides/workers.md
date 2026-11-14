@@ -169,6 +169,20 @@ on_discard(Args, Errors) ->
     alert_ops_team(Args).
 ```
 
+It also runs for a job discarded because a job it waited on failed
+(`on_dependency_failure => discard`) and for one the stale-job rescue discards.
+
+The callback runs in a process of its own, after the job has been discarded:
+not in the queue, not in the process that called `shigoto:cancel/1` or
+`shigoto:discard/1`. It may take up to `on_discard_timeout` (60000 ms) and is
+stopped after that (`shigoto_on_discard_timeout` is logged). One that raises is
+logged as `shigoto_on_discard_failed`, with the shape of the reason and none
+of its values. At most 10 run at a time on a node and up to 10000 wait their
+turn; past that, callbacks are not run and `shigoto_on_discard_dropped` says
+how many. It is a notification, not a step of the job: a node that stops
+between the discard and the callback does not run it. Work that must happen
+belongs in a job.
+
 ## A Job Whose Worker Is Missing
 
 A job row names its worker module. When the node that claims it cannot run that

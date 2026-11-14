@@ -16,6 +16,7 @@ Configuration access for Shigoto. Reads from application env.
     archive_after_days/0,
     shutdown_timeout/0,
     shutdown_budget/0,
+    on_discard_timeout/0,
     notifier_config/0,
     middleware/0,
     encryption_key/0,
@@ -173,6 +174,15 @@ that.
 shutdown_budget() ->
     Queues = length(queues()) + length(fanout_queues()),
     Queues * (shutdown_timeout() + 1000) + shigoto_executor_sup:stop_timeout().
+
+-doc """
+Milliseconds an `on_discard/2` callback may run before it is stopped. Default:
+60000. The callback runs in a process of its own, so it holds up neither the
+queue nor the caller that discarded the job.
+""".
+-spec on_discard_timeout() -> pos_integer().
+on_discard_timeout() ->
+    integer_setting(on_discard_timeout, 60000).
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].

@@ -46,6 +46,11 @@ init(Migrated) ->
                 type => worker
             },
             #{
+                id => shigoto_callbacks,
+                start => {shigoto_callbacks, start_link, []},
+                type => worker
+            },
+            #{
                 id => shigoto_executor_sup,
                 start => {shigoto_executor_sup, start_link, []},
                 type => supervisor
