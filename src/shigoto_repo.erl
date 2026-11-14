@@ -71,7 +71,7 @@ insert_job(Pool, JobParams0, Opts) ->
             Err
     end.
 
--doc "Bulk insert multiple jobs in a single SQL statement. Returns inserted jobs.".
+-doc "Bulk insert multiple jobs in a single SQL statement. Returns the inserted jobs in the order given.".
 -spec insert_all(atom(), [map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(_Pool, [], _Opts) ->
     {ok, []};
@@ -116,7 +116,7 @@ insert_all(Pool, JobParamsList, Opts) ->
         {[], [], 1},
         Jobs
     ),
-    ValuesSQL = lists:join(~", ", ValueClauses),
+    ValuesSQL = lists:join(~", ", lists:reverse(ValueClauses)),
     Insert = [
         <<
             "INSERT INTO shigoto_jobs "

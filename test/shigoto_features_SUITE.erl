@@ -531,10 +531,10 @@ test_batch_total_is_counted_with_the_insert(_Config) ->
         [Job(One), Job(Other), Job(One), #{worker => shigoto_test_worker, args => #{}}, Job(One)],
         #{}
     ),
-    ?assertEqual(
-        lists:sort([One, Other, One, null, One]),
-        lists:sort([maps:get(batch_id, Row) || Row <- Inserted])
-    ),
+    %% The jobs come back in the order they were given.
+    ?assertEqual([One, Other, One, null, One], [maps:get(batch_id, Row) || Row <- Inserted]),
+    Ids = [maps:get(id, Row) || Row <- Inserted],
+    ?assertEqual(lists:sort(Ids), Ids),
     ?assertMatch({ok, #{total_jobs := 3}}, shigoto_batch:get(?POOL, One)),
     ?assertMatch({ok, #{total_jobs := 1}}, shigoto_batch:get(?POOL, Other)),
     {ok, #{batch_id := Other}} = shigoto_repo:insert_job(?POOL, Job(Other), #{}),
