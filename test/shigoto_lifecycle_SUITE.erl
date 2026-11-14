@@ -58,6 +58,9 @@ the application does with it.
     losing_every_connection_loses_no_job/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
+    two_parents_failing_at_once_discard_their_child_once/1,
+    a_child_cancelled_while_its_parent_fails_ends_once/1,
+    two_sweeps_at_once_follow_a_failed_dependency_once/1,
     a_burst_of_jobs_all_complete/1,
     a_workers_gates_are_set_up_once/1,
     a_declared_gate_is_not_skipped_without_seki/1,
@@ -133,6 +136,9 @@ all() ->
         losing_every_connection_loses_no_job,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
+        two_parents_failing_at_once_discard_their_child_once,
+        a_child_cancelled_while_its_parent_fails_ends_once,
+        two_sweeps_at_once_follow_a_failed_dependency_once,
         a_burst_of_jobs_all_complete,
         a_workers_gates_are_set_up_once,
         a_declared_gate_is_not_skipped_without_seki,
@@ -232,6 +238,8 @@ overrides(a_backlog_drains_without_waiting_for_the_poll_timer) ->
     #{poll_interval => 3000};
 overrides(a_result_that_looks_like_a_frame_reaches_its_dependent) ->
     #{encryption_key => binary:copy(<<7>>, 32), encryption_write_format => v1};
+overrides(two_sweeps_at_once_follow_a_failed_dependency_once) ->
+    #{rescue_interval => 60000};
 overrides(_TestCase) ->
     #{}.
 
@@ -1246,6 +1254,138 @@ a_discarded_parent_follows_each_childs_policy(_Config) ->
     ok = idle(~"policy-cancel", 300),
     ok = idle(~"policy-grandchild", 0),
     ok = idle(~"policy-discard", 0).
+
+%% Each of the next three cases has two statements cascade to one waiting job
+%% at once. The case holds the job's row lock until both wait for it, so the
+%% second runs against a row the first has already ended.
+
+two_parents_failing_at_once_discard_their_child_once(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, job, discarded], fun ?MODULE:forward/4, self()),
+    BatchId = open_batch(~"fan-in-open"),
+    One = enqueue(~"fan-in-one", #{max_attempts => 1}),
+    Two = enqueue(~"fan-in-two", #{max_attempts => 1}),
+    Child = enqueue(~"fan-in-child", #{
+        depends_on => [One, Two], on_dependency_failure => discard, batch => BatchId
+    }),
+    First = performing(~"fan-in-one"),
+    Second = performing(~"fan-in-two"),
+    ok = holding(Child, 2, fun() ->
+        instruct(First, {return, {error, gone}}),
+        instruct(Second, {return, {error, gone}})
+    end),
+    _ = await(One, ~"discarded"),
+    _ = await(Two, ~"discarded"),
+    ?assertMatch([#{~"error" := ~"dependency_failed"}], errors(await(Child, ~"discarded"))),
+    ?assertEqual(1, on_discards(~"fan-in-child")),
+    ?assertEqual(1, events([shigoto, job, discarded], Child)),
+    ?assertMatch(
+        {ok, #{state := ~"active", total_jobs := 2, discarded_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ).
+
+a_child_cancelled_while_its_parent_fails_ends_once(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, job, discarded], fun ?MODULE:forward/4, self()),
+    BatchId = open_batch(~"racing-open"),
+    Parent = enqueue(~"racing-parent", #{max_attempts => 1}),
+    Child = enqueue(~"racing-child", #{
+        depends_on => [Parent], on_dependency_failure => discard, batch => BatchId
+    }),
+    Worker = performing(~"racing-parent"),
+    Self = self(),
+    ok = holding(Child, 2, fun() ->
+        _ = spawn_link(fun() -> Self ! {cancel_answered, shigoto:cancel(Child)} end),
+        ok = wait_for(fun() -> lock_waiters() >= 1 end),
+        instruct(Worker, {return, {error, gone}})
+    end),
+    receive
+        {cancel_answered, Answer} -> ?assertEqual(ok, Answer)
+    after 5000 -> ct:fail(cancel_never_answered)
+    end,
+    _ = await(Parent, ~"discarded"),
+    ?assertMatch(#{state := ~"cancelled", discarded_at := null, errors := ~"[]"}, row(Child)),
+    ?assertEqual(0, on_discards(~"racing-child")),
+    ?assertEqual(0, events([shigoto, job, discarded], Child)),
+    ?assertMatch(
+        {ok, #{state := ~"active", total_jobs := 2, discarded_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ).
+
+two_sweeps_at_once_follow_a_failed_dependency_once(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, job, discarded], fun ?MODULE:forward/4, self()),
+    BatchId = open_batch(~"swept-open"),
+    Failed = enqueue(~"swept-parent", #{max_attempts => 1}),
+    instruct(performing(~"swept-parent"), {return, {error, gone}}),
+    _ = await(Failed, ~"discarded"),
+    Child = waiting_on(~"swept-child", [Failed], ~"discard"),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET batch_id = $2 WHERE id = $1", [Child, BatchId]
+    ),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_batches SET total_jobs = total_jobs + 1 WHERE id = $1", [BatchId]
+    ),
+    Self = self(),
+    ok = holding(Child, 2, fun() ->
+        [
+            spawn_link(fun() -> Self ! {swept, shigoto_repo:release_stuck_dependents(?POOL)} end)
+         || _ <- [1, 2]
+        ]
+    end),
+    [
+        receive
+            {swept, Answer} -> ?assertMatch({ok, _}, Answer)
+        after 5000 -> ct:fail(sweep_never_answered)
+        end
+     || _ <- [1, 2]
+    ],
+    ?assertMatch([#{~"error" := ~"dependency_failed"}], errors(await(Child, ~"discarded"))),
+    ?assertEqual(1, on_discards(~"swept-child")),
+    ?assertEqual(1, events([shigoto, job, discarded], Child)),
+    ?assertMatch(
+        {ok, #{state := ~"active", total_jobs := 2, discarded_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ).
+
+%% A batch with one job that does not run during the case, so the batch stays
+%% active and its counts can be read.
+open_batch(Tag) ->
+    BatchId = new_batch(),
+    _ = enqueue(Tag, #{batch => BatchId, scheduled_at => seconds_from_now(3600)}),
+    BatchId.
+
+%% Runs `Race` while a transaction of this process holds the row lock of job
+%% `Id`, and lets go once `Waiters` statements wait for it.
+holding(Id, Waiters, Race) ->
+    shigoto_db:transaction(?POOL, fun() ->
+        #{rows := [_]} = shigoto_db:query(
+            ?POOL, ~"SELECT id FROM shigoto_jobs WHERE id = $1 FOR UPDATE", [Id]
+        ),
+        _ = Race(),
+        wait_for(fun() -> lock_waiters() >= Waiters end)
+    end).
+
+lock_waiters() ->
+    #{rows := [#{waiting := Waiting}]} = shigoto_db:query(
+        ?POOL, ~"SELECT count(*) AS waiting FROM pg_locks WHERE NOT granted", []
+    ),
+    Waiting.
+
+%% How often on_discard/2 ran for the job with this tag, and how often an
+%% event was emitted for a job, once things have settled.
+on_discards(Tag) ->
+    timer:sleep(500),
+    on_discards(Tag, 0).
+
+on_discards(Tag, Count) ->
+    receive
+        {discarded, Tag, _Errors} -> on_discards(Tag, Count + 1)
+    after 0 -> Count
+    end.
+
+events(Event, JobId) ->
+    receive
+        {telemetry, Event, _Measurements, #{job_id := JobId}} -> 1 + events(Event, JobId)
+    after 0 -> 0
+    end.
 
 a_burst_of_jobs_all_complete(_Config) ->
     Tags = [iolist_to_binary([~"burst-", integer_to_binary(N)]) || N <- lists:seq(1, 40)],

@@ -1106,6 +1106,11 @@ try_advisory_xact_lock(Pool, Key) ->
 %% touched a second time as a dependent: PostgreSQL applies only one of two
 %% updates to a row within a statement.
 %%
+%% `failed` picks the waiting jobs from the statement's snapshot. `cascaded`
+%% names their state again because another statement may have ended one of
+%% them meanwhile: an UPDATE that waited for a row lock re-checks only its own
+%% WHERE clause against the new row.
+%%
 %% In the same statement each batch counts its jobs that ended: the `done`
 %% rows now discarded or cancelled (`count_batches`, off for a statement whose
 %% `done` rows had ended before it ran) and every cascaded one. `own => ids`
@@ -1138,6 +1143,7 @@ with_dependents(Done, DefaultPolicy, #{own := Own, count_batches := CountOwn}) -
             depends_on = ARRAY(SELECT unnest(d.depends_on) EXCEPT SELECT id FROM failed),
             errors = $errors
           FROM failed f WHERE d.id = f.id AND f.policy IS NOT NULL
+          AND d.state IN ('available', 'retryable')
           RETURNING d.*
         ), released AS (
           UPDATE shigoto_jobs d SET
