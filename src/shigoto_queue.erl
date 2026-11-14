@@ -3,6 +3,16 @@
 Per-queue gen_server that polls for available jobs and dispatches
 them to the executor supervisor. Supports graceful shutdown, queue
 weights, and pause/resume.
+
+The queue polls on its timer, when it is woken (a notification, the stager)
+and, while its last claim left work behind, each time one of its jobs
+finishes. A claim that fills every free slot may have left due jobs in the
+table, and a poll that had no free slot did not look, so the next free slot
+is filled at once instead of at the next tick. Without that a backlog drains
+at `concurrency` jobs per `poll_interval`, however fast the jobs are.
+
+At shutdown `terminate/2` waits up to `shutdown_timeout` for the running
+executors; nothing is claimed while it waits.
 """.
 -behaviour(gen_server).
 
@@ -15,7 +25,7 @@ weights, and pause/resume.
     active :: non_neg_integer(),
     pool :: atom(),
     paused :: boolean(),
-    shutting_down :: boolean(),
+    backlog :: boolean(),
     executors :: #{pid() => reference()},
     weight :: pos_integer(),
     weight_counter :: non_neg_integer(),
@@ -44,7 +54,7 @@ init({Queue, Concurrency}) ->
             active = 0,
             pool = Pool,
             paused = false,
-            shutting_down = false,
+            backlog = false,
             executors = #{},
             weight = Weight,
             weight_counter = 0,
@@ -79,21 +89,20 @@ handle_call(_Request, _From, State) ->
 
 -doc false.
 handle_cast({job_finished, _JobId, Pid}, #state{active = Active, executors = Execs} = State) ->
-    NewExecs =
-        case Execs of
-            #{Pid := Ref} ->
-                erlang:demonitor(Ref, [flush]),
-                maps:remove(Pid, Execs);
-            #{} ->
-                Execs
-        end,
-    {noreply, State#state{active = Active - 1, executors = NewExecs}};
+    case Execs of
+        #{Pid := Ref} ->
+            erlang:demonitor(Ref, [flush]),
+            {noreply,
+                refilled(State#state{
+                    active = max(0, Active - 1), executors = maps:remove(Pid, Execs)
+                })};
+        #{} ->
+            {noreply, State}
+    end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -doc false.
-handle_info(poll, #state{shutting_down = true} = State) ->
-    {noreply, State};
 handle_info(poll, #state{paused = true} = State) ->
     ok = drop_queued_polls(),
     {noreply, schedule_poll(State)};
@@ -117,7 +126,7 @@ handle_info(
             {noreply, schedule_poll(State#state{weight_counter = NewCounter})};
         true ->
             Available = Conc - Active,
-            {NewActive, NewExecs} =
+            {NewActive, NewExecs, Backlog} =
                 case Available > 0 of
                     true ->
                         case claim(Pool, Queue, Available, Fair) of
@@ -144,22 +153,21 @@ handle_info(
                                     {0, Execs},
                                     Jobs
                                 ),
-                                {Active + Started, Execs1};
+                                {Active + Started, Execs1, length(Jobs) >= Available};
                             {error, _} ->
-                                {Active, Execs}
+                                {Active, Execs, true}
                         end;
                     false ->
-                        {Active, Execs}
+                        {Active, Execs, true}
                 end,
             {noreply,
                 schedule_poll(State#state{
                     active = NewActive,
                     executors = NewExecs,
+                    backlog = Backlog,
                     weight_counter = NewCounter
                 })}
     end;
-handle_info(rescue, #state{shutting_down = true} = State) ->
-    {noreply, State};
 handle_info(rescue, #state{pool = Pool} = State) ->
     _ = shigoto_repo:rescue_stale_jobs(Pool, shigoto_config:stale_after()),
     schedule_rescue(),
@@ -167,9 +175,15 @@ handle_info(rescue, #state{pool = Pool} = State) ->
 handle_info(
     {'DOWN', _Ref, process, Pid, _Reason}, #state{active = Active, executors = Execs} = State
 ) ->
-    NewExecs = maps:remove(Pid, Execs),
-    NewActive = max(0, Active - 1),
-    {noreply, State#state{active = NewActive, executors = NewExecs}};
+    case Execs of
+        #{Pid := _} ->
+            {noreply,
+                refilled(State#state{
+                    active = max(0, Active - 1), executors = maps:remove(Pid, Execs)
+                })};
+        #{} ->
+            {noreply, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -191,6 +205,16 @@ claim(Pool, Queue, Limit, true) ->
     shigoto_repo:claim_jobs_fair(Pool, Queue, Limit);
 claim(Pool, Queue, Limit, false) ->
     shigoto_repo:claim_jobs(Pool, Queue, Limit).
+
+%% A slot came free. When the last poll left work behind, or could not look,
+%% the queue polls now; `drop_queued_polls/0` makes several slots freed together
+%% one poll.
+-spec refilled(#state{}) -> #state{}.
+refilled(#state{backlog = true, paused = false} = State) ->
+    self() ! poll,
+    State;
+refilled(State) ->
+    State.
 
 %% The queue polls on its timer and whenever it is sent `poll` (a notification,
 %% the stager). Either way exactly one timer is left pending afterwards: a
