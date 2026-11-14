@@ -20,6 +20,7 @@ Configuration access for Shigoto. Reads from application env.
     encryption_key/0,
     heartbeat_interval/0,
     rescue_interval/0,
+    on_dependency_failure/0,
     stale_after/0,
     load_shedding/0,
     queue_weights/0,
@@ -158,6 +159,18 @@ twice the heartbeat interval.
 -spec stale_after() -> float().
 stale_after() ->
     heartbeat_interval() * 2 / 1000.
+
+-doc """
+What a waiting job does when a job it depends on is discarded or cancelled,
+unless the job says otherwise with its own `on_dependency_failure`: `run`
+without it (the default), or be `cancel`led or `discard`ed in turn.
+""".
+-spec on_dependency_failure() -> run | cancel | discard.
+on_dependency_failure() ->
+    case application:get_env(shigoto, on_dependency_failure, run) of
+        Policy when Policy =:= run; Policy =:= cancel; Policy =:= discard -> Policy;
+        Other -> error({invalid_on_dependency_failure, Other})
+    end.
 
 -doc "Load shedding config. Default: undefined (disabled).".
 -spec load_shedding() -> map() | undefined.

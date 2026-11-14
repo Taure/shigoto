@@ -134,6 +134,16 @@ shigoto_sup (one_for_one)
   minute is scheduled once; it catches up on the last hour after downtime. The
   minute comes from PostgreSQL's clock and the stored minute only moves forward
   (`GREATEST` in the upsert), so node clock skew cannot reschedule a minute.
+- **Dependencies.** A job with `depends_on` is not claimable until the array is
+  empty. Completion removes the id and adds the result to `deps_results`. A
+  dependency that is discarded or cancelled has failed: every statement that
+  can fail a job (`fail_job`, `discard_job`, `cancel_job`, `cancel_by`, the
+  rescue) ends in the same CTE tail (`with_dependents/2` in `shigoto_repo`),
+  which walks the waiting jobs recursively and releases, cancels or discards
+  each by its `on_dependency_failure` (job column, else the app default). A
+  dependency already finished at insert is not waited for. Inserting cannot
+  create a cycle (no id yet); `dependency_cycle` only reports rows written
+  around the API.
 - **Stale rescue.** Heartbeats + a per-queue `rescue` tick (`rescue_interval`)
   take back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
   claiming counts as the first heartbeat). A rescued job is re-queued, or

@@ -274,6 +274,11 @@ shigoto:insert(#{
 }).
 ```
 
+If `Job1` or `Job2` is discarded or cancelled instead, the waiting job runs
+without it by default. Set `on_dependency_failure => cancel` or `discard` on
+the waiting job to have it go the same way. See the
+[Dependencies](dependencies.md) guide.
+
 ## Partitioned Queues
 
 For multi-tenant fairness, set a `partition_key` so no single tenant starves others:

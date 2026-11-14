@@ -40,6 +40,7 @@ the application does with it.
     a_batch_callback_runs_after_its_jobs/1,
     a_cancelled_batch_job_still_finishes_the_batch/1,
     a_child_runs_after_its_parent_with_the_result/1,
+    a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1
 ]).
 
@@ -87,6 +88,7 @@ all() ->
         a_batch_callback_runs_after_its_jobs,
         a_cancelled_batch_job_still_finishes_the_batch,
         a_child_runs_after_its_parent_with_the_result,
+        a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete
     ].
 
@@ -474,6 +476,8 @@ an_unknown_worker_fails_the_job_not_the_queue(_Config) ->
     ?assertMatch(
         [#{~"error" := ~"unknown_worker:<<\"shigoto_no_such_worker_module\">>"}], errors(Failed)
     ),
+    %% No worker module, so the default backoff applies: up to half a minute.
+    ok = due(Id),
     Row = await(Id, ~"discarded"),
     ?assertMatch(#{attempt := 2}, Row),
     ?assertMatch([_, _], errors(Row)),
@@ -543,6 +547,37 @@ a_child_runs_after_its_parent_with_the_result(_Config) ->
     ?assertEqual(#{Parent => #{~"rows" => 3}}, maps:get(deps_results, Args)),
     instruct(ChildWorker, {return, ok}),
     _ = await(Child, ~"completed").
+
+a_discarded_parent_follows_each_childs_policy(_Config) ->
+    Parent = enqueue(~"policy-parent", #{max_attempts => 1}),
+    Runs = enqueue(~"policy-run", #{depends_on => [Parent]}),
+    Cancels = enqueue(~"policy-cancel", #{depends_on => [Parent], on_dependency_failure => cancel}),
+    Discards = enqueue(
+        ~"policy-discard", #{depends_on => [Parent], on_dependency_failure => discard}
+    ),
+    Grandchild = enqueue(
+        ~"policy-grandchild", #{depends_on => [Cancels], on_dependency_failure => cancel}
+    ),
+    Released = enqueue(~"policy-released", #{depends_on => [Cancels]}),
+    instruct(performing(~"policy-parent"), {return, {error, gone}}),
+    _ = await(Parent, ~"discarded"),
+    ?assertMatch(#{state := ~"cancelled", attempt := 0}, await(Cancels, ~"cancelled")),
+    ?assertMatch(#{state := ~"cancelled", attempt := 0}, await(Grandchild, ~"cancelled")),
+    DiscardedRow = await(Discards, ~"discarded"),
+    ?assertMatch([#{~"error" := ~"dependency_failed"}], errors(DiscardedRow)),
+    receive
+        {discarded, ~"policy-discard", [_]} -> ok
+    after 2000 -> ct:fail(on_discard_not_called)
+    end,
+    {RunWorker, Args} = performing_with_args(~"policy-run"),
+    ?assertEqual(#{Parent => null}, maps:get(deps_results, Args)),
+    instruct(RunWorker, {return, ok}),
+    instruct(performing(~"policy-released"), {return, ok}),
+    _ = await(Runs, ~"completed"),
+    _ = await(Released, ~"completed"),
+    ok = idle(~"policy-cancel", 300),
+    ok = idle(~"policy-grandchild", 0),
+    ok = idle(~"policy-discard", 0).
 
 a_burst_of_jobs_all_complete(_Config) ->
     Tags = [iolist_to_binary([~"burst-", integer_to_binary(N)]) || N <- lists:seq(1, 40)],
@@ -652,6 +687,12 @@ expire(Id) ->
         WHERE id = $1
         """,
         [Id]
+    ),
+    ok.
+
+due(Id) ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET scheduled_at = now() WHERE id = $1", [Id]
     ),
     ok.
 

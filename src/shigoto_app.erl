@@ -25,6 +25,7 @@ liveness probe does not restart it during this window.
 -doc false.
 start(_StartType, _StartArgs) ->
     warn_if_testing_mode(),
+    _ = shigoto_config:on_dependency_failure(),
     _ = shigoto_db:kura_available(),
     ok = shigoto_db:ignore_sandbox(),
     shigoto_sup:start_link(shigoto_migrator:boot(shigoto_config:pool())).

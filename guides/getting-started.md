@@ -73,6 +73,7 @@ config :shigoto,
 | `encryption_key` | `undefined` | 32-byte AES-256-GCM key for encrypting job args |
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
 | `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
+| `on_dependency_failure` | `run` | What a waiting job does when a dependency fails, unless the job sets it (see [Dependencies](dependencies.md)) |
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |

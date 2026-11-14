@@ -27,10 +27,10 @@ shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
 taken, so a running system is not blocked. A comment that is not `shigoto <N>`
 (with `N` a positive number of at most 9 digits) counts as no version, and is
 overwritten. A schema with no comment at all that already has the newest
-version's index is also current: `up/1` logs `shigoto_schema_unstamped` once and
+version's column (`on_dependency_failure`) is also current: `up/1` logs `shigoto_schema_unstamped` once and
 answers `ok` without DDL, so a role that may only read and write rows can run
 it. Run `up/1` once as the table owner to record the version. A schema migrated
-by shigoto 1.9.x has no comment and not that index, so it is migrated like any
+by shigoto 1.9.x has no comment and not that column, so it is migrated like any
 older one, which takes the table owner.
 
 Version 7 builds one partial index on `shigoto_jobs` and drops the one it
@@ -38,7 +38,11 @@ replaces, holding the table lock while it does: the build reads the whole table
 and indexes only the rows waiting to run. On a table of many millions of rows,
 run `CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx ON
 shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')`
-by hand first; the migration then finds it and skips the build.
+by hand first; the migration then finds it and skips the build. Version 7 also
+adds the nullable `shigoto_jobs.on_dependency_failure` column, which rewrites
+nothing. Nodes still on the previous version keep working against a version 7
+schema. This version's statements also run against a version 6 one, where the
+only thing refused is inserting a job that sets `on_dependency_failure`.
 
 Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
 `shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
@@ -128,15 +132,17 @@ current(Pool) ->
     end.
 
 %% A schema whose version comment was removed has none. When it already has
-%% the newest version's index it is current: a DML-only role could not record
-%% the version anyway, and would otherwise never get past boot.
+%% the newest version's column it is current: a DML-only role could not record
+%% the version anyway, and would otherwise never get past boot. The column is
+%% the marker, not the index, since the index may have been built by hand
+%% ahead of the migration.
 unstamped(Pool) ->
     SQL =
         ~"""
         SELECT count(*) AS found
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relname = 'shigoto_jobs_claimable_idx' AND n.nspname = current_schema()
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'shigoto_jobs'
+        AND column_name = 'on_dependency_failure'
         """,
     case shigoto_db:query(Pool, SQL, []) of
         #{rows := [#{found := 1}]} ->
@@ -391,5 +397,9 @@ v7_statements() ->
         ON shigoto_jobs (queue, scheduled_at)
         WHERE state IN ('available', 'retryable')
         """,
-        ~"DROP INDEX IF EXISTS shigoto_jobs_queue_state_idx"
+        ~"DROP INDEX IF EXISTS shigoto_jobs_queue_state_idx",
+        %% What a waiting job does when a dependency fails; NULL means the
+        %% application's default. Nullable with no default, so adding it does
+        %% not rewrite the table, and nodes on the previous version ignore it.
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT"
     ].

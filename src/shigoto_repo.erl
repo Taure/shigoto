@@ -62,13 +62,25 @@ already finished is not waited for: its result goes straight into the new
 job's `deps_results`. The jobs still waited for must not depend on each other
 in a circle, which only rows written around this API can do
 (`{error, dependency_cycle}`).
+
+`on_dependency_failure` says what the job does when a job it waits on is
+discarded or cancelled: `run` without it, or be `cancel`led or `discard`ed in
+turn. Left out, `shigoto_config:on_dependency_failure/0` decides when the
+dependency fails. A job that would be cancelled or discarded for a dependency
+that has already failed is not inserted: `{error, {dependency_failed, Ids}}`.
 """.
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert_job(Pool, JobParams0, Opts) ->
     JobParams1 = apply_worker_defaults(JobParams0),
+    case stated_policy(JobParams1) of
+        {error, _} = Invalid -> Invalid;
+        {ok, _Policy} -> insert_validated(Pool, JobParams1, Opts)
+    end.
+
+insert_validated(Pool, JobParams1, Opts) ->
     DependsOn = maps:get(depends_on, JobParams1, []),
-    case validate_dependencies(Pool, DependsOn) of
+    case validate_dependencies(Pool, DependsOn, effective_policy(JobParams1)) of
         {ok, Pending, Results} ->
             JobParams = JobParams1#{depends_on => Pending, deps_results => Results},
             case resolve_unique(JobParams, Opts) of
@@ -87,7 +99,20 @@ insert_all(_Pool, [], _Opts) ->
     {ok, []};
 insert_all(Pool, JobParamsList, Opts) ->
     Jobs = [apply_worker_defaults(J) || J <- JobParamsList],
-    ParamsPerJob = 10,
+    case [Invalid || Job <- Jobs, {error, _} = Invalid <- [stated_policy(Job)]] of
+        [Invalid | _] -> Invalid;
+        [] -> insert_all_validated(Pool, Jobs, Opts)
+    end.
+
+insert_all_validated(Pool, Jobs, Opts) ->
+    %% The policy column is only named when a job sets one, so a plain insert
+    %% is the same statement as before the column existed.
+    WithPolicy = lists:any(fun(Job) -> policy_column(Job) =/= null end, Jobs),
+    {ParamsPerJob, PolicyColumn} =
+        case WithPolicy of
+            true -> {11, ~", on_dependency_failure"};
+            false -> {10, <<>>}
+        end,
     {ValueClauses, AllParams, _} = lists:foldl(
         fun(JobParams, {Clauses, Params, Idx}) ->
             Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
@@ -120,7 +145,7 @@ insert_all(Pool, JobParamsList, Opts) ->
                         BatchId,
                         PartitionKey,
                         DependsOn
-                    ],
+                    ] ++ [policy_column(JobParams) || WithPolicy],
             {[Clause | Clauses], NewParams, Idx + ParamsPerJob}
         end,
         {[], [], 1},
@@ -130,8 +155,10 @@ insert_all(Pool, JobParamsList, Opts) ->
     Insert = [
         <<
             "INSERT INTO shigoto_jobs "
-            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on) VALUES "
+            "(queue, worker, args, priority, max_attempts, scheduled_at, tags, batch_id, partition_key, depends_on"
         >>,
+        PolicyColumn,
+        ~") VALUES ",
         ValuesSQL,
         ~" RETURNING *"
     ],
@@ -296,9 +323,9 @@ holds, and answers `{error, lost}` otherwise.
 fail_job(Pool, Job, Reason, BackoffSeconds) ->
     {JobId, Attempt} = fence(Job),
     ErrorJson = encode_json(build_structured_error(Job, Reason)),
-    SQL =
+    SQL = with_dependents(
         ~"""
-        WITH done AS (
+        WITH RECURSIVE done AS (
           UPDATE shigoto_jobs SET
             state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,
             discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
@@ -307,25 +334,18 @@ fail_job(Pool, Job, Reason, BackoffSeconds) ->
             errors = errors || $2::jsonb
           WHERE id = $1 AND state = 'executing' AND ($4::integer IS NULL OR attempt = $4)
           RETURNING *
-        ), dependents AS (
-          UPDATE shigoto_jobs d
-          SET depends_on = array_remove(d.depends_on, done.id),
-              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done
-          WHERE done.state = 'discarded'
-          AND d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
         )
-        SELECT * FROM done
         """,
-    case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds, Attempt]) of
-        #{rows := [#{state := ~"discarded"} = Updated]} ->
-            _ = maybe_on_discard(Job, Updated),
-            _ = maybe_batch_discard(Pool, Updated),
-            ok;
-        #{rows := [_Updated]} ->
-            ok;
+        ~"$5"
+    ),
+    case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds, Attempt, default_policy()]) of
         #{rows := []} ->
             {error, lost};
+        #{rows := Rows} ->
+            {[Updated], Cascaded} = moved(Rows),
+            _ = maybe_on_discard(Job, Updated),
+            _ = maybe_batch_discard(Pool, Updated),
+            dependents_followed(Pool, Cascaded);
         {error, _} = Err ->
             Err
     end.
@@ -337,31 +357,36 @@ discarded or cancelled is left as it is.
 """.
 -spec discard_job(atom(), integer()) -> ok | {error, term()}.
 discard_job(Pool, JobId) ->
-    SQL =
+    SQL = with_dependents(
         ~"""
-        WITH done AS (
+        WITH RECURSIVE done AS (
           UPDATE shigoto_jobs SET state = 'discarded', discarded_at = now()
           WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
-          RETURNING id, result, batch_id
-        ), dependents AS (
-          UPDATE shigoto_jobs d
-          SET depends_on = array_remove(d.depends_on, done.id),
-              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
+          RETURNING *
         )
-        SELECT batch_id FROM done
         """,
-    case query(Pool, SQL, [JobId]) of
-        #{rows := Rows} -> batches_told(Pool, Rows);
+        ~"$2"
+    ),
+    case query(Pool, SQL, [JobId, default_policy()]) of
+        #{rows := Rows} -> ended(Pool, Rows);
         {error, _} = Err -> Err
     end.
+
+%% The rows a discarding or cancelling statement answered: its own jobs are
+%% counted in their batches, and so are the dependents that went with them.
+-spec ended(atom(), [map()]) -> ok.
+ended(Pool, Rows) ->
+    {Own, Cascaded} = moved(Rows),
+    ok = batches_told(Pool, Own),
+    dependents_followed(Pool, Cascaded).
 
 %% The jobs a statement just discarded or cancelled, counted in their batches.
 -spec batches_told(atom(), [#{batch_id := integer() | null, _ => _}]) -> ok.
 batches_told(Pool, Rows) ->
+    Batched = [BatchId || #{batch_id := BatchId} <- Rows, BatchId =/= null],
     _ = [
-        shigoto_batch:jobs_discarded(Pool, BatchId, maps:get(jobs, Row, 1))
-     || #{batch_id := BatchId} = Row <- Rows, BatchId =/= null
+        shigoto_batch:jobs_discarded(Pool, BatchId, length([B || B <- Batched, B =:= BatchId]))
+     || BatchId <- lists:usort(Batched)
     ],
     ok.
 
@@ -372,22 +397,18 @@ still finish.
 """.
 -spec cancel_job(atom(), integer()) -> ok | {error, term()}.
 cancel_job(Pool, JobId) ->
-    SQL =
+    SQL = with_dependents(
         ~"""
-        WITH done AS (
+        WITH RECURSIVE done AS (
           UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now()
           WHERE id = $1 AND state IN ('available', 'retryable', 'executing')
-          RETURNING id, result, batch_id
-        ), dependents AS (
-          UPDATE shigoto_jobs d
-          SET depends_on = array_remove(d.depends_on, done.id),
-              deps_results = d.deps_results || jsonb_build_object(done.id::text, done.result)
-          FROM done WHERE d.depends_on @> ARRAY[done.id] AND d.depends_on <> '{}'
+          RETURNING *
         )
-        SELECT batch_id FROM done
         """,
-    case query(Pool, SQL, [JobId]) of
-        #{rows := Rows} -> batches_told(Pool, Rows);
+        ~"$2"
+    ),
+    case query(Pool, SQL, [JobId, default_policy()]) of
+        #{rows := Rows} -> ended(Pool, Rows);
         {error, _} = Err -> Err
     end.
 
@@ -410,41 +431,21 @@ cancel_by(Pool, Filters) ->
     end.
 
 cancel_matching(Pool, Filters) ->
-    {WhereClauses, Params, _} = build_filter_clauses(Filters, 1),
-    WhereSQL =
-        case WhereClauses of
-            [] ->
-                ~"state IN ('available', 'retryable')";
-            _ ->
-                iolist_to_binary([
-                    ~"state IN ('available', 'retryable') AND ",
-                    lists:join(~" AND ", WhereClauses)
-                ])
-        end,
-    SQL = iolist_to_binary([
-        ~"WITH done AS (UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
-        WhereSQL,
-        ~"""
-         RETURNING id, result, batch_id
-        ), finished AS (
-          SELECT array_agg(id) AS ids, jsonb_object_agg(id::text, result) AS results FROM done
-        ), dependents AS (
-          UPDATE shigoto_jobs d
-          SET depends_on = ARRAY(
-                SELECT dep FROM unnest(d.depends_on) AS dep WHERE dep <> ALL (finished.ids)
-              ),
-              deps_results = d.deps_results || finished.results
-          FROM finished
-          WHERE d.depends_on && finished.ids AND d.depends_on <> '{}'
-          AND d.id <> ALL (finished.ids)
-        )
-        SELECT batch_id, count(*) AS jobs FROM done GROUP BY batch_id
-        """
-    ]),
-    case query(Pool, SQL, Params) of
+    {WhereClauses, Params, Next} = build_filter_clauses(Filters, 1),
+    Matching = lists:join(~" AND ", [~"state IN ('available', 'retryable')" | WhereClauses]),
+    SQL = with_dependents(
+        [
+            ~"WITH RECURSIVE done AS (UPDATE shigoto_jobs SET state = 'cancelled', cancelled_at = now() WHERE ",
+            Matching,
+            ~" RETURNING *)"
+        ],
+        <<"$", (integer_to_binary(Next))/binary>>
+    ),
+    case query(Pool, SQL, Params ++ [default_policy()]) of
         #{rows := Rows} ->
-            ok = batches_told(Pool, Rows),
-            {ok, lists:sum([Jobs || #{jobs := Jobs} <- Rows])};
+            ok = ended(Pool, Rows),
+            {Own, _Cascaded} = moved(Rows),
+            {ok, length(Own)};
         {error, _} = Err ->
             Err
     end.
@@ -544,9 +545,9 @@ Answers how many jobs were rescued.
 """.
 -spec rescue_stale_jobs(atom(), number()) -> {ok, non_neg_integer()} | {error, term()}.
 rescue_stale_jobs(Pool, StaleSeconds) ->
-    SQL =
+    SQL = with_dependents(
         ~"""
-        WITH stale AS (
+        WITH RECURSIVE stale AS (
           SELECT id FROM shigoto_jobs
           WHERE state = 'executing'
           AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
@@ -561,24 +562,16 @@ rescue_stale_jobs(Pool, StaleSeconds) ->
             )
           FROM stale WHERE j.id = stale.id
           RETURNING j.*
-        ), finished AS (
-          SELECT array_agg(id) AS ids, jsonb_object_agg(id::text, result) AS results
-          FROM done WHERE state = 'discarded'
-        ), dependents AS (
-          UPDATE shigoto_jobs d
-          SET depends_on = ARRAY(
-                SELECT dep FROM unnest(d.depends_on) AS dep WHERE dep <> ALL (finished.ids)
-              ),
-              deps_results = d.deps_results || finished.results
-          FROM finished
-          WHERE d.depends_on && finished.ids AND d.depends_on <> '{}'
         )
-        SELECT * FROM done
         """,
-    case query(Pool, SQL, [float(StaleSeconds), now_timestamptz_str()]) of
+        ~"$3"
+    ),
+    case query(Pool, SQL, [float(StaleSeconds), now_timestamptz_str(), default_policy()]) of
         #{rows := Rows} ->
-            ok = lists:foreach(fun(Row) -> rescued(Pool, decrypt_job_args(Row)) end, Rows),
-            {ok, length(Rows)};
+            {Rescued, Cascaded} = moved(Rows),
+            ok = lists:foreach(fun(Row) -> rescued(Pool, decrypt_job_args(Row)) end, Rescued),
+            ok = dependents_followed(Pool, Cascaded),
+            {ok, length(Rescued)};
         {error, _} = Err ->
             Err
     end.
@@ -875,6 +868,88 @@ try_advisory_xact_lock(Pool, Key) ->
     end.
 
 %%----------------------------------------------------------------------
+%% Internal: the dependents of a job that failed
+%%----------------------------------------------------------------------
+
+%% Completes a statement whose `done` rows are the jobs it just moved. Those
+%% now discarded or cancelled have failed, and each job waiting on one follows
+%% its own `on_dependency_failure`: released to run without it (`run`), or
+%% cancelled or discarded in turn, which fails it for its own dependents. One
+%% statement walks the whole way down. `DefaultPolicy` is the placeholder of
+%% the policy for jobs that name none.
+%%
+%% The policy is read through to_jsonb so the statement also runs on a schema
+%% from before the column existed. A job the statement moved itself is never
+%% touched a second time as a dependent: PostgreSQL applies only one of two
+%% updates to a row within a statement.
+-spec with_dependents(iodata(), binary()) -> binary().
+with_dependents(Done, DefaultPolicy) ->
+    Tail =
+        ~"""
+        , failed(id, policy) AS (
+          SELECT id, NULL::text FROM done WHERE state IN ('discarded', 'cancelled')
+          UNION
+          SELECT d.id, COALESCE(to_jsonb(d) ->> 'on_dependency_failure', $default::text)
+          FROM failed f
+          JOIN shigoto_jobs d ON d.depends_on @> ARRAY[f.id] AND d.depends_on <> '{}'
+          WHERE d.state IN ('available', 'retryable')
+          AND d.id NOT IN (SELECT id FROM done)
+          AND COALESCE(to_jsonb(d) ->> 'on_dependency_failure', $default::text)
+            IN ('cancel', 'discard')
+        ), cascaded AS (
+          UPDATE shigoto_jobs d SET
+            state = CASE f.policy WHEN 'cancel' THEN 'cancelled' ELSE 'discarded' END,
+            cancelled_at = CASE f.policy WHEN 'cancel' THEN now() ELSE d.cancelled_at END,
+            discarded_at = CASE f.policy WHEN 'cancel' THEN d.discarded_at ELSE now() END,
+            depends_on = ARRAY(SELECT unnest(d.depends_on) EXCEPT SELECT id FROM failed),
+            errors = d.errors || jsonb_build_object(
+              'error', 'dependency_failed',
+              'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              'attempt', d.attempt,
+              'worker', d.worker
+            )
+          FROM failed f WHERE d.id = f.id AND f.policy IS NOT NULL
+          RETURNING d.*
+        ), released AS (
+          UPDATE shigoto_jobs d SET
+            depends_on = ARRAY(SELECT unnest(d.depends_on) EXCEPT SELECT id FROM failed),
+            deps_results = d.deps_results || (
+              SELECT COALESCE(jsonb_object_agg(p.id::text, p.result), '{}'::jsonb)
+              FROM shigoto_jobs p
+              WHERE p.id = ANY(d.depends_on) AND p.id IN (SELECT id FROM failed)
+            )
+          WHERE d.depends_on && ARRAY(SELECT id FROM failed) AND d.depends_on <> '{}'
+          AND d.id NOT IN (SELECT id FROM failed)
+        )
+        SELECT false AS cascaded, * FROM done
+        UNION ALL
+        SELECT true AS cascaded, * FROM cascaded
+        """,
+    iolist_to_binary([Done, binary:replace(Tail, ~"$default", DefaultPolicy, [global])]).
+
+-spec default_policy() -> binary().
+default_policy() ->
+    atom_to_binary(shigoto_config:on_dependency_failure()).
+
+%% The rows such a statement answers: the jobs it moved itself, and the waiting
+%% jobs that were cancelled or discarded after them.
+-spec moved([map()]) -> {Own :: [map()], Cascaded :: [map()]}.
+moved(Rows) ->
+    {[Row || #{cascaded := false} = Row <- Rows], [Row || #{cascaded := true} = Row <- Rows]}.
+
+-spec dependents_followed(atom(), [map()]) -> ok.
+dependents_followed(Pool, Cascaded) ->
+    Jobs = [decrypt_job_args(Row) || Row <- Cascaded],
+    _ = [followed(Job) || Job <- Jobs],
+    batches_told(Pool, Jobs).
+
+followed(#{state := ~"discarded"} = Job) ->
+    _ = maybe_on_discard(Job, Job),
+    shigoto_telemetry:job_discarded(Job);
+followed(Job) ->
+    shigoto_telemetry:job_cancelled(Job).
+
+%%----------------------------------------------------------------------
 %% Internal: fencing
 %%----------------------------------------------------------------------
 
@@ -887,11 +962,33 @@ fence(JobId) when is_integer(JobId) -> {JobId, null}.
 %% Internal: dependency validation
 %%----------------------------------------------------------------------
 
--spec validate_dependencies(atom(), [integer()]) ->
+%% The policy a job names for itself, if it names a valid one.
+-spec stated_policy(map()) -> {ok, run | cancel | discard | undefined} | {error, term()}.
+stated_policy(JobParams) ->
+    case maps:get(on_dependency_failure, JobParams, undefined) of
+        Policy when Policy =:= run; Policy =:= cancel; Policy =:= discard; Policy =:= undefined ->
+            {ok, Policy};
+        Other ->
+            {error, {invalid_on_dependency_failure, Other}}
+    end.
+
+effective_policy(JobParams) ->
+    case maps:get(on_dependency_failure, JobParams, undefined) of
+        undefined -> shigoto_config:on_dependency_failure();
+        Policy -> Policy
+    end.
+
+policy_column(JobParams) ->
+    case maps:get(on_dependency_failure, JobParams, undefined) of
+        undefined -> null;
+        Policy -> atom_to_binary(Policy)
+    end.
+
+-spec validate_dependencies(atom(), [integer()], run | cancel | discard) ->
     {ok, Pending :: [integer()], Results :: #{binary() => term()}} | {error, term()}.
-validate_dependencies(_Pool, []) ->
+validate_dependencies(_Pool, [], _Policy) ->
     {ok, [], #{}};
-validate_dependencies(Pool, DepIds) ->
+validate_dependencies(Pool, DepIds, Policy) ->
     %% The dependencies and everything they still wait for. UNION drops the
     %% rows already seen, which also ends the walk when the rows form a circle.
     SQL =
@@ -908,14 +1005,14 @@ validate_dependencies(Pool, DepIds) ->
         #{rows := Rows} ->
             Jobs = #{Id => Row || #{id := Id} = Row <- Rows},
             case [Id || Id <- DepIds, not is_map_key(Id, Jobs)] of
-                [] -> waited_for(DepIds, Jobs);
+                [] -> waited_for(DepIds, Jobs, Policy);
                 Missing -> {error, {missing_dependencies, Missing}}
             end;
         {error, _} = Err ->
             Err
     end.
 
-waited_for(DepIds, Jobs) ->
+waited_for(DepIds, Jobs, Policy) ->
     Waits =
         #{
             Id => [Dep || Dep <- DependsOn, is_map_key(Dep, Jobs)]
@@ -926,16 +1023,24 @@ waited_for(DepIds, Jobs) ->
             {error, dependency_cycle};
         true ->
             Finished = [Id || Id <- DepIds, is_finished(maps:get(Id, Jobs))],
-            Results =
-                #{
-                    integer_to_binary(Id) => decoded_result(maps:get(Id, Jobs))
-                 || Id <- Finished
-                },
-            {ok, lists:usort(DepIds) -- Finished, Results}
+            case [Id || Id <- Finished, Policy =/= run, has_failed(maps:get(Id, Jobs))] of
+                [] ->
+                    Results =
+                        #{
+                            integer_to_binary(Id) => decoded_result(maps:get(Id, Jobs))
+                         || Id <- Finished
+                        },
+                    {ok, lists:usort(DepIds) -- Finished, Results};
+                Failed ->
+                    {error, {dependency_failed, Failed}}
+            end
     end.
 
 is_finished(#{state := State}) ->
     lists:member(State, [~"completed", ~"discarded", ~"cancelled"]).
+
+has_failed(#{state := State}) ->
+    lists:member(State, [~"discarded", ~"cancelled"]).
 
 decoded_result(#{result := null}) -> null;
 decoded_result(#{result := Result}) when is_binary(Result) -> json:decode(Result);
@@ -1128,29 +1233,43 @@ do_insert(Pool, JobParams, Opts, UniqueKey) ->
     EncArgs = shigoto_crypto:encrypt(ArgsJson),
     MetaJson = encode_json(Meta),
     EncMeta = shigoto_crypto:encrypt(MetaJson),
-    Insert =
+    %% The policy column is only named when the job sets one, so a plain insert
+    %% is the same statement as before the column existed.
+    {PolicyColumn, PolicyValue, PolicyParam} =
+        case policy_column(JobParams) of
+            null -> {<<>>, <<>>, []};
+            Policy -> {~", on_dependency_failure", ~", $14", [Policy]}
+        end,
+    Insert = [
         <<
-            "INSERT INTO shigoto_jobs\n"
-            "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on, deps_results)\n"
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)\n"
-            "RETURNING *"
+            "INSERT INTO shigoto_jobs "
+            "(queue, worker, args, meta, priority, max_attempts, scheduled_at, unique_key, tags, batch_id, partition_key, depends_on, deps_results"
         >>,
+        PolicyColumn,
+        ~") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb",
+        PolicyValue,
+        ~") RETURNING *"
+    ],
     case
-        query(Pool, counting_its_batches(Insert, BatchId =/= null), [
-            Queue,
-            Worker,
-            EncArgs,
-            EncMeta,
-            Priority,
-            MaxAttempts,
-            ScheduledAt,
-            UniqueKey,
-            TagsArr,
-            BatchId,
-            PartitionKey,
-            DependsOn,
-            encode_json(maps:get(deps_results, JobParams, #{}))
-        ])
+        query(
+            Pool,
+            counting_its_batches(Insert, BatchId =/= null),
+            [
+                Queue,
+                Worker,
+                EncArgs,
+                EncMeta,
+                Priority,
+                MaxAttempts,
+                ScheduledAt,
+                UniqueKey,
+                TagsArr,
+                BatchId,
+                PartitionKey,
+                DependsOn,
+                encode_json(maps:get(deps_results, JobParams, #{}))
+            ] ++ PolicyParam
+        )
     of
         #{rows := [Row]} -> {ok, Row};
         {error, _} = Err -> Err

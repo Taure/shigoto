@@ -2,7 +2,8 @@
 
 Jobs can declare dependencies on other jobs using `depends_on`. A dependent
 job stays in `available` state but won't be claimed until all its dependencies
-have completed, been discarded, or been cancelled.
+have finished. What it does when one of them fails instead of completing is up
+to the job: see [When a Dependency Fails](#when-a-dependency-fails).
 
 ## Basic Usage
 
@@ -48,12 +49,64 @@ The merge job only runs after all three fetch jobs finish.
 
 ## Dependency Resolution
 
-When a job completes, gets discarded, or gets cancelled, shigoto automatically
-removes its ID from all `depends_on` arrays. Once a job's `depends_on` array
-is empty, it becomes claimable.
+When a job completes, shigoto removes its ID from all `depends_on` arrays and
+adds its result to each dependent's `deps_results`. Once a job's `depends_on`
+array is empty, it becomes claimable.
 
-This means dependent jobs aren't permanently stuck if a parent fails — they
-still execute after the parent reaches a terminal state.
+## When a Dependency Fails
+
+A dependency has failed when it is discarded (out of attempts, discarded by
+hand, or rescued on its last attempt) or cancelled. What a job waiting on it
+does then is the waiting job's choice, set with `on_dependency_failure`:
+
+| Value | The waiting job |
+|-------|-----------------|
+| `run` (default) | Is released and runs without the failed job. Its `deps_results` holds `null` for it. |
+| `cancel` | Is cancelled. |
+| `discard` | Is discarded: `on_discard/2` runs, as for a job out of attempts. |
+
+```erlang
+{ok, Extract} = shigoto:insert(#{worker => extract_worker, args => #{}}),
+
+%% Pointless without the extract: goes when the extract does.
+{ok, _Load} = shigoto:insert(#{
+    worker => load_worker,
+    args => #{},
+    depends_on => [maps:get(id, Extract)],
+    on_dependency_failure => cancel
+}),
+
+%% Runs either way, and can tell from deps_results what happened.
+{ok, _Report} = shigoto:insert(#{
+    worker => report_worker,
+    args => #{},
+    depends_on => [maps:get(id, Extract)]
+}).
+```
+
+A job that is cancelled or discarded this way has itself failed, so the jobs
+waiting on *it* follow their own setting in turn, all the way down, in the same
+database statement as the failure that started it. It never ran: its `attempt`
+is unchanged, its `errors` gain a `dependency_failed` entry, and it counts as
+discarded in its batch. A job waiting on several jobs goes as soon as one of
+them fails.
+
+The default for jobs that set nothing is the `on_dependency_failure`
+application setting, `run` unless configured:
+
+```erlang
+{shigoto, [
+    {on_dependency_failure, cancel}
+]}
+```
+
+It is read when the dependency fails, on the node that records the failure, so
+keep it the same on every node. Set the option on the job where the behaviour
+matters.
+
+With `cancel` or `discard`, a job cannot be inserted behind a dependency that
+has already failed: `shigoto:insert/1` answers
+`{error, {dependency_failed, [Id, ...]}}`.
 
 A dependency that has already finished when the dependent job is inserted is
 not waited for. Its result is put into the new job's `deps_results` straight

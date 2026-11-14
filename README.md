@@ -19,7 +19,7 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 - **Job snoozing** — Workers can return `{snooze, Seconds}` to reschedule without using up a retry attempt.
 
 ### Reliability
-- **Job dependencies** — `depends_on` chains ensure jobs execute in order. Cycle detection prevents deadlocks.
+- **Job dependencies** — `depends_on` chains ensure jobs execute in order. `on_dependency_failure` decides whether a job runs, is cancelled or is discarded when a job it waits on fails.
 - **Batches** — Group jobs with completion callbacks. Batch state tracks completed/discarded counts.
 - **Unique jobs** — Prevent duplicates with configurable keys, states, time windows, debounce, and field replacement on conflict.
 - **Stale job rescue** — Heartbeat-based detection of zombie jobs. A rescued job runs again, and is discarded once it is out of attempts.
@@ -225,6 +225,7 @@ All optional except `perform/1`:
 | `encryption_keys` | `[]` | Ordered key list for rotation (newest first) |
 | `heartbeat_interval` | `30000` | Milliseconds between heartbeats for executing jobs; a job is stale after twice this without one |
 | `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
+| `on_dependency_failure` | `run` | What a waiting job does when a dependency is discarded or cancelled, unless the job sets it: `run`, `cancel` or `discard` |
 | `load_shedding` | — | CoDel config map for seki |
 | `queue_weights` | `#{}` | Weighted polling distribution |
 | `fair_queues` | `[]` | Queues using partition-key fair claiming |

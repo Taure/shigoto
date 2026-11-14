@@ -33,6 +33,12 @@
     test_encrypted_unique_key_is_keyed/1,
     test_encrypted_args_filter_is_refused/1,
     test_heartbeat_stale_threshold/1,
+    test_dependents_follow_their_policy_when_a_parent_fails/1,
+    test_dependency_policy_defaults_to_the_application_setting/1,
+    test_dependency_policy_applies_to_cancel_and_rescue/1,
+    test_dependency_policy_is_validated_on_insert/1,
+    test_a_cascaded_job_counts_in_its_batch/1,
+    test_statements_run_before_the_policy_column_exists/1,
     test_a_job_naming_no_module_can_be_discarded/1,
     test_claim_counts_as_a_heartbeat/1,
     test_stale_threshold_under_a_second/1,
@@ -74,6 +80,12 @@ all() ->
         test_encrypted_unique_key_is_keyed,
         test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
+        test_dependents_follow_their_policy_when_a_parent_fails,
+        test_dependency_policy_defaults_to_the_application_setting,
+        test_dependency_policy_applies_to_cancel_and_rescue,
+        test_dependency_policy_is_validated_on_insert,
+        test_a_cascaded_job_counts_in_its_batch,
+        test_statements_run_before_the_policy_column_exists,
         test_a_job_naming_no_module_can_be_discarded,
         test_claim_counts_as_a_heartbeat,
         test_stale_threshold_under_a_second,
@@ -701,6 +713,191 @@ test_heartbeat_is_written_under_the_claim(_Config) ->
     {ok, #{heartbeat_at := Heartbeat}} = shigoto_repo:get_job(?POOL, Held),
     ?assertNotEqual(null, Heartbeat),
     ?assertEqual({ok, [{Reclaimed, 2}]}, shigoto_repo:heartbeat(?POOL, [{Reclaimed, 2}])).
+
+%%----------------------------------------------------------------------
+%% on_dependency_failure
+%%----------------------------------------------------------------------
+
+test_dependents_follow_their_policy_when_a_parent_fails(_Config) ->
+    Parent = waiting(#{max_attempts => 1}),
+    Runs = waiting(#{depends_on => [Parent], on_dependency_failure => run}),
+    Unset = waiting(#{depends_on => [Parent]}),
+    Cancels = waiting(#{depends_on => [Parent], on_dependency_failure => cancel}),
+    Discards = waiting(#{depends_on => [Parent], on_dependency_failure => discard}),
+    %% Below a cancelled job: one that goes with it, one that runs without it.
+    Below = waiting(#{depends_on => [Cancels], on_dependency_failure => discard}),
+    Released = waiting(#{depends_on => [Cancels, Discards]}),
+    %% Waits on a job that failed and on one that has not: it goes at once.
+    Other = waiting(#{}),
+    Both = waiting(#{depends_on => [Parent, Other], on_dependency_failure => cancel}),
+    {ok, [Claimed, _Other]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertMatch(#{id := Parent}, Claimed),
+    ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 60),
+    ?assertMatch(#{state := ~"discarded"}, job(Parent)),
+    [?assertMatch(#{state := ~"available", depends_on := []}, job(Id)) || Id <- [Runs, Unset]],
+    ?assertEqual(
+        #{integer_to_binary(Parent) => null}, json:decode(maps:get(deps_results, job(Runs)))
+    ),
+    [
+        ?assertMatch(#{state := ~"cancelled", attempt := 0, discarded_at := null}, job(Id))
+     || Id <- [Cancels, Both]
+    ],
+    ?assertNotEqual(null, maps:get(cancelled_at, job(Cancels))),
+    [
+        begin
+            ?assertMatch(#{state := ~"discarded", attempt := 0, cancelled_at := null}, job(Id)),
+            ?assertNotEqual(null, maps:get(discarded_at, job(Id)))
+        end
+     || Id <- [Discards, Below]
+    ],
+    [
+        ?assertMatch(
+            [#{~"error" := ~"dependency_failed", ~"attempt" := 0, ~"at" := <<_:19/binary, "Z">>}],
+            json:decode(maps:get(errors, job(Id)))
+        )
+     || Id <- [Cancels, Discards, Below, Both]
+    ],
+    ?assertMatch(#{state := ~"available", depends_on := []}, job(Released)),
+    {ok, Next} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertEqual([Runs, Unset, Released], lists:sort([Id || #{id := Id} <- Next])).
+
+test_dependency_policy_defaults_to_the_application_setting(_Config) ->
+    application:set_env(shigoto, on_dependency_failure, cancel),
+    try
+        Parent = waiting(#{}),
+        Unset = waiting(#{depends_on => [Parent]}),
+        Runs = waiting(#{depends_on => [Parent], on_dependency_failure => run}),
+        ok = shigoto_repo:discard_job(?POOL, Parent),
+        ?assertMatch(#{state := ~"cancelled", on_dependency_failure := null}, job(Unset)),
+        ?assertMatch(
+            #{state := ~"available", depends_on := [], on_dependency_failure := ~"run"}, job(Runs)
+        ),
+        application:set_env(shigoto, on_dependency_failure, sometimes),
+        ?assertError(
+            {invalid_on_dependency_failure, sometimes}, shigoto_config:on_dependency_failure()
+        )
+    after
+        application:unset_env(shigoto, on_dependency_failure)
+    end,
+    ?assertEqual(run, shigoto_config:on_dependency_failure()).
+
+test_dependency_policy_applies_to_cancel_and_rescue(_Config) ->
+    Cancelled = waiting(#{tags => [~"swept"]}),
+    Swept = waiting(#{tags => [~"swept"]}),
+    Stale = waiting(#{max_attempts => 1, priority => 9}),
+    AfterCancel = waiting(#{depends_on => [Cancelled], on_dependency_failure => discard}),
+    AfterSweep = waiting(#{depends_on => [Swept], on_dependency_failure => cancel}),
+    %% Cancelled by the same statement as the job it waits on: counted once.
+    Together = waiting(#{
+        depends_on => [Swept], on_dependency_failure => discard, tags => [~"swept"]
+    }),
+    AfterRescue = waiting(#{depends_on => [Stale], on_dependency_failure => cancel}),
+    ok = shigoto_repo:cancel_job(?POOL, Cancelled),
+    ?assertMatch(#{state := ~"discarded"}, job(AfterCancel)),
+    ?assertEqual({ok, 2}, shigoto_repo:cancel_by(?POOL, #{tags => [~"swept"]})),
+    ?assertMatch(#{state := ~"cancelled"}, job(AfterSweep)),
+    ?assertMatch(#{state := ~"cancelled", errors := ~"[]"}, job(Together)),
+    {ok, [#{id := Stale}]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ok = last_heard_from(
+        Stale,
+        ~"heartbeat_at = now() - interval '120 seconds', attempted_at = now() - interval '120 seconds'"
+    ),
+    ?assertEqual({ok, 1}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    ?assertMatch(#{state := ~"discarded"}, job(Stale)),
+    ?assertMatch(#{state := ~"cancelled"}, job(AfterRescue)).
+
+test_dependency_policy_is_validated_on_insert(_Config) ->
+    Params = #{worker => shigoto_test_worker, args => #{}},
+    ?assertEqual(
+        {error, {invalid_on_dependency_failure, ~"cancel"}},
+        shigoto_repo:insert_job(?POOL, Params#{on_dependency_failure => ~"cancel"}, #{})
+    ),
+    ?assertEqual(
+        {error, {invalid_on_dependency_failure, skip}},
+        shigoto_repo:insert_all(?POOL, [Params, Params#{on_dependency_failure => skip}], #{})
+    ),
+    Gone = waiting(#{}),
+    Fine = waiting(#{}),
+    ok = shigoto_repo:cancel_job(?POOL, Gone),
+    %% The dependency has already failed: there is nothing to wait for and the
+    %% job would be dead on arrival.
+    ?assertEqual(
+        {error, {dependency_failed, [Gone]}},
+        shigoto_repo:insert_job(
+            ?POOL, Params#{depends_on => [Gone, Fine], on_dependency_failure => discard}, #{}
+        )
+    ),
+    ?assertMatch(
+        {ok, #{depends_on := [Fine]}},
+        shigoto_repo:insert_job(
+            ?POOL, Params#{depends_on => [Gone, Fine], on_dependency_failure => run}, #{}
+        )
+    ),
+    {ok, [Plain, Stated]} = shigoto_repo:insert_all(
+        ?POOL, [Params, Params#{depends_on => [Fine], on_dependency_failure => cancel}], #{}
+    ),
+    ?assertMatch(#{on_dependency_failure := null}, Plain),
+    ?assertMatch(#{on_dependency_failure := ~"cancel", depends_on := [Fine]}, Stated),
+    ok = shigoto_repo:discard_job(?POOL, Fine),
+    ?assertMatch(#{state := ~"cancelled"}, job(maps:get(id, Stated))).
+
+test_a_cascaded_job_counts_in_its_batch(_Config) ->
+    {ok, #{id := BatchId}} = shigoto_batch:create(?POOL, #{}),
+    Parent = waiting(#{batch => BatchId}),
+    _Cancels = waiting(#{
+        batch => BatchId, depends_on => [Parent], on_dependency_failure => cancel
+    }),
+    _Discards = waiting(#{
+        batch => BatchId, depends_on => [Parent], on_dependency_failure => discard
+    }),
+    ok = shigoto_repo:cancel_job(?POOL, Parent),
+    ?assertMatch(
+        {ok, #{total_jobs := 3, discarded_jobs := 3, state := ~"finished"}},
+        shigoto_batch:get(?POOL, BatchId)
+    ).
+
+test_statements_run_before_the_policy_column_exists(_Config) ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"ALTER TABLE shigoto_jobs DROP COLUMN on_dependency_failure", []
+    ),
+    try
+        Parent = waiting(#{max_attempts => 1}),
+        Child = waiting(#{depends_on => [Parent]}),
+        {ok, [_]} = shigoto_repo:insert_all(
+            ?POOL, [#{worker => shigoto_test_worker, args => #{}, depends_on => [Parent]}], #{}
+        ),
+        {ok, [Claimed]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+        ok = shigoto_repo:fail_job(?POOL, Claimed, boom, 60),
+        ?assertMatch(#{state := ~"discarded"}, job(Parent)),
+        ?assertMatch(#{state := ~"available", depends_on := []}, job(Child)),
+        ok = shigoto_repo:cancel_job(?POOL, Child),
+        ?assertEqual({ok, 1}, shigoto_repo:cancel_by(?POOL, #{worker => shigoto_test_worker})),
+        ?assertEqual({ok, 0}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+        ?assertMatch(
+            {error, _},
+            shigoto_repo:insert_job(
+                ?POOL,
+                #{worker => shigoto_test_worker, args => #{}, on_dependency_failure => cancel},
+                #{}
+            )
+        )
+    after
+        #{} = shigoto_db:query(
+            ?POOL,
+            ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT",
+            []
+        )
+    end.
+
+waiting(Params) ->
+    {ok, #{id := JobId}} = shigoto_repo:insert_job(
+        ?POOL, maps:merge(#{worker => shigoto_test_worker, args => #{}}, Params), #{}
+    ),
+    JobId.
+
+job(JobId) ->
+    {ok, Job} = shigoto_repo:get_job(?POOL, JobId),
+    Job.
 
 last_heard_from(JobId, Set) ->
     #{} = shigoto_db:query(
