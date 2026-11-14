@@ -316,26 +316,36 @@ complete_job(Pool, Claim, Result) ->
 Record the failure of a claimed job, with a structured error and the backoff
 before its next attempt. At `max_attempts` the job is discarded instead.
 
+The error is written by `shigoto_error:entry/2`, which keeps job args out of
+it, and the job keeps its 50 newest errors.
+
 Like `complete_job/3`, the write only applies while the claim in `Job` still
 holds, and answers `{error, lost}` otherwise.
 """.
 -spec fail_job(atom(), map(), term(), pos_integer()) -> ok | {error, lost | term()}.
 fail_job(Pool, Job, Reason, BackoffSeconds) ->
     {JobId, Attempt} = fence(Job),
-    ErrorJson = encode_json(build_structured_error(Job, Reason)),
+    ErrorJson = encode_json(shigoto_error:entry(Job, Reason)),
     SQL = with_dependents(
-        ~"""
-        WITH RECURSIVE done AS (
-          UPDATE shigoto_jobs SET
-            state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,
-            discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
-            scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at
-              ELSE now() + make_interval(secs => $3) END,
-            errors = errors || $2::jsonb
-          WHERE id = $1 AND state = 'executing' AND ($4::integer IS NULL OR attempt = $4)
-          RETURNING *
-        )
-        """,
+        [
+            ~"""
+            WITH RECURSIVE done AS (
+              UPDATE shigoto_jobs SET
+                state = CASE WHEN attempt >= max_attempts THEN 'discarded' ELSE 'retryable' END,
+                discarded_at = CASE WHEN attempt >= max_attempts THEN now() ELSE NULL END,
+                scheduled_at = CASE WHEN attempt >= max_attempts THEN scheduled_at
+                  ELSE now() + make_interval(secs => $3) END,
+                errors =
+            """,
+            ~" ",
+            shigoto_error:appended(~"errors", ~"$2::jsonb"),
+            ~"""
+
+              WHERE id = $1 AND state = 'executing' AND ($4::integer IS NULL OR attempt = $4)
+              RETURNING *
+            )
+            """
+        ],
         ~"$5"
     ),
     case query(Pool, SQL, [JobId, ErrorJson, BackoffSeconds, Attempt, default_policy()]) of
@@ -545,25 +555,32 @@ Answers how many jobs were rescued.
 """.
 -spec rescue_stale_jobs(atom(), number()) -> {ok, non_neg_integer()} | {error, term()}.
 rescue_stale_jobs(Pool, StaleSeconds) ->
+    Entry =
+        ~"jsonb_build_object('error', 'rescued', 'at', $2::text, 'attempt', j.attempt, 'worker', j.worker)",
     SQL = with_dependents(
-        ~"""
-        WITH RECURSIVE stale AS (
-          SELECT id FROM shigoto_jobs
-          WHERE state = 'executing'
-          AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
-          FOR UPDATE SKIP LOCKED
-        ), done AS (
-          UPDATE shigoto_jobs j SET
-            state = CASE WHEN j.attempt >= j.max_attempts THEN 'discarded' ELSE 'available' END,
-            discarded_at = CASE WHEN j.attempt >= j.max_attempts THEN now() ELSE j.discarded_at END,
-            heartbeat_at = NULL,
-            errors = j.errors || jsonb_build_object(
-              'error', 'rescued', 'at', $2::text, 'attempt', j.attempt, 'worker', j.worker
+        [
+            ~"""
+            WITH RECURSIVE stale AS (
+              SELECT id FROM shigoto_jobs
+              WHERE state = 'executing'
+              AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
+              FOR UPDATE SKIP LOCKED
+            ), done AS (
+              UPDATE shigoto_jobs j SET
+                state = CASE WHEN j.attempt >= j.max_attempts THEN 'discarded' ELSE 'available' END,
+                discarded_at = CASE WHEN j.attempt >= j.max_attempts THEN now() ELSE j.discarded_at END,
+                heartbeat_at = NULL,
+                errors =
+            """,
+            ~" ",
+            shigoto_error:appended(~"j.errors", Entry),
+            ~"""
+
+              FROM stale WHERE j.id = stale.id
+              RETURNING j.*
             )
-          FROM stale WHERE j.id = stale.id
-          RETURNING j.*
-        )
-        """,
+            """
+        ],
         ~"$3"
     ),
     case query(Pool, SQL, [float(StaleSeconds), now_timestamptz_str(), default_policy()]) of
@@ -902,12 +919,7 @@ with_dependents(Done, DefaultPolicy) ->
             cancelled_at = CASE f.policy WHEN 'cancel' THEN now() ELSE d.cancelled_at END,
             discarded_at = CASE f.policy WHEN 'cancel' THEN d.discarded_at ELSE now() END,
             depends_on = ARRAY(SELECT unnest(d.depends_on) EXCEPT SELECT id FROM failed),
-            errors = d.errors || jsonb_build_object(
-              'error', 'dependency_failed',
-              'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-              'attempt', d.attempt,
-              'worker', d.worker
-            )
+            errors = $errors
           FROM failed f WHERE d.id = f.id AND f.policy IS NOT NULL
           RETURNING d.*
         ), released AS (
@@ -925,7 +937,22 @@ with_dependents(Done, DefaultPolicy) ->
         UNION ALL
         SELECT true AS cascaded, * FROM cascaded
         """,
-    iolist_to_binary([Done, binary:replace(Tail, ~"$default", DefaultPolicy, [global])]).
+    Entry =
+        ~"""
+        jsonb_build_object(
+          'error', 'dependency_failed',
+          'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+          'attempt', d.attempt,
+          'worker', d.worker
+        )
+        """,
+    Errors = shigoto_error:appended(~"d.errors", Entry),
+    iolist_to_binary([
+        Done,
+        binary:replace(
+            binary:replace(Tail, ~"$default", DefaultPolicy, [global]), ~"$errors", Errors
+        )
+    ]).
 
 -spec default_policy() -> binary().
 default_policy() ->
@@ -1291,50 +1318,6 @@ state_names(State) -> [state_name(State)].
 
 state_name(State) when is_atom(State) -> atom_to_binary(State);
 state_name(State) when is_binary(State) -> State.
-
-%%----------------------------------------------------------------------
-%% Internal: structured errors
-%%----------------------------------------------------------------------
-
-build_structured_error(Job, Reason) ->
-    Worker = maps:get(worker, Job, undefined),
-    Attempt = maps:get(attempt, Job, 0),
-    {ErrorBin, StackBin} = format_structured_reason(Reason),
-    Error = #{
-        ~"error" => ErrorBin,
-        ~"at" => now_timestamptz_str(),
-        ~"attempt" => Attempt,
-        ~"worker" => format_worker(Worker)
-    },
-    case StackBin of
-        <<>> -> Error;
-        _ -> Error#{~"stacktrace" => StackBin}
-    end.
-
-format_structured_reason({Class, Reason, Stacktrace}) when is_list(Stacktrace) ->
-    ErrorBin = iolist_to_binary(io_lib:format("~0p:~0p", [Class, Reason])),
-    StackBin = iolist_to_binary(io_lib:format("~0p", [redact_stacktrace(Stacktrace)])),
-    {ErrorBin, StackBin};
-format_structured_reason({Class, Reason}) ->
-    ErrorBin = iolist_to_binary(io_lib:format("~0p:~0p", [Class, Reason])),
-    {ErrorBin, <<>>};
-format_structured_reason(Reason) ->
-    ErrorBin = iolist_to_binary(io_lib:format("~0p", [Reason])),
-    {ErrorBin, <<>>}.
-
-%% A function_clause frame carries the call's arguments, which for a worker's
-%% perform/1 is the decrypted args map. Keep the arity, drop the values.
-redact_stacktrace(Stacktrace) ->
-    [redact_frame(Frame) || Frame <- Stacktrace].
-
-redact_frame({M, F, Args, Location}) when is_list(Args) ->
-    {M, F, length(Args), Location};
-redact_frame(Frame) ->
-    Frame.
-
-format_worker(W) when is_atom(W) -> atom_to_binary(W, utf8);
-format_worker(W) when is_binary(W) -> W;
-format_worker(_) -> ~"unknown".
 
 %%----------------------------------------------------------------------
 %% Internal: batch helpers

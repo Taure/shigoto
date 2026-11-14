@@ -18,6 +18,11 @@ Measurement units:
 Every event carries `domain => [shigoto]` in its metadata (used by the OTP
 logger for filtering); it is omitted from the tables below for brevity.
 
+No event carries a job's `args`, `meta`, `result` or `deps_results`. The
+`reason` of `[shigoto, job, failed]` is text written by `shigoto_error:text/1`:
+at most 1024 bytes, and with an encryption key configured only the shape
+of the failure, with every value that is not an atom replaced by `'_'`.
+
 ## Job Events
 
 | Event | Measurements | Metadata |
@@ -193,7 +198,7 @@ job_completed(Job, Duration) ->
 job_failed(Job, Reason, Duration) ->
     QueueWait = queue_wait_ms(Job),
     DurationMs = erlang:convert_time_unit(Duration, native, millisecond),
-    Meta = (job_meta(Job))#{reason => format_reason(Reason)},
+    Meta = (job_meta(Job))#{reason => shigoto_error:text(Reason)},
     telemetry:execute(
         [shigoto, job, failed],
         #{count => 1, duration => Duration, duration_ms => DurationMs, queue_wait_ms => QueueWait},
@@ -401,6 +406,3 @@ queue_wait_ms(Job) ->
 to_datetime({{Y, Mo, D}, {H, Mi, S}}) when is_float(S) -> {{Y, Mo, D}, {H, Mi, trunc(S)}};
 to_datetime({{_, _, _}, {_, _, _}} = DT) -> DT;
 to_datetime(_) -> {{1970, 1, 1}, {0, 0, 0}}.
-
-format_reason(Reason) ->
-    iolist_to_binary(io_lib:format(~"~0p", [Reason])).
