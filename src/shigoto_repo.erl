@@ -162,7 +162,7 @@ insert_all_validated(Pool, Jobs, Opts) ->
         ValuesSQL,
         ~" RETURNING *"
     ],
-    Batched = lists:any(fun(Job) -> maps:get(batch, Job, null) =/= null end, Jobs),
+    Batched = [Batch || #{batch := Batch} <- Jobs, Batch =/= null] =/= [],
     case query(Pool, counting_its_batches(Insert, Batched), AllParams) of
         #{rows := Rows} -> {ok, Rows};
         {error, _} = Err -> Err
@@ -386,7 +386,7 @@ batches_told(Pool, Rows) ->
     Batched = [BatchId || #{batch_id := BatchId} <- Rows, is_integer(BatchId)],
     _ = [
         shigoto_batch:jobs_discarded(Pool, BatchId, length([B || B <- Batched, B =:= BatchId]))
-     || BatchId <- lists:usort(Batched)
+     || BatchId <- lists:usort(Batched), is_integer(BatchId)
     ],
     ok.
 
