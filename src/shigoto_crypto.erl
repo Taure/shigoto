@@ -87,6 +87,7 @@ column.
     is_frame/2,
     unique_key/1,
     unique_keys/1,
+    unique_rekey/2,
     check_keys/0,
     encrypt/1,
     decrypt/1
@@ -341,13 +342,60 @@ unique_key(Material) ->
 Every `unique_key` a job with this `Material` may have been stored under: one
 per configured key, the current key's first. A unique insert looks for all of
 them, so rotating to a new key does not hide the jobs inserted before it.
+
+While plaintext rows are accepted (`require_encrypted` is not set) the last
+one is `Material` itself, the form a job inserted before a key was configured
+has. It is looked for and never stored. `shigoto:reencrypt/0,1` moves every
+stored key to the current key's digest, after which neither the raw form nor
+an older key is needed.
 """.
 -spec unique_keys(binary()) -> [binary(), ...].
 unique_keys(Material) ->
     case keys() of
-        [] -> [Material];
-        Keys -> [unique_digest(Key, Material) || Key <- Keys]
+        [] ->
+            [Material];
+        [Current | Older] ->
+            Digests = [unique_digest(Key, Material) || Key <- Older],
+            Raw = [Material || not shigoto_config:require_encrypted()],
+            [unique_digest(Current, Material) | Digests ++ Raw]
     end.
+
+-doc """
+A stored `unique_key` as the current key writes it, for `shigoto:reencrypt/0,1`.
+
+A digest does not say what it was made from, so the caller names the
+`Materials` it could have been: the stored key is moved when one of them gives
+it under a configured key. A stored key that is no digest is the raw form
+written before a key was configured, and is its own material. A digest that
+none of the materials gives under any configured key was written under a key
+that is no longer listed: `{error, unknown_key}`.
+""".
+-spec unique_rekey(binary(), [binary()]) -> current | {rekeyed, binary()} | {error, unknown_key}.
+unique_rekey(Stored, Materials) when is_binary(Stored) ->
+    case keys() of
+        [] ->
+            current;
+        [Current | _] = Keys ->
+            Known = [
+                Material
+             || Material <- Materials, Key <- Keys, unique_digest(Key, Material) =:= Stored
+            ],
+            case {Known, is_digest(Stored)} of
+                {[Material | _], _} -> rekeyed(Stored, unique_digest(Current, Material));
+                {[], true} -> {error, unknown_key};
+                {[], false} -> {rekeyed, unique_digest(Current, Stored)}
+            end
+    end.
+
+rekeyed(Stored, Stored) -> current;
+rekeyed(_Stored, Digest) -> {rekeyed, Digest}.
+
+is_digest(Stored) ->
+    byte_size(Stored) =:= 64 andalso
+        lists:all(
+            fun(Char) -> (Char >= $0 andalso Char =< $9) orelse (Char >= $A andalso Char =< $F) end,
+            binary_to_list(Stored)
+        ).
 
 unique_digest(Key, Material) ->
     HashKey = crypto:mac(hmac, sha256, Key, ?UNIQUE_KEY_CONTEXT),

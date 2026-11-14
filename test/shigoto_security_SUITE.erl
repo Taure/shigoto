@@ -33,6 +33,8 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_batch_naming_no_worker_gets_no_callback/1,
     replaced_args_are_bound_to_the_existing_row/1,
     a_unique_job_is_still_found_after_key_rotation/1,
+    a_unique_job_from_before_encryption_is_still_a_duplicate/1,
+    a_unique_job_is_still_found_once_its_key_is_dropped/1,
     insert_all_refuses_what_it_cannot_honour/1,
     insert_all_validates_dependencies/1,
     a_bad_key_stops_the_boot_without_printing_it/1,
@@ -84,6 +86,8 @@ all() ->
         a_batch_naming_no_worker_gets_no_callback,
         replaced_args_are_bound_to_the_existing_row,
         a_unique_job_is_still_found_after_key_rotation,
+        a_unique_job_from_before_encryption_is_still_a_duplicate,
+        a_unique_job_is_still_found_once_its_key_is_dropped,
         insert_all_refuses_what_it_cannot_honour,
         insert_all_validates_dependencies,
         a_bad_key_stops_the_boot_without_printing_it,
@@ -535,6 +539,81 @@ a_unique_job_is_still_found_after_key_rotation(_Config) ->
     ?assertNotEqual(Before, After),
     ?assertEqual(shigoto_crypto:unique_key(~"{\"n\":2}:shigoto_canary_other_worker"), After),
     ?assertMatch({ok, {conflict, _}}, shigoto:insert(Params#{args => #{~"n" => 2}}, Unique)).
+
+a_unique_job_from_before_encryption_is_still_a_duplicate(_Config) ->
+    Unique = #{unique => #{keys => [worker, args]}},
+    Params = #{
+        worker => shigoto_canary_other_worker,
+        args => #{~"n" => 1},
+        scheduled_at => seconds_from_now(3600)
+    },
+    Material = ~"{\"n\":1}:shigoto_canary_other_worker",
+    application:unset_env(shigoto, encryption_key),
+    {ok, #{id := Id, unique_key := Raw}} = shigoto:insert(Params, Unique),
+    ?assertEqual(Material, Raw),
+    application:set_env(shigoto, encryption_key, key(1)),
+    ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)),
+    %% The raw form is looked for, never stored.
+    {ok, #{unique_key := Hashed}} = shigoto:insert(Params#{args => #{~"n" => 2}}, Unique),
+    ?assertEqual(64, byte_size(Hashed)),
+    ?assertEqual(nomatch, binary:match(Hashed, ~"shigoto_canary_other_worker")),
+    %% reencrypt moves the old job's key to the hash, after which the raw
+    %% form no longer has to be looked for.
+    {ok, #{jobs := #{failed := 0, skipped := 0}}} = shigoto:reencrypt(),
+    ?assertEqual(shigoto_crypto:unique_key(Material), stored(Id, unique_key)),
+    application:set_env(shigoto, require_encrypted, true),
+    ?assertEqual([shigoto_crypto:unique_key(Material)], shigoto_crypto:unique_keys(Material)),
+    ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)).
+
+a_unique_job_is_still_found_once_its_key_is_dropped(_Config) ->
+    ByArgs = #{unique => #{keys => [worker, args]}},
+    ByQueue = #{unique => #{keys => [queue], states => [available, completed]}},
+    Later = #{scheduled_at => seconds_from_now(3600)},
+    First = Later#{worker => shigoto_canary_other_worker, args => #{~"n" => 1}},
+    Second = Later#{
+        worker => shigoto_canary_other_worker, args => #{~"n" => 2}, queue => ~"parked"
+    },
+    {ok, #{id := FirstId, unique_key := FirstKey}} = shigoto:insert(First, ByArgs),
+    {ok, #{id := SecondId}} = shigoto:insert(Second, ByQueue),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET state = 'completed' WHERE id = $1", [SecondId]
+    ),
+    application:unset_env(shigoto, encryption_key),
+    application:set_env(shigoto, encryption_keys, [key(2), key(1)]),
+    ?assertMatch({ok, {conflict, #{id := FirstId}}}, shigoto:insert(First, ByArgs)),
+    {ok, #{jobs := Jobs}} = shigoto:reencrypt(),
+    ?assertMatch(#{failed := 0, skipped := 0}, Jobs),
+    ?assertNotEqual(FirstKey, stored(FirstId, unique_key)),
+    ?assertEqual(
+        shigoto_crypto:unique_key(~"{\"n\":1}:shigoto_canary_other_worker"),
+        stored(FirstId, unique_key)
+    ),
+    ?assertEqual(shigoto_crypto:unique_key(~"parked"), stored(SecondId, unique_key)),
+    {ok, #{jobs := Again}} = shigoto:reencrypt(),
+    ?assertMatch(#{rewritten := 0, failed := 0, skipped := 0}, Again),
+    %% Reported clean: the old key can go and plaintext can be refused.
+    application:set_env(shigoto, encryption_keys, [key(2)]),
+    application:set_env(shigoto, require_encrypted, true),
+    ?assertMatch({ok, {conflict, #{id := FirstId}}}, shigoto:insert(First, ByArgs)),
+    ?assertMatch({ok, {conflict, #{id := SecondId}}}, shigoto:insert(Second, ByQueue)),
+    %% A key written under a key that is no longer configured cannot be
+    %% moved, and is reported.
+    application:set_env(shigoto, encryption_keys, [key(3)]),
+    {ok, #{jobs := Orphaned}} = shigoto:reencrypt(),
+    ?assertMatch(#{failed := Failed} when Failed >= 2, Orphaned),
+    ?assertEqual(unique_key_under(key(2), ~"parked"), stored(SecondId, unique_key)).
+
+unique_key_under(Key, Material) ->
+    Saved = application:get_env(shigoto, encryption_keys),
+    application:set_env(shigoto, encryption_keys, [Key]),
+    try
+        shigoto_crypto:unique_key(Material)
+    after
+        case Saved of
+            {ok, Keys} -> application:set_env(shigoto, encryption_keys, Keys);
+            undefined -> application:unset_env(shigoto, encryption_keys)
+        end
+    end.
 
 insert_all_refuses_what_it_cannot_honour(_Config) ->
     Jobs = [#{worker => shigoto_unique_worker, args => #{~"n" => N}} || N <- [1, 1]],

@@ -182,7 +182,13 @@ is not set.
   not put secrets in tags or partition keys.
 - `errors` is in the clear, with the limits above.
 - `unique_key` is an HMAC of the unique fields when a key is configured, and
-  the fields themselves otherwise.
+  the fields themselves otherwise. A key stored before encryption was turned
+  on stays in the clear until `shigoto:reencrypt/0` replaces it, and until
+  `require_encrypted` is set a unique insert sends the unique fields to
+  PostgreSQL as a query parameter to find such jobs (see
+  [Unique jobs](encryption.md#unique-jobs)).
+- Do not remove an old key from `encryption_keys` before
+  `shigoto:reencrypt/0` reports `failed => 0` and `skipped => 0`.
 - With `encryption_write_format` `v1`: `result`, `deps_results` and batch
   `callback_args` are in the clear.
 - Someone who can write to the table can still delete jobs, change their

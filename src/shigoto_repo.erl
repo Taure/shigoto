@@ -32,7 +32,8 @@ for safe multi-node job claiming.
     find_jobs/2,
     resolve_dependencies/2,
     archive_jobs/2,
-    fetch_fanout_jobs/3
+    fetch_fanout_jobs/3,
+    unique_materials/3
 ]).
 
 -export_type([claim/0]).
@@ -1210,15 +1211,42 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     end).
 
 build_unique_keys(#{keys := Keys}, Worker, Args, Queue) ->
-    Parts = lists:map(
-        fun
-            (worker) -> Worker;
-            (args) -> encode_json(Args);
-            (queue) -> Queue
-        end,
-        lists:sort(Keys)
-    ),
-    shigoto_crypto:unique_keys(iolist_to_binary(lists:join(~":", Parts))).
+    shigoto_crypto:unique_keys(unique_material(Keys, Worker, encode_json(Args), Queue)).
+
+-spec unique_material([worker | args | queue], binary(), binary(), binary()) -> binary().
+unique_material(Keys, Worker, ArgsJson, Queue) ->
+    Parts = [unique_part(Key, Worker, ArgsJson, Queue) || Key <- lists:sort(Keys)],
+    iolist_to_binary(lists:join(~":", Parts)).
+
+unique_part(worker, Worker, _ArgsJson, _Queue) -> Worker;
+unique_part(args, _Worker, ArgsJson, _Queue) -> ArgsJson;
+unique_part(queue, _Worker, _ArgsJson, Queue) -> Queue.
+
+-doc """
+Everything a job's `unique_key` could have been made from: one material per
+choice of unique `keys`. `ArgsJson` is the job's args as they were encoded at
+insert, or `undefined` when they cannot be read, which leaves out the choices
+that include them. `shigoto:reencrypt/0,1` uses it to move a stored key to the
+current encryption key.
+""".
+-spec unique_materials(binary(), binary() | undefined, binary()) -> [binary()].
+unique_materials(Worker, ArgsJson, Queue) ->
+    [
+        unique_material(Keys, Worker, args_part(ArgsJson), Queue)
+     || Keys <- [
+            [worker, args],
+            [worker, args, queue],
+            [args],
+            [args, queue],
+            [worker],
+            [queue],
+            [worker, queue]
+        ],
+        ArgsJson =/= undefined orelse not lists:member(args, Keys)
+    ].
+
+args_part(undefined) -> <<>>;
+args_part(ArgsJson) -> ArgsJson.
 
 find_existing_job(Pool, #{states := States, period := Period}, UniqueKeys) ->
     StatesClause = states_in_clause(States),

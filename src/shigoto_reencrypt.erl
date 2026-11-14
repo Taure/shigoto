@@ -12,6 +12,16 @@ current form (`shigoto_crypto:reseal/2`), decrypts it and encrypts it again:
 `args`, `meta`, `result`, each entry of `deps_results`, and a batch's
 `callback_args`.
 
+It also moves the `unique_key` of every row in `shigoto_jobs` to the digest
+under the current key (`shigoto_crypto:unique_rekey/2`): a key stored in the
+clear before encryption was turned on, and one stored under an older key. A
+unique insert looks for a job under every listed key, and in the clear while
+`require_encrypted` is not set, so duplicates are found before, during and
+after the run. Once it reports `failed => 0` and `skipped => 0` an old key can
+be removed and `require_encrypted` set. A `unique_key` written under a key that
+is no longer listed cannot be moved and is counted as `failed`. Archived jobs
+are not looked up by a unique insert, and their keys are left as they are.
+
 It is safe while the queue runs. Rows are read in batches without a lock, and
 each value is written back with a compare-and-swap (`UPDATE ... WHERE id = $1
 AND column = <the value read>`), so a row that changed in the meantime is left
@@ -41,7 +51,7 @@ value does not open under any configured key. `scanned` counts rows.
 }.
 
 -define(TABLES, [
-    {jobs, ~"shigoto_jobs", ~"id, worker, args, meta, result, deps_results"},
+    {jobs, ~"shigoto_jobs", ~"id, worker, queue, unique_key, args, meta, result, deps_results"},
     {archive, ~"shigoto_jobs_archive", ~"id, worker, args, meta, result, deps_results"},
     {batches, ~"shigoto_batches", ~"id, callback_worker, callback_args"}
 ]).
@@ -99,14 +109,18 @@ values(_Pool, _Table, _Id, [], Counts) ->
 values(Pool, Table, Id, [{_Column, _Stored, failed} | Changes], #{failed := Failed} = Counts) ->
     values(Pool, Table, Id, Changes, Counts#{failed := Failed + 1});
 values(Pool, Table, Id, [{Column, Stored, Sealed} | Changes], Counts) ->
+    Cast = cast(Column),
     SQL = iolist_to_binary([
         ~"UPDATE ",
         Table,
         ~" SET ",
         Column,
-        ~" = $2::jsonb WHERE id = $1 AND ",
+        ~" = $2",
+        Cast,
+        ~" WHERE id = $1 AND ",
         Column,
-        ~" = $3::jsonb"
+        ~" = $3",
+        Cast
     ]),
     case shigoto_db:query(Pool, SQL, [Id, Sealed, Stored]) of
         #{num_rows := 1} ->
@@ -116,6 +130,9 @@ values(Pool, Table, Id, [{Column, Stored, Sealed} | Changes], Counts) ->
         {error, Reason} ->
             {error, shigoto_db:reduced(Reason)}
     end.
+
+cast(~"unique_key") -> ~"::text";
+cast(_Column) -> ~"::jsonb".
 
 counted(Key, Counts) ->
     Counts#{Key := maps:get(Key, Counts) + 1}.
@@ -134,7 +151,8 @@ changes(#{id := Id, worker := Worker} = Job) when is_binary(Worker) ->
     change(~"args", maps:get(args, Job, null), {args, Worker}) ++
         change(~"meta", maps:get(meta, Job, null), {meta, Worker}) ++
         change(~"result", maps:get(result, Job, null), {result, Id}) ++
-        deps_results_change(maps:get(deps_results, Job, null));
+        deps_results_change(maps:get(deps_results, Job, null)) ++
+        unique_key_change(Job);
 changes(_Row) ->
     [].
 
@@ -146,6 +164,36 @@ change(Column, Stored, Context) when is_binary(Stored), Stored =/= ~"null" ->
     end;
 change(_Column, _Null, _Context) ->
     [].
+
+%% Only shigoto_jobs is read with its unique_key: a unique insert never looks
+%% in the archive.
+unique_key_change(#{unique_key := Stored, worker := Worker, queue := Queue} = Job) when
+    is_binary(Stored), is_binary(Queue)
+->
+    Materials = shigoto_repo:unique_materials(Worker, args_json(Job), Queue),
+    case shigoto_crypto:unique_rekey(Stored, Materials) of
+        current -> [];
+        {rekeyed, Digest} -> [{~"unique_key", Stored, Digest}];
+        {error, unknown_key} -> [{~"unique_key", Stored, failed}]
+    end;
+unique_key_change(_Job) ->
+    [].
+
+%% The args as they were encoded at insert. Only a ciphertext keeps that text:
+%% PostgreSQL normalises plaintext jsonb, and a job stored in the clear has
+%% its unique key in the clear as well, which needs no args to move.
+args_json(#{args := Stored, worker := Worker}) when is_binary(Stored) ->
+    case shigoto_crypto:is_frame(Stored) of
+        true ->
+            case shigoto_crypto:open(Stored, {args, Worker}) of
+                {ok, Plain} -> Plain;
+                {error, _} -> undefined
+            end;
+        false ->
+            undefined
+    end;
+args_json(_Job) ->
+    undefined.
 
 %% deps_results is an object of job id to that job's result, each entry
 %% encrypted on its own for the job it came from.

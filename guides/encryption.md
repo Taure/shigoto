@@ -71,7 +71,8 @@ From a release that writes v1 (1.10 and earlier), with a key configured:
 3. Once no 1.10 node is left, remove `{encryption_write_format, v1}` on every
    node. New values are written as v2.
 4. Run `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
-   batches as v2 and encrypts what was plaintext.
+   batches as v2, encrypts what was plaintext and moves every `unique_key` to
+   the HMAC under the current key.
 5. When it reports `failed => 0` and `skipped => 0`, set
    `{encryption_read_formats, [v2]}` and `{require_encrypted, true}`.
 
@@ -101,8 +102,9 @@ table:
 }} = shigoto:reencrypt(#{batch_size => 500}).
 ```
 
-`failed` counts values that do not open under any configured key. They are
-left as they are.
+`failed` counts values that do not open under any configured key, a
+ciphertext that was moved to another row or column, and a `unique_key` written
+under a key that is no longer listed. They are left as they are.
 
 Turning encryption on for a table that already holds plaintext jobs is the
 same procedure from step 2.
@@ -122,13 +124,28 @@ read under whichever key wrote them:
 Do not skip step 1 in a rolling deploy: a node that has not been given
 `NewKey` yet fails the jobs written under it.
 
-A unique job is looked up under every listed key and stored under the first,
-so duplicates are still found across steps 1 to 3. `unique_key` is a hash and
-is not rewritten by `reencrypt`: once `OldKey` is removed, a job inserted
-under it is no longer found as a duplicate. Keep `OldKey` listed until those
-jobs have left the states or the period their uniqueness covers. The same
-goes for turning encryption on: a job inserted without a key and one inserted
-with it are not deduplicated against each other.
+Do not do step 4 until `reencrypt` reports `failed => 0` and `skipped => 0`
+for every table. A value it could not rewrite is unreadable once `OldKey` is
+gone.
+
+### Unique jobs
+
+`unique_key` is an HMAC under the encryption key, so it changes with the key.
+A unique insert looks for a job under every listed key and stores it under
+the first, so duplicates are still found across steps 1 to 3. `reencrypt`
+moves the `unique_key` of every row in `shigoto_jobs` to the first key. After
+a clean run `OldKey` can be removed and duplicates are still found. A
+`unique_key` written under a key that is already gone cannot be moved and is
+counted as `failed`.
+
+Turning encryption on is covered the same way. A job inserted before a key
+was configured has its unique fields in `unique_key` in the clear. While
+`require_encrypted` is not set, a unique insert also looks for that form
+(never storing it), and `reencrypt` replaces it with the HMAC. To look for it
+the unique fields of the job being inserted are sent to PostgreSQL as a query
+parameter, where statement logging can record them. Setting
+`{require_encrypted, true}` after a clean `reencrypt` ends that: the insert
+then sends HMACs only.
 
 A key should encrypt fewer than 2^32 values. In `v1` that counts every value
 the key ever wrote. In `v2` each worker and column has its own derived key, so

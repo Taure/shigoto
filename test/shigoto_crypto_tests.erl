@@ -36,6 +36,7 @@ crypto_test_() ->
             fun a_string_that_only_looks_like_a_frame_is_plaintext/0,
             fun a_plaintext_that_would_read_as_a_frame_is_sealed/0,
             fun unique_keys_cover_every_key/0,
+            fun a_unique_key_is_moved_to_the_current_key/0,
             fun keys_are_checked_without_being_shown/0,
             fun a_bad_key_is_not_in_the_error/0,
             fun the_legacy_calls_still_work/0
@@ -315,14 +316,39 @@ a_plaintext_that_would_read_as_a_frame_is_sealed() ->
 
 unique_keys_cover_every_key() ->
     Material = ~"{\"card\":\"4111\"}:my_worker",
-    [Digest] = shigoto_crypto:unique_keys(Material),
+    %% The raw form is looked for while plaintext rows are still accepted.
+    [Digest, Material] = shigoto_crypto:unique_keys(Material),
     ?assertEqual(Digest, shigoto_crypto:unique_key(Material)),
     ?assertEqual(64, byte_size(Digest)),
     ?assertEqual(nomatch, binary:match(Digest, ~"4111")),
     set(#{encryption_keys => [key(2), key(1)]}),
+    ?assertMatch(
+        [New, Digest, Material] when New =/= Digest, shigoto_crypto:unique_keys(Material)
+    ),
+    set(#{encryption_keys => [key(2), key(1)], require_encrypted => true}),
     ?assertMatch([New, Digest] when New =/= Digest, shigoto_crypto:unique_keys(Material)),
+    set(#{encryption_key => key(1), require_encrypted => true}),
+    ?assertEqual([Digest], shigoto_crypto:unique_keys(Material)),
     set(#{}),
     ?assertEqual([Material], shigoto_crypto:unique_keys(Material)).
+
+a_unique_key_is_moved_to_the_current_key() ->
+    Material = ~"{\"card\":\"4111\"}:my_worker",
+    Others = [~"my_worker", ~"default"],
+    Old = shigoto_crypto:unique_key(Material),
+    ?assertEqual(current, shigoto_crypto:unique_rekey(Old, [Material | Others])),
+    set(#{encryption_keys => [key(2), key(1)]}),
+    New = shigoto_crypto:unique_key(Material),
+    ?assertEqual({rekeyed, New}, shigoto_crypto:unique_rekey(Old, Others ++ [Material])),
+    ?assertEqual(current, shigoto_crypto:unique_rekey(New, [Material])),
+    %% Stored in the clear before a key was configured: it is its own material.
+    ?assertEqual({rekeyed, New}, shigoto_crypto:unique_rekey(Material, [])),
+    %% A digest nothing here could have made was written under another key.
+    ?assertEqual({error, unknown_key}, shigoto_crypto:unique_rekey(Old, Others)),
+    set(#{encryption_keys => [key(3)]}),
+    ?assertEqual({error, unknown_key}, shigoto_crypto:unique_rekey(Old, [Material])),
+    set(#{}),
+    ?assertEqual(current, shigoto_crypto:unique_rekey(Material, [Material])).
 
 keys_are_checked_without_being_shown() ->
     ?assertEqual(ok, shigoto_crypto:check_keys()),
