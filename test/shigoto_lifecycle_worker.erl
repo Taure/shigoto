@@ -1,0 +1,30 @@
+-module(shigoto_lifecycle_worker).
+-moduledoc """
+A worker the lifecycle suite drives: each run reports to the test process and
+does what it is told.
+""".
+-behaviour(shigoto_worker).
+
+-export([perform/1, backoff/2, on_discard/2]).
+
+perform(#{~"test" := Test, ~"tag" := Tag} = Args) ->
+    owner(Test) ! {performing, Tag, self(), Args},
+    receive
+        {instruct, Instruction} -> follow(Instruction, Args)
+    after 30000 -> {error, no_instruction}
+    end.
+
+follow({return, Value}, _Args) -> Value;
+follow(crash, _Args) -> error(deliberate_crash);
+follow(no_clause, Args) -> only_absent(Args);
+follow(die, _Args) -> exit(self(), kill).
+
+only_absent(#{~"absent" := _}) -> ok.
+
+backoff(_Attempt, _Error) -> 1.
+
+on_discard(#{~"test" := Test, ~"tag" := Tag}, Errors) ->
+    owner(Test) ! {discarded, Tag, Errors},
+    ok.
+
+owner(Test) -> list_to_pid(binary_to_list(Test)).
