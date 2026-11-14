@@ -21,6 +21,7 @@ the application does with it.
     a_job_out_of_attempts_is_discarded/1,
     a_killed_worker_process_is_a_failure/1,
     cancelling_a_waiting_job_keeps_it_from_running/1,
+    a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_child_runs_after_its_parent_with_the_result/1,
@@ -49,6 +50,7 @@ all() ->
         a_job_out_of_attempts_is_discarded,
         a_killed_worker_process_is_a_failure,
         cancelling_a_waiting_job_keeps_it_from_running,
+        a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
         a_batch_callback_runs_after_its_jobs,
         a_child_runs_after_its_parent_with_the_result,
@@ -108,6 +110,8 @@ overrides(a_scheduled_job_runs_when_due) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_retry_is_woken_by_the_stager) ->
     #{poll_interval => 60000, notifier => connection()};
+overrides(a_burst_of_notifications_leaves_one_poll_timer) ->
+    #{poll_interval => 200, notifier => connection()};
 overrides(_TestCase) ->
     #{}.
 
@@ -209,6 +213,23 @@ cancelling_a_waiting_job_keeps_it_from_running(_Config) ->
     Row = row(Id),
     ?assertMatch(#{state := ~"cancelled", attempt := 0}, Row),
     ?assertNotEqual(null, maps:get(cancelled_at, Row)).
+
+%%----------------------------------------------------------------------
+%% Waking up
+%%----------------------------------------------------------------------
+
+a_burst_of_notifications_leaves_one_poll_timer(_Config) ->
+    ok = telemetry:attach(?MODULE, [shigoto, queue, poll], fun ?MODULE:forward/4, self()),
+    [
+        #{} = shigoto_db:query(?POOL, ~"SELECT pg_notify('shigoto_jobs_insert', $1)", [?QUEUE])
+     || _ <- lists:seq(1, 50)
+    ],
+    timer:sleep(500),
+    ok = flush_polls(),
+    %% Two seconds at one poll every 200 ms.
+    Polls = polls_within(2000),
+    ?assert(Polls >= 5, Polls),
+    ?assert(Polls =< 15, Polls).
 
 %%----------------------------------------------------------------------
 %% Pruning
@@ -380,6 +401,26 @@ wait_for(Check, Tries) ->
         false ->
             timer:sleep(25),
             wait_for(Check, Tries - 1)
+    end.
+
+flush_polls() ->
+    receive
+        {telemetry, [shigoto, queue, poll], _, _} -> flush_polls()
+    after 0 -> ok
+    end.
+
+polls_within(Ms) ->
+    polls_until(erlang:monotonic_time(millisecond) + Ms, 0).
+
+polls_until(Deadline, Count) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left > 0 ->
+            receive
+                {telemetry, [shigoto, queue, poll], _, _} -> polls_until(Deadline, Count + 1)
+            after Left -> Count
+            end;
+        _Passed ->
+            Count
     end.
 
 seconds_from_now(Seconds) ->

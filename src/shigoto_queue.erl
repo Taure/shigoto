@@ -19,7 +19,8 @@ weights, and pause/resume.
     executors :: #{pid() => reference()},
     weight :: pos_integer(),
     weight_counter :: non_neg_integer(),
-    fair :: boolean()
+    fair :: boolean(),
+    poll_timer :: reference() | undefined
 }).
 
 -doc false.
@@ -35,20 +36,21 @@ init({Queue, Concurrency}) ->
     Weight = maps:get(Queue, Weights, 1),
     FairQueues = shigoto_config:fair_queues(),
     Fair = lists:member(Queue, FairQueues),
-    schedule_poll(),
     schedule_rescue(),
-    {ok, #state{
-        queue = Queue,
-        concurrency = Concurrency,
-        active = 0,
-        pool = Pool,
-        paused = false,
-        shutting_down = false,
-        executors = #{},
-        weight = Weight,
-        weight_counter = 0,
-        fair = Fair
-    }}.
+    {ok,
+        schedule_poll(#state{
+            queue = Queue,
+            concurrency = Concurrency,
+            active = 0,
+            pool = Pool,
+            paused = false,
+            shutting_down = false,
+            executors = #{},
+            weight = Weight,
+            weight_counter = 0,
+            fair = Fair,
+            poll_timer = undefined
+        })}.
 
 -doc "Pause a queue — stops claiming new jobs but lets in-flight jobs finish.".
 -spec pause(pid()) -> ok.
@@ -93,8 +95,8 @@ handle_cast(_Msg, State) ->
 handle_info(poll, #state{shutting_down = true} = State) ->
     {noreply, State};
 handle_info(poll, #state{paused = true} = State) ->
-    schedule_poll(),
-    {noreply, State};
+    ok = drop_queued_polls(),
+    {noreply, schedule_poll(State)};
 handle_info(
     poll,
     #state{
@@ -108,11 +110,11 @@ handle_info(
         fair = Fair
     } = State
 ) ->
+    ok = drop_queued_polls(),
     NewCounter = Counter + 1,
     case should_poll(Weight, NewCounter) of
         false ->
-            schedule_poll(),
-            {noreply, State#state{weight_counter = NewCounter}};
+            {noreply, schedule_poll(State#state{weight_counter = NewCounter})};
         true ->
             Available = Conc - Active,
             {NewActive, NewExecs} =
@@ -149,12 +151,12 @@ handle_info(
                     false ->
                         {Active, Execs}
                 end,
-            schedule_poll(),
-            {noreply, State#state{
-                active = NewActive,
-                executors = NewExecs,
-                weight_counter = NewCounter
-            }}
+            {noreply,
+                schedule_poll(State#state{
+                    active = NewActive,
+                    executors = NewExecs,
+                    weight_counter = NewCounter
+                })}
     end;
 handle_info(rescue, #state{shutting_down = true} = State) ->
     {noreply, State};
@@ -191,8 +193,24 @@ claim(Pool, Queue, Limit, true) ->
 claim(Pool, Queue, Limit, false) ->
     shigoto_repo:claim_jobs(Pool, Queue, Limit).
 
-schedule_poll() ->
-    erlang:send_after(shigoto_config:poll_interval(), self(), poll).
+%% The queue polls on its timer and whenever it is sent `poll` (a notification,
+%% the stager). Either way exactly one timer is left pending afterwards: a
+%% wake-up restarts the interval, it does not add a timer of its own.
+-spec schedule_poll(#state{}) -> #state{}.
+schedule_poll(#state{poll_timer = Pending} = State) ->
+    _ = cancel_timer(Pending),
+    State#state{poll_timer = erlang:send_after(shigoto_config:poll_interval(), self(), poll)}.
+
+cancel_timer(undefined) -> false;
+cancel_timer(Timer) -> erlang:cancel_timer(Timer).
+
+%% A burst of notifications is one reason to poll, not one poll each.
+-spec drop_queued_polls() -> ok.
+drop_queued_polls() ->
+    receive
+        poll -> drop_queued_polls()
+    after 0 -> ok
+    end.
 
 schedule_rescue() ->
     erlang:send_after(60000, self(), rescue).
