@@ -1,6 +1,5 @@
 -module(shigoto_bench_SUITE).
 -behaviour(ct_suite).
--include_lib("stdlib/include/assert.hrl").
 
 -export([
     all/0,

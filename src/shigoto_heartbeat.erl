@@ -54,9 +54,13 @@ update_heartbeats() ->
             ok;
         _Table ->
             Running = ets:tab2list(shigoto_executors),
-            Alive = [Entry || {_Claim, Pid} = Entry <- Running, is_process_alive(Pid)],
+            Alive = [{Claim, Pid} || {Claim, Pid} <- Running, is_pid(Pid), is_process_alive(Pid)],
             ok = forget(Running -- Alive),
-            Claimed = [Entry || {{_JobId, Attempt}, _Pid} = Entry <- Alive, is_integer(Attempt)],
+            %% A fanout run holds no claim: its key is {JobId, fanout}.
+            Claimed = [
+                {{JobId, Attempt}, Pid}
+             || {{JobId, Attempt}, Pid} <- Alive, is_integer(JobId), is_integer(Attempt)
+            ],
             Claims = [Claim || {Claim, _Pid} <- Claimed],
             case shigoto_repo:heartbeat(shigoto_config:pool(), Claims) of
                 {ok, Held} -> stop_lost(Claimed, Claims -- Held);
@@ -66,18 +70,13 @@ update_heartbeats() ->
 
 %% A claim the heartbeat did not find was cancelled on another node, or
 %% rescued. Nothing this run does can be recorded any more, so it is stopped.
+-spec stop_lost([{{integer(), integer()}, pid()}], [{integer(), integer()}]) -> ok.
 stop_lost(Claimed, Lost) ->
-    lists:foreach(
-        fun({Claim, Pid}) ->
-            case lists:member(Claim, Lost) of
-                true -> shigoto_executor:stop(Pid, lost);
-                false -> ok
-            end
-        end,
-        Claimed
-    ).
+    _ = [shigoto_executor:stop(Pid, lost) || {Claim, Pid} <- Claimed, lists:member(Claim, Lost)],
+    ok.
 
 %% An executor that was killed never took its own entry out. Left in, its job
 %% would be kept alive by heartbeats nobody is running it for.
 forget(Dead) ->
-    lists:foreach(fun(Entry) -> ets:delete_object(shigoto_executors, Entry) end, Dead).
+    _ = [ets:delete_object(shigoto_executors, Entry) || {_Claim, _Pid} = Entry <- Dead],
+    ok.

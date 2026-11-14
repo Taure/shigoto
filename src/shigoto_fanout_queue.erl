@@ -70,11 +70,11 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({job_finished, _JobId, Pid}, #state{active = Active, executors = Execs} = State) ->
     NewExecs =
-        case maps:find(Pid, Execs) of
-            {ok, Ref} ->
+        case Execs of
+            #{Pid := Ref} ->
                 erlang:demonitor(Ref, [flush]),
                 maps:remove(Pid, Execs);
-            error ->
+            #{} ->
                 Execs
         end,
     {noreply, State#state{active = Active - 1, executors = NewExecs}};

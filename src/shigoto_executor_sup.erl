@@ -14,7 +14,7 @@ start_link() ->
 -doc "Start a new executor process for a claimed job.".
 -spec start_executor(map(), atom(), pid()) -> {ok, pid()} | {error, term()}.
 start_executor(Job, Pool, QueuePid) ->
-    supervisor:start_child(?MODULE, [Job, Pool, QueuePid, claimed]).
+    started(supervisor:start_child(?MODULE, [Job, Pool, QueuePid, claimed])).
 
 -doc """
 Start an executor for a job read from a fanout queue. The job is not claimed,
@@ -22,7 +22,14 @@ so the executor runs it and leaves its row alone.
 """.
 -spec start_fanout_executor(map(), atom(), pid()) -> {ok, pid()} | {error, term()}.
 start_fanout_executor(Job, Pool, QueuePid) ->
-    supervisor:start_child(?MODULE, [Job, Pool, QueuePid, fanout]).
+    started(supervisor:start_child(?MODULE, [Job, Pool, QueuePid, fanout])).
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({ok, Pid, _Info}) when is_pid(Pid) -> {ok, Pid};
+started({ok, _NoProcess}) -> {error, not_started};
+started({ok, _NoProcess, _Info}) -> {error, not_started};
+started({error, _} = Error) -> Error.
 
 -doc false.
 init([]) ->

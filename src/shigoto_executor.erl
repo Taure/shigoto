@@ -86,8 +86,11 @@ execute_sync(Job, Pool, Timeout) ->
 running(JobId) ->
     case ets:whereis(shigoto_executors) of
         undefined -> [];
-        _Table -> ets:select(shigoto_executors, [{{{JobId, '_'}, '$1'}, [], ['$1']}])
+        _Table -> [Pid || {_Claim, Pid} <- executors_of(JobId), is_pid(Pid)]
     end.
+
+executors_of(JobId) ->
+    ets:match_object(shigoto_executors, {{JobId, '_'}, '_'}).
 
 -doc """
 Stop a run before it finishes: its worker process is shut down and nothing is
@@ -185,7 +188,13 @@ caller(_Queued) -> {executor, supervisor()}.
 supervisor() ->
     case get('$ancestors') of
         [Pid | _] when is_pid(Pid) -> Pid;
-        [Name | _] when is_atom(Name) -> whereis(Name);
+        [Name | _] when is_atom(Name) -> registered_process(Name);
+        _ -> undefined
+    end.
+
+registered_process(Name) ->
+    case whereis(Name) of
+        Pid when is_pid(Pid) -> Pid;
         _ -> undefined
     end.
 
@@ -239,7 +248,10 @@ announced({completed, _Result}, Job, Duration) ->
 announced({failed, _Stored, Reported}, Job, Duration) ->
     _ = shigoto_telemetry:job_failed(Job, Reported, Duration),
     {error, Reported};
-announced({_Snooze, Seconds}, Job, _Duration) ->
+announced({snooze, Seconds}, Job, _Duration) ->
+    _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
+    {snooze, Seconds};
+announced({snoozed, Seconds}, Job, _Duration) ->
     _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
     {snooze, Seconds}.
 
@@ -371,7 +383,6 @@ caller's responsibility. Used by the testing helpers to run a worker with no DB.
 run_perform(Job, Worker, Args, Timeout) ->
     run_middleware_chain(Job, Worker, Args, Timeout, helper).
 
--spec run_middleware_chain(map(), module(), term(), timeout(), caller()) -> term().
 run_middleware_chain(Job, Worker, Args, Timeout, Caller) ->
     %% Pass decoded args in the job map so middleware sees maps, not binaries.
     %% For dependent jobs, expose the predecessors' results under deps_results.

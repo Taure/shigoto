@@ -113,9 +113,9 @@ build_test_job(Worker, Args, Opts) ->
         tags => maps:get(tags, Opts, []),
         meta => maps:get(meta, Opts, #{})
     },
-    case maps:find(deps_results, Opts) of
-        {ok, DepsResults} -> Job#{deps_results => DepsResults};
-        error -> Job
+    case Opts of
+        #{deps_results := DepsResults} -> Job#{deps_results => DepsResults};
+        #{} -> Job
     end.
 
 %%----------------------------------------------------------------------
