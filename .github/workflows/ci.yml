@@ -56,6 +56,36 @@ jobs:
       - name: Common Test
         run: rebar3 ct
 
+  # CHANGELOG.md is generated, and nothing can push it to main after a merge.
+  # So the pull request carries it, and this fails one that does not.
+  changelog:
+    name: Changelog
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate the changelog from this branch
+        id: cliff
+        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4
+        with:
+          version: v2.13.1
+          config: cliff.toml
+      - name: Compare with CHANGELOG.md
+        env:
+          GENERATED: ${{ steps.cliff.outputs.changelog }}
+        run: |
+          if ! diff -u CHANGELOG.md "$GENERATED"; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md is not what git-cliff generates from this branch. Run 'git cliff -o CHANGELOG.md' and commit the result as 'chore(changelog): regenerate', the last commit of the pull request."
+            exit 1
+          fi
+
   release:
     needs: [ci, postgres]
     if: ${{ github.event_name == 'push' }}
