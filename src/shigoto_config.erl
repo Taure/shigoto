@@ -26,7 +26,11 @@ Configuration access for Shigoto. Reads from application env.
     queue_weights/0,
     fair_queues/0,
     encryption_keys/0,
-    fanout_queues/0
+    encryption_write_format/0,
+    encryption_read_formats/0,
+    require_encrypted/0,
+    fanout_queues/0,
+    check/0
 ]).
 
 -doc "The minato pool name for job storage. Set `repo` for Kura-based apps or `pool` for a pool of its own.".
@@ -137,7 +141,10 @@ shutdown_timeout() ->
 middleware() ->
     application:get_env(shigoto, middleware, []).
 
--doc "AES-256-GCM encryption key for job args/meta. Returns `undefined` if not configured.".
+-doc """
+AES-256-GCM encryption key, exactly 32 bytes. Returns `undefined` if not
+configured. `m:shigoto_crypto` says which columns it covers.
+""".
 -spec encryption_key() -> binary() | undefined.
 encryption_key() ->
     application:get_env(shigoto, encryption_key, undefined).
@@ -200,3 +207,73 @@ Fanout queues — every node processes every job. Format:
 -spec fanout_queues() -> [{binary(), pos_integer(), map()}].
 fanout_queues() ->
     application:get_env(shigoto, fanout_queues, []).
+
+-doc """
+The frame `m:shigoto_crypto` writes: `v1` (the default) or `v2`.
+
+`v1` is what releases up to 1.10 write and is all they can read, so it stays
+the default until every node runs a release that reads `v2`. See the
+[Encryption](encryption.md#upgrading-encryption) guide for the upgrade steps.
+""".
+-spec encryption_write_format() -> v1 | v2.
+encryption_write_format() ->
+    case application:get_env(shigoto, encryption_write_format, v1) of
+        Format when Format =:= v1; Format =:= v2 -> Format;
+        Other -> error({shigoto_config, {invalid_encryption_write_format, Other}})
+    end.
+
+-doc """
+The frames `m:shigoto_crypto` reads: `[v1, v2]` by default. Set `[v2]` once no
+`v1` ciphertext is left (`shigoto:reencrypt/0,1`), so that one copied from a
+backup or another row is refused.
+""".
+-spec encryption_read_formats() -> [v1 | v2].
+encryption_read_formats() ->
+    case application:get_env(shigoto, encryption_read_formats, [v1, v2]) of
+        Formats when is_list(Formats) -> [v1 || v1 <- Formats] ++ [v2 || v2 <- Formats];
+        _NotAList -> []
+    end.
+
+-doc """
+Whether a plaintext value in a column this installation encrypts fails the job
+instead of being run. Default: `false`. Only applies with a key configured.
+""".
+-spec require_encrypted() -> boolean().
+require_encrypted() ->
+    application:get_env(shigoto, require_encrypted, false) =:= true.
+
+-doc """
+Check the settings that are dangerous to get wrong, before anything starts.
+
+Answers `{error, {shigoto_config, Reason}}` for the first problem. `Reason`
+names the setting and what is wrong with it, never a key.
+""".
+-spec check() -> ok | {error, {shigoto_config, term()}}.
+check() ->
+    try
+        ok = checked(shigoto_crypto:check_keys()),
+        _ = encryption_write_format(),
+        ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
+        ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false)))
+    catch
+        error:{shigoto_config, Reason} -> {error, {shigoto_config, Reason}}
+    end.
+
+checked(ok) -> ok;
+checked({error, Reason}) -> error({shigoto_config, Reason}).
+
+%% A setting as it was configured, which is not yet known to be of its type.
+-spec setting(atom(), term()) -> term().
+setting(Key, Default) ->
+    application:get_env(shigoto, Key, Default).
+
+read_formats_checked(Formats) when is_list(Formats), Formats =/= [] ->
+    case [Format || Format <- Formats, Format =/= v1, Format =/= v2] of
+        [] -> ok;
+        _ -> {error, {invalid_encryption_read_formats, Formats}}
+    end;
+read_formats_checked(Formats) ->
+    {error, {invalid_encryption_read_formats, Formats}}.
+
+boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
+boolean_checked(Setting, Value) -> {error, {not_a_boolean, Setting, Value}}.
