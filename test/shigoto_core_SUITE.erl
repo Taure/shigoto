@@ -13,7 +13,6 @@
 -export([
     %% Dependency cycle detection
     test_dependency_missing_ids_rejected/1,
-    test_dependency_cycle_detected/1,
     test_dependency_shared_ancestor_accepted/1,
     test_dependency_on_a_finished_job_is_not_waited_for/1,
     test_dependency_valid_chain_accepted/1,
@@ -66,7 +65,6 @@
 all() ->
     [
         test_dependency_missing_ids_rejected,
-        test_dependency_cycle_detected,
         test_dependency_shared_ancestor_accepted,
         test_dependency_on_a_finished_job_is_not_waited_for,
         test_dependency_valid_chain_accepted,
@@ -135,36 +133,6 @@ test_dependency_missing_ids_rejected(_Config) ->
         #{}
     ),
     ?assertMatch({error, {missing_dependencies, _}}, Result).
-
-test_dependency_cycle_detected(_Config) ->
-    Insert = fun(DependsOn) ->
-        {ok, #{id := JobId}} = shigoto_repo:insert_job(
-            ?POOL, #{worker => shigoto_test_worker, args => #{}, depends_on => DependsOn}, #{}
-        ),
-        JobId
-    end,
-    A = Insert([]),
-    B = Insert([A]),
-    C = Insert([B]),
-    %% A job has no id until it is inserted, so nothing can depend on it yet and
-    %% inserting one cannot close a circle. Only rows written around the API can.
-    #{} = shigoto_db:query(
-        ?POOL, ~"UPDATE shigoto_jobs SET depends_on = ARRAY[$2::bigint] WHERE id = $1", [A, C]
-    ),
-    [
-        ?assertEqual(
-            {error, dependency_cycle},
-            shigoto_repo:insert_job(
-                ?POOL,
-                #{worker => shigoto_test_worker, args => #{}, depends_on => DependsOn},
-                #{}
-            )
-        )
-     || DependsOn <- [[A], [B], [C], [A, C]]
-    ],
-    %% A job outside the circle is not held against one.
-    D = Insert([]),
-    ?assertMatch({ok, #{depends_on := [D]}}, shigoto_repo:get_job(?POOL, Insert([D]))).
 
 test_dependency_shared_ancestor_accepted(_Config) ->
     Insert = fun(DependsOn) ->

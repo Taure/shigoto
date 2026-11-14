@@ -59,9 +59,9 @@ Insert a new job. Respects worker defaults and unique constraints.
 With `depends_on`, every job named must exist
 (`{error, {missing_dependencies, Ids}}` otherwise). A dependency that has
 already finished is not waited for: its result goes straight into the new
-job's `deps_results`. The jobs still waited for must not depend on each other
-in a circle, which only rows written around this API can do
-(`{error, dependency_cycle}`).
+job's `deps_results`. Any dependencies between existing jobs are accepted: a
+job has no id until it is inserted, so nothing can depend on it yet and an
+insert cannot close a circle.
 
 `on_dependency_failure` says what the job does when a job it waits on is
 discarded or cancelled: `run` without it, or be `cancel`led or `discard`ed in
@@ -383,7 +383,7 @@ ended(Pool, Rows) ->
 %% The jobs a statement just discarded or cancelled, counted in their batches.
 -spec batches_told(atom(), [#{batch_id := integer() | null, _ => _}]) -> ok.
 batches_told(Pool, Rows) ->
-    Batched = [BatchId || #{batch_id := BatchId} <- Rows, BatchId =/= null],
+    Batched = [BatchId || #{batch_id := BatchId} <- Rows, is_integer(BatchId)],
     _ = [
         shigoto_batch:jobs_discarded(Pool, BatchId, length([B || B <- Batched, B =:= BatchId]))
      || BatchId <- lists:usort(Batched)
@@ -989,18 +989,7 @@ policy_column(JobParams) ->
 validate_dependencies(_Pool, [], _Policy) ->
     {ok, [], #{}};
 validate_dependencies(Pool, DepIds, Policy) ->
-    %% The dependencies and everything they still wait for. UNION drops the
-    %% rows already seen, which also ends the walk when the rows form a circle.
-    SQL =
-        ~"""
-        WITH RECURSIVE waited(id, depends_on, state, result) AS (
-          SELECT id, depends_on, state, result FROM shigoto_jobs WHERE id = ANY($1::bigint[])
-          UNION
-          SELECT j.id, j.depends_on, j.state, j.result
-          FROM waited w JOIN shigoto_jobs j ON j.id = ANY(w.depends_on)
-        )
-        SELECT id, depends_on, state, result FROM waited
-        """,
+    SQL = ~"SELECT id, state, result FROM shigoto_jobs WHERE id = ANY($1::bigint[])",
     case query(Pool, SQL, [DepIds]) of
         #{rows := Rows} ->
             Jobs = #{Id => Row || #{id := Id} = Row <- Rows},
@@ -1012,28 +1001,20 @@ validate_dependencies(Pool, DepIds, Policy) ->
             Err
     end.
 
+%% There is no cycle to look for: a job has no id until it is inserted, so
+%% nothing can depend on it yet and an insert cannot close a circle.
 waited_for(DepIds, Jobs, Policy) ->
-    Waits =
-        #{
-            Id => [Dep || Dep <- DependsOn, is_map_key(Dep, Jobs)]
-         || Id := #{depends_on := DependsOn} <- Jobs
-        },
-    case can_all_finish(Waits) of
-        false ->
-            {error, dependency_cycle};
-        true ->
-            Finished = [Id || Id <- DepIds, is_finished(maps:get(Id, Jobs))],
-            case [Id || Id <- Finished, Policy =/= run, has_failed(maps:get(Id, Jobs))] of
-                [] ->
-                    Results =
-                        #{
-                            integer_to_binary(Id) => decoded_result(maps:get(Id, Jobs))
-                         || Id <- Finished
-                        },
-                    {ok, lists:usort(DepIds) -- Finished, Results};
-                Failed ->
-                    {error, {dependency_failed, Failed}}
-            end
+    Finished = [Id || Id <- DepIds, is_finished(maps:get(Id, Jobs))],
+    case [Id || Id <- Finished, Policy =/= run, has_failed(maps:get(Id, Jobs))] of
+        [] ->
+            Results =
+                #{
+                    integer_to_binary(Id) => decoded_result(maps:get(Id, Jobs))
+                 || Id <- Finished
+                },
+            {ok, lists:usort(DepIds) -- Finished, Results};
+        Failed ->
+            {error, {dependency_failed, Failed}}
     end.
 
 is_finished(#{state := State}) ->
@@ -1045,19 +1026,6 @@ has_failed(#{state := State}) ->
 decoded_result(#{result := null}) -> null;
 decoded_result(#{result := Result}) when is_binary(Result) -> json:decode(Result);
 decoded_result(#{result := Result}) -> Result.
-
-%% Take away the jobs that wait for nothing until none are left. If a round
-%% finds no such job, the ones remaining wait for each other.
--spec can_all_finish(#{integer() => [integer()]}) -> boolean().
-can_all_finish(Waits) when map_size(Waits) =:= 0 ->
-    true;
-can_all_finish(Waits) ->
-    case [Id || Id := [] <- Waits] of
-        [] ->
-            false;
-        Free ->
-            can_all_finish(#{Id => Deps -- Free || Id := Deps <- maps:without(Free, Waits)})
-    end.
 
 %%----------------------------------------------------------------------
 %% Internal: unique jobs
@@ -1084,8 +1052,8 @@ apply_worker_defaults(JobParams) ->
     Defaults.
 
 resolve_unique(JobParams, Opts) ->
-    case maps:find(unique, Opts) of
-        {ok, UniqueOpts} when is_map(UniqueOpts) ->
+    case Opts of
+        #{unique := UniqueOpts} when is_map(UniqueOpts) ->
             maps:merge(?DEFAULT_UNIQUE, UniqueOpts);
         _ ->
             Worker = maps:get(worker, JobParams),

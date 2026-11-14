@@ -142,8 +142,7 @@ shigoto_sup (one_for_one)
   which walks the waiting jobs recursively and releases, cancels or discards
   each by its `on_dependency_failure` (job column, else the app default). A
   dependency already finished at insert is not waited for. Inserting cannot
-  create a cycle (no id yet); `dependency_cycle` only reports rows written
-  around the API.
+  create a cycle (no id yet), so there is no cycle check.
 - **Stale rescue.** Heartbeats + a per-queue `rescue` tick (`rescue_interval`)
   take back zombie jobs whose owner died (threshold `heartbeat_interval * 2`,
   claiming counts as the first heartbeat). A rescued job is re-queued, or

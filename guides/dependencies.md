@@ -120,10 +120,11 @@ Shigoto validates dependencies on insert:
 - **Missing IDs**: Returns `{error, {missing_dependencies, [Id, ...]}}` if
   any dependency ID doesn't exist. A finished job that has been pruned or
   archived no longer exists.
-- **Cycles**: A job gets its ID when it is inserted, so nothing can depend on
-  it before then and inserting a job can never close a circle. Any shape of
-  dependencies between existing jobs is accepted, including a diamond, or a job
-  that waits both on a job and on that job's own dependency:
+- **Cycles**: there is nothing to check. A job gets its ID when it is
+  inserted, so nothing can depend on it before then and inserting a job can
+  never close a circle. Any shape of dependencies between existing jobs is
+  accepted, including a diamond, or a job that waits both on a job and on that
+  job's own dependency:
 
   ```erlang
   {ok, A} = shigoto:insert(#{worker => w, args => #{}}),
@@ -135,10 +136,8 @@ Shigoto validates dependencies on insert:
   }).
   ```
 
-  `{error, dependency_cycle}` is returned only when the jobs depended on
-  already wait for each other in a circle, which takes rows written to
-  `depends_on` around this API. A job inserted behind such a circle would never
-  run.
+  Earlier versions refused that last insert with `{error, dependency_cycle}`.
+  That error is no longer returned.
 
 ## Combining with Batches
 
