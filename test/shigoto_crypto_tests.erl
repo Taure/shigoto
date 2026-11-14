@@ -31,6 +31,9 @@ crypto_test_() ->
             fun without_a_key_nothing_is_changed_or_opened/0,
             fun open_term_opens_a_decoded_value/0,
             fun reseal_rewrites_what_is_not_current/0,
+            fun reseal_reports_a_moved_ciphertext/0,
+            fun a_string_that_only_looks_like_a_frame_is_plaintext/0,
+            fun a_plaintext_that_would_read_as_a_frame_is_sealed/0,
             fun unique_keys_cover_every_key/0,
             fun keys_are_checked_without_being_shown/0,
             fun a_bad_key_is_not_in_the_error/0,
@@ -219,6 +222,88 @@ reseal_rewrites_what_is_not_current() ->
      || Resealed <- [FromV1, FromOldKey]
     ],
     ?assertEqual({error, decrypt_failed}, shigoto_crypto:reseal(Current, ?ARGS)).
+
+reseal_reports_a_moved_ciphertext() ->
+    Sealed = shigoto_crypto:seal(?PLAIN, ?ARGS),
+    ?assertEqual(current, shigoto_crypto:reseal(Sealed, ?ARGS)),
+    ?assertEqual({error, decrypt_failed}, shigoto_crypto:reseal(Sealed, {args, ~"other_worker"})),
+    ?assertEqual({error, decrypt_failed}, shigoto_crypto:reseal(Sealed, {meta, ~"my_worker"})),
+    Result = shigoto_crypto:seal(~"1", {result, 1}),
+    ?assertEqual({error, decrypt_failed}, shigoto_crypto:reseal(Result, {result, 2})).
+
+a_string_that_only_looks_like_a_frame_is_plaintext() ->
+    Result = {result, 7},
+    Callback = {callback_args, ~"my_worker"},
+    Lookalikes = [
+        ~"\"enc:hello\"",
+        ~"\"enc:\"",
+        ~"\"enc:v2:hello\"",
+        ~"\"enc:v2:aGVsbG8=\"",
+        ~"\"enc:a \\\"quoted\\\" word\""
+    ],
+    set(#{encryption_key => key(1), encryption_write_format => v1}),
+    [
+        begin
+            ?assertEqual(Plain, shigoto_crypto:seal(Plain, Result)),
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Plain, Result)),
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Plain, Callback)),
+            ?assertEqual(
+                {ok, json:decode(Plain)}, shigoto_crypto:open_term(json:decode(Plain), Result)
+            ),
+            ?assertEqual(current, shigoto_crypto:reseal(Plain, Result)),
+            ?assertNot(shigoto_crypto:is_frame(Plain, Result)),
+            %% Args and meta are never strings in the clear.
+            ?assertEqual({error, decrypt_failed}, shigoto_crypto:open(Plain, ?ARGS))
+        end
+     || Plain <- Lookalikes
+    ],
+    set(#{encryption_key => key(1), encryption_write_format => v2}),
+    [
+        begin
+            Sealed = shigoto_crypto:seal(Plain, Result),
+            ?assertMatch(<<"\"enc:v2:", _/binary>>, Sealed),
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Sealed, Result)),
+            %% Stored in the clear by an earlier release.
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Plain, Result)),
+            {resealed, Resealed} = shigoto_crypto:reseal(Plain, Result),
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Resealed, Result))
+        end
+     || Plain <- Lookalikes
+    ],
+    set(#{encryption_key => key(1), encryption_write_format => v2, require_encrypted => true}),
+    [
+        ?assertEqual({error, plaintext_refused}, shigoto_crypto:open(Plain, Result))
+     || Plain <- Lookalikes
+    ],
+    set(#{}),
+    [
+        ?assertEqual({ok, Plain}, shigoto_crypto:open(Plain, Context))
+     || Plain <- Lookalikes, Context <- [Result, Callback]
+    ],
+    ok.
+
+a_plaintext_that_would_read_as_a_frame_is_sealed() ->
+    Result = {result, 7},
+    set(#{encryption_key => key(1), encryption_write_format => v1}),
+    [
+        begin
+            Sealed = shigoto_crypto:seal(Plain, Result),
+            ?assertNotEqual(Plain, Sealed),
+            ?assertEqual({ok, Plain}, shigoto_crypto:open(Sealed, Result)),
+            ?assertEqual(
+                {ok, json:decode(Plain)}, shigoto_crypto:open_term(json:decode(Sealed), Result)
+            ),
+            ?assertEqual(current, shigoto_crypto:reseal(Sealed, Result)),
+            %% Left in the clear by an earlier release, it cannot be told from a
+            %% frame that does not open.
+            ?assertEqual({error, decrypt_failed}, shigoto_crypto:open(Plain, Result))
+        end
+     || Plain <- [
+            framed(~"enc:", binary:copy(<<7>>, 40)),
+            framed(~"enc:v2:", binary:copy(<<7>>, 40))
+        ]
+    ],
+    ok.
 
 unique_keys_cover_every_key() ->
     Material = ~"{\"card\":\"4111\"}:my_worker",

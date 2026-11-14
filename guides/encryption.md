@@ -141,9 +141,17 @@ nothing. Filter on `worker`, `queue`, `tags` or `state` instead.
 
 ## Results that look like a frame
 
-With a key configured, a stored JSON string that starts with `enc:` is taken
-for a ciphertext. A worker that returns `{ok, <<"enc:...">>}` as its result
-gets a result that fails to open. Return a map.
+`args`, `meta` and cron args are objects in the clear, so a string that starts
+with `enc:` is a ciphertext there. A result is whatever the worker returned,
+and a worker may return `{ok, <<"enc:hello">>}`. In `result`, `deps_results`
+and `callback_args` such a string is only taken for a ciphertext when the rest
+is base64 of at least a frame's header (28 bytes for v1, 32 for v2). A result
+that does have that form is stored encrypted, also in `v1`, so it is read back
+as what the worker returned.
+
+One case is left: a result of that exact form stored in the clear by 1.10 or
+earlier, or before a key was configured, cannot be told from a ciphertext and
+fails to open.
 
 ## Without encryption
 

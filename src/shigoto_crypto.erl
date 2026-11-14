@@ -47,6 +47,19 @@ are as well.
 
 Which frames are read is `shigoto_config:encryption_read_formats/0`.
 
+## A string that starts with `enc:`
+
+`args`, `meta` and cron args are JSON objects in the clear, so a string that
+starts with `enc:` is a frame there and nothing else. A job's result is
+whatever the worker returned, and releases up to 1.10 never encrypted it, nor
+batch callback args. In those two columns a string that starts with `enc:` is
+a frame only when what follows is base64 of at least a frame's header (28
+bytes for v1, 32 for v2); anything else is the plaintext it looks like. A
+plaintext that would be read as a frame is always written sealed, also while
+the write format is `v1`, so what this release writes is never mistaken. A
+value an earlier release left in the clear that has the form of a frame cannot
+be told from a ciphertext that does not open, and fails with `decrypt_failed`.
+
 ## Nonces
 
 Every value gets a fresh 96-bit nonce from `crypto:strong_rand_bytes/1`. With
@@ -72,6 +85,7 @@ column.
     reseal/2,
     is_enabled/0,
     is_frame/1,
+    is_frame/2,
     unique_key/1,
     unique_keys/1,
     check_keys/0,
@@ -121,8 +135,13 @@ seal(Plain, Context) when is_binary(Plain) ->
         [Key | _] -> sealed(shigoto_config:encryption_write_format(), Key, Plain, Context)
     end.
 
-sealed(v1, _Key, Plain, {Column, _Bound}) when Column =:= result; Column =:= callback_args ->
-    Plain;
+sealed(v1, Key, Plain, {Column, _Bound} = Context) when
+    Column =:= result; Column =:= callback_args
+->
+    case frame(Plain, Context) of
+        plaintext -> Plain;
+        _WouldReadAsAFrame -> json_string([~"enc:", base64:encode(sealed_v1(Key, Plain))])
+    end;
 sealed(v1, Key, Plain, _Context) ->
     json_string([~"enc:", base64:encode(sealed_v1(Key, Plain))]);
 sealed(v2, Key, Plain, Context) ->
@@ -138,7 +157,7 @@ default.
 """.
 -spec open(binary(), context()) -> {ok, binary()} | {error, failure()}.
 open(Stored, Context) when is_binary(Stored) ->
-    case {frame(Stored), keys()} of
+    case {frame(Stored, Context), keys()} of
         {plaintext, []} -> {ok, Stored};
         {plaintext, _Keys} -> plaintext(Stored, Context);
         {_Frame, []} -> unreadable(Stored, Context);
@@ -208,20 +227,27 @@ opened_v1(_Keys, _Frame) ->
 `deps_results`. Answers the decoded plaintext.
 """.
 -spec open_term(term(), context()) -> {ok, term()} | {error, failure()}.
-open_term(<<"enc:", _/binary>> = Frame, Context) ->
-    case open(json_string(Frame), Context) of
-        {ok, Plain} ->
-            try
-                {ok, json:decode(Plain)}
-            catch
-                _:_ -> {error, decrypt_failed}
-            end;
-        {error, _} = Failed ->
-            Failed
-    end;
 open_term(null, _Context) ->
     {ok, null};
-open_term(Term, {Column, _Bound}) ->
+open_term(<<"enc:", _/binary>> = Term, Context) ->
+    Stored = json_string(Term),
+    case frame(Stored, Context) of
+        plaintext -> plain_term(Term, Context);
+        _Frame -> opened_term(open(Stored, Context))
+    end;
+open_term(Term, Context) ->
+    plain_term(Term, Context).
+
+opened_term({ok, Plain}) ->
+    try
+        {ok, json:decode(Plain)}
+    catch
+        _:_ -> {error, decrypt_failed}
+    end;
+opened_term({error, _} = Failed) ->
+    Failed.
+
+plain_term(Term, {Column, _Bound}) ->
     Refused =
         keys() =/= [] andalso shigoto_config:require_encrypted() andalso
             is_covered(Column, <<>>),
@@ -243,28 +269,31 @@ reseal(Stored, Context) when is_binary(Stored) ->
         [] ->
             current;
         [Key | _] ->
-            case is_current(frame(Stored), Key) of
-                true -> current;
-                false -> resealed(Stored, Context)
+            case frame(Stored, Context) of
+                plaintext -> resealed(Stored, Stored, Context);
+                Frame -> reopened(Frame, Key, Stored, Context)
             end
+    end.
+
+%% A frame is opened before it is called current: one that was moved to
+%% another row or column names the right key and still does not open here.
+reopened(Frame, Key, Stored, Context) ->
+    case open(Stored, Context) of
+        {ok, Plain} ->
+            case is_current(Frame, Key) of
+                true -> current;
+                false -> resealed(Plain, Stored, Context)
+            end;
+        {error, _} = Failed ->
+            Failed
     end.
 
 %% Plaintext is taken as it is: `require_encrypted` says what may run, and
 %% encrypting what is still in the clear is how a table gets there.
-resealed(Stored, Context) ->
-    Opened =
-        case frame(Stored) of
-            plaintext -> {ok, Stored};
-            _Frame -> open(Stored, Context)
-        end,
-    case Opened of
-        {ok, Plain} ->
-            case seal(Plain, Context) of
-                Stored -> current;
-                Sealed -> {resealed, Sealed}
-            end;
-        {error, _} = Failed ->
-            Failed
+resealed(Plain, Stored, Context) ->
+    case seal(Plain, Context) of
+        Stored -> current;
+        Sealed -> {resealed, Sealed}
     end.
 
 %% A v1 frame does not say which key wrote it; it is current when the newest
@@ -275,9 +304,7 @@ is_current({Version, Encoded}, Key) ->
             Frame -> is_under(Version, Frame, Key)
         catch
             _:_ -> false
-        end;
-is_current(plaintext, _Key) ->
-    false.
+        end.
 
 is_under(v2, <<KeyId:?KEY_ID_BYTES/binary, _/binary>>, Key) ->
     KeyId =:= key_id(Key);
@@ -286,10 +313,18 @@ is_under(v1, Frame, Key) ->
 is_under(_Version, _Frame, _Key) ->
     false.
 
--doc "Whether a stored value is a ciphertext frame rather than plaintext.".
+-doc """
+Whether a stored value has the form of a ciphertext frame: a JSON string that
+starts with `enc:`. `is_frame/2` says whether it is read as one in its column.
+""".
 -spec is_frame(binary()) -> boolean().
 is_frame(Stored) when is_binary(Stored) ->
     frame(Stored) =/= plaintext.
+
+-doc "Whether a stored value of the column `Context` is read as a ciphertext frame.".
+-spec is_frame(binary(), context()) -> boolean().
+is_frame(Stored, Context) when is_binary(Stored) ->
+    frame(Stored, Context) =/= plaintext.
 
 -doc """
 The `unique_key` stored for a unique job, built from `Material`.
@@ -413,8 +448,33 @@ keys() ->
             Keys
     end.
 
-%% A frame is a JSON string that starts with "enc:". Nothing shigoto stores in
-%% these columns in the clear is a string, except a result a worker chose.
+%% In a column earlier releases left in the clear, a string that starts with
+%% "enc:" is only a frame when the rest can be one.
+-spec frame(binary(), context()) -> plaintext | {v1 | v2, binary()}.
+frame(Stored, {Column, _Bound}) when Column =:= result; Column =:= callback_args ->
+    case frame(Stored) of
+        {Version, Encoded} = Frame ->
+            case is_well_formed(Version, Encoded) of
+                true -> Frame;
+                false -> plaintext
+            end;
+        plaintext ->
+            plaintext
+    end;
+frame(Stored, _Context) ->
+    frame(Stored).
+
+is_well_formed(Version, Encoded) ->
+    try base64:decode(Encoded) of
+        Bytes -> byte_size(Bytes) >= header_bytes(Version)
+    catch
+        _:_ -> false
+    end.
+
+header_bytes(v1) -> ?IV_BYTES + ?TAG_BYTES;
+header_bytes(v2) -> ?KEY_ID_BYTES + ?IV_BYTES + ?TAG_BYTES.
+
+%% A frame is a JSON string that starts with "enc:".
 -spec frame(binary()) -> plaintext | {v1 | v2, binary()}.
 frame(<<"\"enc:v2:", Rest/binary>>) -> unquoted(v2, Rest);
 frame(<<"\"enc:", Rest/binary>>) -> unquoted(v1, Rest);
