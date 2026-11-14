@@ -597,18 +597,41 @@ snooze_job(Pool, Claim, Seconds) ->
         {error, _} = Err -> Err
     end.
 
--doc "Retry a discarded or cancelled job by resetting to available.".
+-doc """
+Retry a discarded or cancelled job by resetting to available.
+
+A job in a batch is taken out of the batch's discarded count, and is counted
+again when it ends. A batch that has already run its callback does not run it
+a second time.
+""".
 -spec retry_job(atom(), integer()) -> ok | {error, term()}.
 retry_job(Pool, JobId) ->
-    SQL =
-        <<
-            "UPDATE shigoto_jobs SET state = 'available', scheduled_at = now()\n"
-            "WHERE id = $1 AND state IN ('discarded', 'cancelled')"
-        >>,
-    case query(Pool, SQL, [JobId]) of
-        #{command := update} -> ok;
+    case query(Pool, retrying(~"id = $1 AND state IN ('discarded', 'cancelled')"), [JobId]) of
+        #{rows := [_]} -> ok;
         {error, _} = Err -> Err
     end.
+
+%% A discarded or cancelled job was counted in its batch as discarded. Back in
+%% the queue it is no longer that, and it will be counted again when it ends.
+%% Left counted, the batch would be complete one job early.
+-spec retrying(iodata()) -> binary().
+retrying(Where) ->
+    iolist_to_binary([
+        ~"WITH retried AS (UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ",
+        Where,
+        ~"""
+         RETURNING batch_id
+        ), uncounted AS (
+          UPDATE shigoto_batches b SET discarded_jobs = GREATEST(b.discarded_jobs - batched.jobs, 0)
+          FROM (
+            SELECT batch_id, count(*) AS jobs FROM retried
+            WHERE batch_id IS NOT NULL GROUP BY batch_id
+          ) batched
+          WHERE b.id = batched.batch_id
+        )
+        SELECT count(*) AS retried FROM retried
+        """
+    ]).
 
 -doc """
 Retry all discarded or cancelled jobs matching a filter.
@@ -639,12 +662,8 @@ retry_matching(Pool, Filters) ->
                     lists:join(~" AND ", WhereClauses)
                 ])
         end,
-    SQL = iolist_to_binary([
-        ~"UPDATE shigoto_jobs SET state = 'available', scheduled_at = now() WHERE ",
-        WhereSQL
-    ]),
-    case query(Pool, SQL, Params) of
-        #{num_rows := Count} -> {ok, Count};
+    case query(Pool, retrying(WhereSQL), Params) of
+        #{rows := [#{retried := Count}]} when is_integer(Count) -> {ok, Count};
         {error, _} = Err -> Err
     end.
 

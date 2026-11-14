@@ -49,6 +49,10 @@ stops between the count and the settling, the batch is still `active` with a
 full count, and `settle_finished/1`, which the queues run every
 `rescue_interval`, settles it.
 
+A job that is retried (`shigoto:retry/1`, `shigoto:retry_by/1`) leaves the
+discarded count and is counted again when it ends. A batch that has already
+settled does not run its callback a second time.
+
 `total_jobs` goes up in the statement that inserts a job, so the batch only
 knows about the jobs inserted so far. Insert a batch's jobs together, with
 `shigoto:insert_all/1` or inside one `shigoto:transaction/1`: inserted one

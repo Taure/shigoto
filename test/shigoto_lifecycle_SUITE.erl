@@ -40,6 +40,7 @@ the application does with it.
     a_module_that_is_not_a_worker_fails_the_job/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_cancelled_batch_job_still_finishes_the_batch/1,
+    a_retried_job_does_not_finish_its_batch_early/1,
     a_batch_left_unsettled_is_settled_by_the_sweep/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
@@ -99,6 +100,7 @@ all() ->
         a_module_that_is_not_a_worker_fails_the_job,
         a_batch_callback_runs_after_its_jobs,
         a_cancelled_batch_job_still_finishes_the_batch,
+        a_retried_job_does_not_finish_its_batch_early,
         a_batch_left_unsettled_is_settled_by_the_sweep,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
@@ -667,6 +669,38 @@ a_cancelled_batch_job_still_finishes_the_batch(_Config) ->
     end,
     ?assertMatch(
         {ok, #{total_jobs := 2, completed_jobs := 1, discarded_jobs := 1}},
+        shigoto:get_batch(BatchId)
+    ).
+
+a_retried_job_does_not_finish_its_batch_early(_Config) ->
+    BatchId = new_batch(),
+    Retried = enqueue(~"batch-retried", #{batch => BatchId, max_attempts => 1}),
+    Other = enqueue(~"batch-other", #{batch => BatchId}),
+    Last = enqueue(~"batch-last", #{batch => BatchId}),
+    RetriedWorker = performing(~"batch-retried"),
+    OtherWorker = performing(~"batch-other"),
+    LastWorker = performing(~"batch-last"),
+    instruct(RetriedWorker, {return, {error, gone}}),
+    _ = await(Retried, ~"discarded"),
+    ?assertMatch({ok, #{discarded_jobs := 1}}, shigoto:get_batch(BatchId)),
+    ok = shigoto:retry(Retried),
+    ?assertMatch({ok, #{discarded_jobs := 0}}, shigoto:get_batch(BatchId)),
+    instruct(performing(~"batch-retried"), {return, ok}),
+    _ = await(Retried, ~"completed"),
+    instruct(OtherWorker, {return, ok}),
+    _ = await(Other, ~"completed"),
+    receive
+        {batch_callback, _} -> ct:fail(callback_with_a_job_still_running)
+    after 400 -> ok
+    end,
+    instruct(LastWorker, {return, ok}),
+    _ = await(Last, ~"completed"),
+    receive
+        {batch_callback, Args} -> ?assertNot(maps:is_key(~"_batch_event", Args))
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch(
+        {ok, #{total_jobs := 3, completed_jobs := 3, discarded_jobs := 0}},
         shigoto:get_batch(BatchId)
     ).
 

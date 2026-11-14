@@ -135,7 +135,8 @@ shigoto_sup (one_for_one)
 - **Batches.** `shigoto_batch` groups jobs and runs a callback worker when the
   last one ends. Counting is part of the job's own statement; `settle/2` then
   finishes a batch with a full count, and `settle_finished/1` on the rescue
-  tick settles one a stopped node left `active`.
+  tick settles one a stopped node left `active`. A retried job is taken out of
+  `discarded_jobs` (`retrying/1` in `shigoto_repo`).
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
   `pg_try_advisory_xact_lock`, so one node schedules at a time, and stores each
   entry's `last_scheduled_at` in `shigoto_cron` in the same transaction, so a

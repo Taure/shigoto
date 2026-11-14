@@ -61,6 +61,11 @@ inserted in the transaction that moves the batch out of `active`, so a batch
 neither misses a job nor runs its callback twice. If a node stops between the
 two, the batch is settled by the next `rescue_interval` sweep.
 
+A discarded or cancelled job that is retried (`shigoto:retry/1`,
+`shigoto:retry_by/1`) leaves `discarded_jobs` and is counted again when it
+ends. Retrying a job of a batch that has already run its callback does not run
+it again.
+
 `total_jobs` goes up in the statement that inserts a job, so a batch only knows
 about the jobs inserted so far. **Insert a batch's jobs together**, with
 `shigoto:insert_all/1` or inside one `shigoto:transaction/1`. Inserted one
