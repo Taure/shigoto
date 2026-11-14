@@ -169,6 +169,17 @@ on_discard(Args, Errors) ->
     alert_ops_team(Args).
 ```
 
+## A Job Whose Worker Is Missing
+
+A job row names its worker module. When the node that claims it cannot run that
+module (it is not loaded there, or it has no `perform/1`), the attempt fails
+with `unknown_worker` and the job follows the normal path: it is retried with
+the default backoff and discarded at `max_attempts`. During a rolling deploy
+that gives a node on the new release the chance to claim a job whose worker the
+old release does not have. A worker that was renamed or removed with jobs still
+queued ends up discarded, with the reason in its `errors`. The node logs
+`shigoto_job_unknown_worker` each time.
+
 ## Snoozing Jobs
 
 Return `{snooze, Seconds}` to reschedule a job without counting as a failure:

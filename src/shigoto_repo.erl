@@ -1261,10 +1261,8 @@ maybe_batch_discard(_Pool, _Job) ->
     ok.
 
 maybe_on_discard(OrigJob, #{state := ~"discarded", errors := Errors}) ->
-    Worker = resolve_worker_atom(OrigJob),
-    _ = code:ensure_loaded(Worker),
-    case erlang:function_exported(Worker, on_discard, 2) of
-        true ->
+    case discard_callback(OrigJob) of
+        {ok, Worker} ->
             Args = decode_args(maps:get(args, OrigJob, #{})),
             DecodedErrors =
                 case is_binary(Errors) of
@@ -1276,14 +1274,27 @@ maybe_on_discard(OrigJob, #{state := ~"discarded", errors := Errors}) ->
             catch
                 _:_ -> ok
             end;
-        false ->
+        none ->
             ok
     end;
 maybe_on_discard(_OrigJob, _Updated) ->
     ok.
 
-resolve_worker_atom(#{worker := W}) when is_atom(W) -> W;
-resolve_worker_atom(#{worker := W}) when is_binary(W) -> binary_to_existing_atom(W, utf8).
+%% A job can be discarded on a node that does not have its worker module, or
+%% name one that exists nowhere. Then there is no callback to run.
+-spec discard_callback(map()) -> {ok, module()} | none.
+discard_callback(#{worker := Name}) when is_binary(Name) ->
+    try binary_to_existing_atom(Name, utf8) of
+        Worker -> discard_callback(#{worker => Worker})
+    catch
+        error:badarg -> none
+    end;
+discard_callback(#{worker := Worker}) when is_atom(Worker) ->
+    _ = code:ensure_loaded(Worker),
+    case erlang:function_exported(Worker, on_discard, 2) of
+        true -> {ok, Worker};
+        false -> none
+    end.
 
 %%----------------------------------------------------------------------
 %% Internal: helpers

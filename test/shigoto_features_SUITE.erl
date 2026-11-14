@@ -33,6 +33,7 @@
     test_encrypted_unique_key_is_keyed/1,
     test_encrypted_args_filter_is_refused/1,
     test_heartbeat_stale_threshold/1,
+    test_a_job_naming_no_module_can_be_discarded/1,
     test_claim_counts_as_a_heartbeat/1,
     test_stale_threshold_under_a_second/1,
     test_rescue_discards_a_job_out_of_attempts/1,
@@ -73,6 +74,7 @@ all() ->
         test_encrypted_unique_key_is_keyed,
         test_encrypted_args_filter_is_refused,
         test_heartbeat_stale_threshold,
+        test_a_job_naming_no_module_can_be_discarded,
         test_claim_counts_as_a_heartbeat,
         test_stale_threshold_under_a_second,
         test_rescue_discards_a_job_out_of_attempts,
@@ -578,6 +580,29 @@ test_heartbeat_stale_threshold(_Config) ->
         [#{~"error" := ~"rescued", ~"attempt" := 1, ~"worker" := ~"shigoto_test_worker"}],
         json:decode(maps:get(errors, Rescued))
     ).
+
+test_a_job_naming_no_module_can_be_discarded(_Config) ->
+    Insert =
+        ~"""
+    INSERT INTO shigoto_jobs (queue, worker, args, max_attempts)
+    VALUES ('default', 'shigoto_never_a_module', '{}', 1) RETURNING id
+    """,
+    #{rows := [#{id := Failing}]} = shigoto_db:query(?POOL, Insert, []),
+    #{rows := [#{id := Stale}]} = shigoto_db:query(?POOL, Insert, []),
+    {ok, [First, _]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
+    ?assertMatch(#{id := Failing}, First),
+    %% There is no on_discard/2 to run, and looking for one must not crash.
+    ?assertEqual(
+        {error, {unknown_worker, ~"shigoto_never_a_module"}},
+        shigoto_executor:execute_sync(First, ?POOL, 5000)
+    ),
+    ?assertMatch({ok, #{state := ~"discarded"}}, shigoto_repo:get_job(?POOL, Failing)),
+    ok = last_heard_from(
+        Stale,
+        ~"heartbeat_at = now() - interval '120 seconds', attempted_at = now() - interval '120 seconds'"
+    ),
+    ?assertEqual({ok, 1}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    ?assertMatch({ok, #{state := ~"discarded"}}, shigoto_repo:get_job(?POOL, Stale)).
 
 test_claim_counts_as_a_heartbeat(_Config) ->
     {ok, #{id := JobId}} = shigoto_repo:insert_job(

@@ -143,7 +143,26 @@ registered_as(Job, fanout) ->
 -spec executed(map(), atom(), timeout() | worker_timeout, run()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
 executed(Job, Pool, Timeout, Run) ->
-    Worker = resolve_worker(Job),
+    case worker_of(Job) of
+        {ok, Worker} -> performed_by(Worker, Job, Pool, Timeout, Run);
+        {error, Reason} -> unrunnable(Reason, Job, Pool, Run)
+    end.
+
+%% The job names a module this node cannot run: one that does not exist here,
+%% or has no perform/1. It fails like any other attempt, so it is retried (a
+%% node on a newer release may have the worker) and then discarded, instead of
+%% crashing the executor and leaving the row to be rescued over and over.
+unrunnable(Reason, Job, Pool, Run) ->
+    ?LOG_ERROR(#{
+        msg => ~"shigoto_job_unknown_worker",
+        job_id => maps:get(id, Job, undefined),
+        worker => maps:get(worker, Job, undefined),
+        queue => maps:get(queue, Job, undefined),
+        attempt => maps:get(attempt, Job, undefined)
+    }),
+    concluded(Run, {failed, Reason, Reason}, Job, Pool, undefined, 0).
+
+performed_by(Worker, Job, Pool, Timeout, Run) ->
     set_logger_metadata(Job, Worker),
     T0 = erlang:monotonic_time(native),
     try
@@ -191,7 +210,7 @@ outcome(Job, Worker, Timeout, Caller) ->
 timeout_of(worker_timeout, Worker) -> resolve_timeout(Worker);
 timeout_of(Timeout, _Worker) -> Timeout.
 
--spec concluded(run(), outcome(), map(), atom(), module(), integer()) ->
+-spec concluded(run(), outcome(), map(), atom(), module() | undefined, integer()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
 concluded(_Run, {stopped, Why}, Job, _Pool, _Worker, _Duration) ->
     ?LOG_NOTICE(#{
@@ -221,7 +240,7 @@ announced({_Snooze, Seconds}, Job, _Duration) ->
     _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
     {snooze, Seconds}.
 
--spec recorded(outcome(), map(), atom(), module(), integer()) ->
+-spec recorded(outcome(), map(), atom(), module() | undefined, integer()) ->
     ok | {snooze, pos_integer()} | {error, term()}.
 recorded({completed, Result}, Job, Pool, _Worker, Duration) ->
     case shigoto_repo:complete_job(Pool, Job, Result) of
@@ -439,6 +458,8 @@ breaker_name(Worker) ->
 -define(DEFAULT_TIMEOUT, 300000).
 -define(MAX_BACKOFF, 1800).
 
+compute_backoff(undefined, Job, _Error) ->
+    default_backoff(maps:get(attempt, Job, 1));
 compute_backoff(Worker, Job, Error) ->
     _ = code:ensure_loaded(Worker),
     Attempt = maps:get(attempt, Job, 1),
@@ -475,10 +496,22 @@ resolve_timeout(Worker) ->
         false -> ?DEFAULT_TIMEOUT
     end.
 
-resolve_worker(#{worker := Worker}) when is_atom(Worker) ->
-    Worker;
-resolve_worker(#{worker := Worker}) when is_binary(Worker) ->
-    binary_to_existing_atom(Worker, utf8).
+-spec worker_of(map()) -> {ok, module()} | {error, {unknown_worker, binary()}}.
+worker_of(#{worker := Worker}) when is_atom(Worker) ->
+    runnable(Worker);
+worker_of(#{worker := Name}) when is_binary(Name) ->
+    try binary_to_existing_atom(Name, utf8) of
+        Worker -> runnable(Worker)
+    catch
+        error:badarg -> {error, {unknown_worker, Name}}
+    end.
+
+runnable(Worker) ->
+    _ = code:ensure_loaded(Worker),
+    case erlang:function_exported(Worker, perform, 1) of
+        true -> {ok, Worker};
+        false -> {error, {unknown_worker, atom_to_binary(Worker)}}
+    end.
 
 resolve_args(#{args := Args}) when is_map(Args) ->
     Args;

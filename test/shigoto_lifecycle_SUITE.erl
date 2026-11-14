@@ -35,6 +35,8 @@ the application does with it.
     a_burst_of_notifications_leaves_one_poll_timer/1,
     the_pruner_archives_old_finished_jobs/1,
     every_fanout_consumer_runs_a_job/1,
+    an_unknown_worker_fails_the_job_not_the_queue/1,
+    a_module_that_is_not_a_worker_fails_the_job/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_cancelled_batch_job_still_finishes_the_batch/1,
     a_child_runs_after_its_parent_with_the_result/1,
@@ -80,6 +82,8 @@ all() ->
         a_burst_of_notifications_leaves_one_poll_timer,
         the_pruner_archives_old_finished_jobs,
         every_fanout_consumer_runs_a_job,
+        an_unknown_worker_fails_the_job_not_the_queue,
+        a_module_that_is_not_a_worker_fails_the_job,
         a_batch_callback_runs_after_its_jobs,
         a_cancelled_batch_job_still_finishes_the_batch,
         a_child_runs_after_its_parent_with_the_result,
@@ -460,6 +464,31 @@ every_fanout_consumer_runs_a_job(_Config) ->
     end.
 
 %%----------------------------------------------------------------------
+%% Workers that cannot run
+%%----------------------------------------------------------------------
+
+an_unknown_worker_fails_the_job_not_the_queue(_Config) ->
+    Queue = queue_pid(),
+    Id = insert_row(~"shigoto_no_such_worker_module", ~"{}", 2),
+    Failed = await(Id, ~"retryable"),
+    ?assertMatch(
+        [#{~"error" := ~"unknown_worker:<<\"shigoto_no_such_worker_module\">>"}], errors(Failed)
+    ),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch(#{attempt := 2}, Row),
+    ?assertMatch([_, _], errors(Row)),
+    ?assertEqual(Queue, queue_pid()),
+    Next = enqueue(~"after-unknown"),
+    instruct(performing(~"after-unknown"), {return, ok}),
+    _ = await(Next, ~"completed").
+
+a_module_that_is_not_a_worker_fails_the_job(_Config) ->
+    Id = insert_row(~"lists", ~"{\"ssn\": \"191212121212\"}", 1),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch([#{~"error" := ~"unknown_worker:<<\"lists\">>"}], errors(Row)),
+    ?assertEqual(nomatch, binary:match(maps:get(errors, Row), ~"191212121212")).
+
+%%----------------------------------------------------------------------
 %% Batches and dependencies
 %%----------------------------------------------------------------------
 
@@ -543,6 +572,17 @@ enqueue(Tag, Extra) ->
         args => #{~"test" => list_to_binary(pid_to_list(self())), ~"tag" => Tag}
     },
     {ok, #{id := Id}} = shigoto:insert(Params),
+    Id.
+
+insert_row(Worker, Args, MaxAttempts) ->
+    #{rows := [#{id := Id}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, max_attempts)
+        VALUES ($1, $2, $3::jsonb, $4) RETURNING id
+        """,
+        [?QUEUE, Worker, Args, MaxAttempts]
+    ),
     Id.
 
 new_batch() ->
