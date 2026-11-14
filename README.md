@@ -32,11 +32,12 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 - **Load shedding** — CoDel-based system-level protection, shedding low-priority jobs first.
 
 ### Operations
-- **Encryption** — AES-256-GCM encryption for job args at rest with key rotation support.
+- **Encryption** — AES-256-GCM for job `args`, `meta` and cron args at rest, plus results and batch callback args with `encryption_write_format` `v2`. Key rotation, `shigoto:reencrypt/0`. `errors`, `worker`, `queue` and `tags` are not encrypted; see [Encryption](guides/encryption.md).
+- **Hardened against the database** — the worker a row names is checked (optionally against an allow-list) before anything is decrypted or called, failures are recorded without job data, and no advisory lock is waited for without a bound. See [Security](guides/security.md).
 - **Middleware** — Composable before/after hooks for logging, metrics, authorization.
 - **Telemetry** — 16+ telemetry events covering job lifecycle, queue operations, resilience, batches, and cron.
 - **Health check** — `shigoto:health/0` reports pool status, job counts, stale jobs, and queue health.
-- **Bulk operations** — `insert_all/1`, `cancel_by/2`, `retry_by/2` for batch operations.
+- **Bulk operations** — `insert_all/1,2`, `cancel_by/2`, `retry_by/2` for batch operations.
 - **Auto-archival** — Old jobs archived to `shigoto_jobs_archive` table, then pruned.
 - **Dashboard** — [shigoto_board](https://github.com/Taure/shigoto_board) provides a real-time web dashboard.
 
@@ -223,6 +224,13 @@ All optional except `perform/1`:
 | `middleware` | `[]` | Global middleware chain |
 | `encryption_key` | — | 32-byte AES-256-GCM key |
 | `encryption_keys` | `[]` | Ordered key list for rotation (newest first) |
+| `encryption_write_format` | `v1` | Frame written: `v1` (what 1.10 reads) or `v2` (bound to column and worker; also covers results and batch callback args) |
+| `encryption_read_formats` | `[v1, v2]` | Frames that are opened |
+| `require_encrypted` | `false` | Refuse to run a job with plaintext args or meta when a key is configured |
+| `workers` | `undefined` | Modules allowed to run as workers; `undefined` allows any module exporting `perform/1` |
+| `instance` | `undefined` | Name of this installation, giving it its own advisory locks and NOTIFY channel |
+| `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock before giving up |
+| `notify_min_interval` | `10` | Minimum milliseconds between notification-driven polls of one queue |
 | `heartbeat_interval` | `30000` | Milliseconds between heartbeats for executing jobs; a job is stale after twice this without one |
 | `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
 | `on_dependency_failure` | `run` | What a waiting job does when a dependency is discarded or cancelled, unless the job sets it: `run`, `cancel` or `discard` |
@@ -257,6 +265,7 @@ shigoto_sup (one_for_one)
 - [Resilience](guides/resilience.md)
 - [Job Dependencies](guides/dependencies.md)
 - [Encryption](guides/encryption.md)
+- [Security](guides/security.md)
 - [Testing](guides/testing.md)
 
 ## Ecosystem

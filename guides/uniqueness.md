@@ -66,12 +66,14 @@ of `{ok, Job}`, so callers can tell a deduplicated enqueue from a fresh one.
 and no `unique/0` callback) it goes straight to `do_insert/4` - a plain insert
 with no deduplication. Otherwise it calls `insert_unique/4`, which:
 
-1. Builds the `unique_key` with `build_unique_key/4`.
-2. Derives a lock key with `erlang:phash2(UniqueKey)`.
+1. Builds the `unique_key` with `build_unique_key/4`. With encryption keys
+   configured there is one per key, the current key's first, so a job stored
+   before a key rotation is still found.
+2. Derives a lock key with `erlang:phash2/1` from each.
 3. Opens a `shigoto_db:transaction/2` (or joins the one already open) and takes a **Postgres advisory transaction
-   lock**: `SELECT pg_advisory_xact_lock($1)`. This serialises concurrent
-   inserts that hash to the same key; the lock is released automatically when
-   the transaction commits or rolls back.
+   lock** per key with `pg_try_advisory_xact_lock`, in one statement. This
+   serialises concurrent inserts that hash to the same key; the lock is
+   released automatically when the transaction commits or rolls back.
 4. Calls `find_existing_job/3` to look for a matching job within the configured
    `states` (and `period`, if set).
 5. If one exists, `maybe_replace/4` applies the `replace`/`debounce` policy and
@@ -100,3 +102,26 @@ and both inserting, while leaving the actual "is this a duplicate?" decision to 
 normal scoped query that respects states and period. It locks a hash of the key
 rather than a real row, so it costs nothing when there is no contention and never
 leaves a constraint behind that would wrongly block a legitimate future job.
+
+## When the Lock Is Held
+
+Advisory locks are shared by everything that can connect to the database, so
+the lock for a key can be held by a session that is not shigoto. The insert
+waits for it for at most `advisory_lock_timeout` (default 5000 ms) and then
+answers `{error, {lock_timeout, unique}}` with nothing inserted. Treat it like
+any other failed insert: retry, or surface it. See [Security](security.md).
+
+## Opting Out and Bulk Inserts
+
+`#{unique => false}` in the options of `insert/2` skips the worker's `unique/0`
+for that insert.
+
+`insert_all/1,2` never deduplicates. Rather than insert duplicates silently it
+answers `{error, {insert_all_unsupported, unique, Workers}}` when a job in the
+list is unique; pass `#{unique => false}` to say that is what you want.
+
+## Replacing Args
+
+With `replace => [args]`, the new args are stored on the existing row and are
+encrypted for that row's worker. When `keys` leaves out `worker`, two workers
+can conflict: the existing job keeps its worker and runs with the new args.

@@ -62,6 +62,12 @@ about the jobs inserted so far. **Insert a batch's jobs together**, with
 statement at a time, the first job can finish while it is still the only one in
 the batch, and the callback fires before the rest exist.
 
+With `encryption_write_format` `v2`, `callback_args` are encrypted like job
+args. The callback worker is checked like any worker before the callback is
+inserted: a batch row naming a module that is not a worker gets no callback,
+logs `shigoto_batch_callback_unrunnable`, and does not affect the outcome of
+the job that finished the batch.
+
 ## Batch States
 
 | State | Description |

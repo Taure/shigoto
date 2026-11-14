@@ -102,7 +102,9 @@ shigoto_sup (one_for_one)
   calling process (and opens `shigoto:transaction/1` through kura), so enqueue
   is transactional with the caller's kura writes. kura_postgres is an optional
   runtime integration, not a dependency. An `AFTER INSERT` trigger emits
-  `NOTIFY shigoto_jobs_insert`.
+  `NOTIFY shigoto_jobs_insert` (`shigoto_jobs_insert_<instance>` with
+  `instance` set; `shigoto_migration:up/1` replaces the trigger function when
+  the configured channel differs).
 - **Dequeue.** Each `shigoto_queue` polls every `poll_interval`, claims up to
   `concurrency - active` jobs via `FOR UPDATE SKIP LOCKED` (the locking select
   runs once as `id = ANY(ARRAY(SELECT ... LIMIT n FOR UPDATE SKIP LOCKED))`;
@@ -124,8 +126,10 @@ shigoto_sup (one_for_one)
   finding the claim gone); the supervisor's shutdown does the same. A stopped
   run writes nothing. Fanout jobs run unclaimed and never write to their row.
 - **Notify + polling fallback.** `shigoto_notifier` LISTENs via a
-  minato listener, pokes the matching queue to `poll` immediately, and
-  reconnects on drop; the timed poll loop always runs underneath it.
+  minato listener, pokes the matching queue to `poll`, and reconnects on drop;
+  the timed poll loop always runs underneath it. A payload only names a queue;
+  unknown names are dropped and a queue is poked at most once per
+  `notify_min_interval`, since anyone who can connect can `NOTIFY`.
 - **Batches.** `shigoto_batch` groups jobs, tracks completed/discarded counts
   transactionally, and runs a callback worker on completion.
 - **Cron.** `shigoto_cron` runs each pass in a transaction that takes
@@ -151,6 +155,25 @@ shigoto_sup (one_for_one)
   a run whose job was rescued and claimed again writes nothing.
 - **Resilience** (via seki): per-worker rate limit, circuit breaker, local +
   global (Postgres advisory) bulkhead concurrency, and CoDel load shedding.
+  `shigoto_resilience:admit/2` runs the gates; a gate that raises or cannot
+  take its lock snoozes the job. No gate fails open.
+- **Rows are untrusted.** A row is data that anyone with write access to the
+  table could have put there. `shigoto_job:worker/1` checks the worker name
+  (existing atom, `workers` allow-list, exports `perform/1`) before
+  `shigoto_job:opened/1` decrypts anything; never call into a module named by
+  a row, or decrypt a column, any other way. Rows travel still encrypted
+  (queue, executor state, telemetry); only the run sees plaintext. A job map
+  goes into a log or error term through `shigoto_job:redact/1`, a failure
+  reason through `shigoto_error`.
+- **Encryption.** `shigoto_crypto:seal/2` and `open/2` take the context a value
+  belongs to (`{args | meta | cron_args | callback_args, Worker}` or
+  `{result, JobId}`). v2 frames are bound to it; v1 frames (the default write
+  format, for 1.10 nodes in a rolling deploy) are not. A value that does not
+  open is an error, never passed on. `shigoto_reencrypt` rewrites stored
+  values in the current format.
+- **Advisory locks.** Every lock goes through `shigoto_lock`, which only uses
+  `pg_try_advisory_xact_lock` with a bounded retry. Never add a blocking
+  `pg_advisory_xact_lock`: any database role can hold any key forever.
 
 ## Gotchas
 

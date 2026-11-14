@@ -56,6 +56,11 @@ discarded when that was its last attempt (a `discarded` event follows).
 error log. The row stays `executing` until the stale-job rescue returns it to
 the queue, so the job runs again.
 
+The `reason` of `failed` is text. With an encryption key configured it is the
+shape of the failure with every value removed, as in the `errors` column (see
+[Security](security.md#what-is-recorded-about-a-failure)); it is at most 1024
+bytes either way.
+
 ### Queue Events
 
 | Event | Measurements | Metadata |
@@ -78,6 +83,13 @@ normal boot a bad queue config fails the application start instead.
 | `[shigoto, resilience, circuit_open]` | `count` | worker |
 | `[shigoto, resilience, bulkhead_full]` | `count` | worker |
 | `[shigoto, resilience, load_shed]` | `count` | priority |
+| `[shigoto, resilience, gate_failed]` | `count` | worker, gate, reason |
+
+`gate_failed` fires when a check could not be made: `gate` is `setup`, `load`,
+`rate_limit`, `global_concurrency`, `bulkhead` or `circuit`. The job is snoozed
+for 5 seconds rather than run unchecked, and `shigoto_resilience_gate_failed`
+is logged. For `global_concurrency` the usual reason is `lock_timeout`: another
+session holds the worker's advisory lock.
 
 ### Batch Events
 

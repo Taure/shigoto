@@ -120,12 +120,20 @@ The full resilience pipeline for each job:
 ```
 1. Load shedding check (system-level)
 2. Rate limit check (per-worker)
-3. Bulkhead check (per-worker concurrency)
-4. Circuit breaker check (per-worker health)
-5. Global middleware chain
-6. Worker middleware chain
-7. Worker:perform/1
+3. Global concurrency check (per-worker, across nodes)
+4. Bulkhead check (per-worker concurrency)
+5. Circuit breaker check (per-worker health)
+6. Global middleware chain
+7. Worker middleware chain
+8. Worker:perform/1
 ```
 
 Any check that fails results in a **snooze** — the job is rescheduled without
 counting as a failure attempt.
+
+A check that cannot be made is treated as a check that failed. If a gate
+raises, or the global concurrency check cannot take its advisory lock within
+`advisory_lock_timeout`, the job is snoozed for 5 seconds,
+`shigoto_resilience_gate_failed` is logged and
+`[shigoto, resilience, gate_failed]` is emitted with the `gate` and a `reason`.
+No gate admits a job it could not check.

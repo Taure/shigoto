@@ -70,7 +70,8 @@ config :shigoto,
 | `shutdown_timeout` | `15000` | Milliseconds to wait for in-flight jobs during shutdown |
 | `cron` | `[]` | Cron entries (see the [Cron](cron.md) guide) |
 | `middleware` | `[]` | Global middleware chain (see [Middleware](middleware.md)) |
-| `encryption_key` | `undefined` | 32-byte AES-256-GCM key for encrypting job args |
+| `encryption_key` | `undefined` | 32-byte AES-256-GCM key (see [Encryption](encryption.md)) |
+| `workers` | `undefined` | Modules allowed to run as workers (see [Security](security.md)) |
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
 | `rescue_interval` | `60000` | Milliseconds between sweeps that rescue stale jobs |
 | `on_dependency_failure` | `run` | What a waiting job does when a dependency fails, unless the job sets it (see [Dependencies](dependencies.md)) |
@@ -218,6 +219,13 @@ shigoto:insert_all([
   %{worker: MyWorker, args: %{"id" => 3}}
 ])
 ```
+
+`insert_all/1,2` does not deduplicate. Given a job whose worker defines
+`unique/0`, or `unique` in its options, it answers
+`{error, {insert_all_unsupported, unique, Workers}}` and inserts nothing. Use
+`insert/1,2` for unique jobs, or pass `#{unique => false}` to insert the list
+as it is. A `depends_on` that names a job that does not exist answers
+`{error, {missing_dependencies, Ids}}`.
 
 ## Transactional Enqueue
 
