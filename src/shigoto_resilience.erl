@@ -34,8 +34,12 @@ seki primitive is missing, a worker callback raised, the database refused the
 global concurrency count or its advisory lock stayed taken, does not admit the
 job: the job is snoozed for 5 seconds, `shigoto_resilience_gate_failed` is
 logged and `[shigoto, resilience, gate_failed]` is emitted. A snooze is not an
-attempt, so a job behind a gate that stays broken waits rather than being
-discarded; alert on the event.
+attempt, and the job's `errors` gain a `gate_failed` entry marked `snoozed`.
+
+That does not go on for ever. After `unrunnable_snooze_limit` such snoozes in a
+row (20 by default) the next gate failure fails the attempt, with
+`{gate_failed, Gate, Reason}` as its error, and the job is retried and in the
+end discarded like any other. Alert on the event.
 
 seki is one of shigoto's applications and runs whenever shigoto does. A job
 can still meet a node without it: seki stopped on its own, or a queue drained
@@ -63,15 +67,16 @@ ungated: its jobs are snoozed like any other gate failure, with the reason
 
 -define(INIT_TABLE, shigoto_resilience_init).
 -define(GLOBAL_CONCURRENCY_SNOOZE, 5).
--define(GATE_FAILED_SNOOZE, 5).
 
 -doc false.
 %% Ask every gate whether `Worker` may run `Job` now.
 %%
 %% `{snooze, Seconds}` means the job has to be put back for that long;
 %% `{snoozed, Seconds}` that the gate already did so (the global concurrency
-%% check, inside its own transaction).
--spec admit(module(), map()) -> ok | {snooze, pos_integer()} | {snoozed, pos_integer()}.
+%% check, inside its own transaction); `{gate_failed, Gate, Reason}` that
+%% `Gate` gave no answer.
+-spec admit(module(), map()) ->
+    ok | {snooze, pos_integer()} | {snoozed, pos_integer()} | {gate_failed, atom(), term()}.
 admit(Worker, Job) ->
     %% Load shedding is asked last. Its admission is a count that only the
     %% end of the run gives back, so no gate may refuse the job after it.
@@ -114,17 +119,17 @@ checked(bulkhead, Worker, Job) ->
 checked(circuit, Worker, Job) ->
     check_circuit(Worker, Job).
 
--spec gate_failed(atom(), module(), term()) -> {snooze, pos_integer()}.
+-spec gate_failed(atom(), module(), term()) -> {gate_failed, atom(), term()}.
 gate_failed(Gate, Worker, Reason) ->
     ?LOG_WARNING(#{
         msg => ~"shigoto_resilience_gate_failed",
         gate => Gate,
         worker => Worker,
         reason => Reason,
-        action => ~"the job is snoozed; a gate that cannot answer does not admit"
+        action => ~"the job is not run; a gate that cannot answer does not admit"
     }),
     shigoto_telemetry:resilience_gate_failed(Worker, Gate, Reason),
-    {snooze, ?GATE_FAILED_SNOOZE}.
+    {gate_failed, Gate, Reason}.
 
 -doc false.
 %% Create the table that remembers which workers have their seki primitives. The

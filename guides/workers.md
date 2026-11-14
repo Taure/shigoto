@@ -185,14 +185,23 @@ belongs in a job.
 
 ## A Job Whose Worker Is Missing
 
-A job row names its worker module. When the node that claims it cannot run that
-module (it is not loaded there, or it has no `perform/1`), the attempt fails
-with `unknown_worker` and the job follows the normal path: it is retried with
-the default backoff and discarded at `max_attempts`. During a rolling deploy
-that gives a node on the new release the chance to claim a job whose worker the
-old release does not have. A worker that was renamed or removed with jobs still
-queued ends up discarded, with the reason in its `errors`. The node logs
-`shigoto_job_unknown_worker` each time.
+A job row names its worker module. A node that claims it and cannot run that
+module (it is not loaded there, it has no `perform/1`, or it is not in
+`workers`) puts the job back for 30 seconds without using an attempt: during a
+rolling deploy a node on the new release then gets to claim a job whose worker
+the old release does not have. The job's `errors` gain an `unknown_worker`
+entry marked `snoozed`, and the node logs `shigoto_job_unknown_worker`.
+
+After `unrunnable_snooze_limit` of those in a row (20 by default, 10 minutes)
+the next one fails the attempt with `unknown_worker`, and the job follows the
+normal path: retried with the default backoff, discarded at `max_attempts`. A
+worker that was renamed or removed with jobs still queued ends up discarded
+that way. Set `unrunnable_snooze_limit` to `0` to fail the attempt at once.
+
+Every node that serves a queue should run every worker of that queue. Two sets
+of nodes with different workers on one queue keep handing each other's jobs
+back, 30 seconds at a time, and discard them when the wrong set claims a job
+too often in a row. Give each set its own queue.
 
 ## Snoozing Jobs
 

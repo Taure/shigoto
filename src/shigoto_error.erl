@@ -20,7 +20,7 @@
 %% - Either way the reason is cut at 1024 bytes, the stack at 16 frames and 4096
 %%   bytes, and a job keeps its 50 newest entries.
 
--export([entry/2, text/1, shape/1, stack/1, appended/2]).
+-export([entry/2, put_back/3, put_backs/1, text/1, shape/1, stack/1, appended/2]).
 
 -define(MAX_REASON_BYTES, 1024).
 -define(MAX_STACK_BYTES, 4096).
@@ -67,6 +67,38 @@ entry(Job, Reason) ->
         <<>> -> Entry;
         _ -> Entry#{~"stacktrace" => Stack}
     end.
+
+%% The entry for a job put back, for `Seconds`, because this node could not
+%% run it: `entry/2` with `snoozed`, which is what tells it from a failure.
+-spec put_back(map(), term(), pos_integer()) -> #{binary() => binary() | integer()}.
+put_back(Job, Reason, Seconds) ->
+    (entry(Job, Reason))#{~"snoozed" => Seconds}.
+
+%% How many times in a row the job was put back: the `put_back/3` entries
+%% since its last failure.
+-spec put_backs(map()) -> non_neg_integer().
+put_backs(#{errors := Errors}) ->
+    newest_put_backs(lists:reverse(entries(Errors)), 0);
+put_backs(_Job) ->
+    0.
+
+-spec entries(term()) -> list().
+entries(Errors) when is_list(Errors) ->
+    Errors;
+entries(Errors) when is_binary(Errors) ->
+    try json:decode(Errors) of
+        Entries when is_list(Entries) -> Entries;
+        _NotAList -> []
+    catch
+        error:_ -> []
+    end;
+entries(_Errors) ->
+    [].
+
+newest_put_backs([#{~"snoozed" := _Seconds} | Older], Count) ->
+    newest_put_backs(Older, Count + 1);
+newest_put_backs(_Entries, Count) ->
+    Count.
 
 -doc "A failure reason as text for a log report or telemetry metadata.".
 -spec text(term()) -> binary().

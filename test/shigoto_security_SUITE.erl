@@ -28,6 +28,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     args_moved_to_a_module_that_is_no_worker_are_not_decrypted/1,
     args_moved_to_another_column_are_not_decrypted/1,
     a_worker_outside_the_allow_list_is_never_called/1,
+    a_job_put_back_for_its_worker_is_not_decrypted/1,
     a_frame_that_does_not_open_fails_the_job/1,
     a_plaintext_job_is_refused_when_encryption_is_required/1,
     a_v1_frame_is_refused_once_only_v2_is_read/1,
@@ -76,6 +77,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     encryption_read_formats,
     require_encrypted,
     workers,
+    unrunnable_snooze_limit,
     instance,
     advisory_lock_timeout,
     notify_min_interval
@@ -96,6 +98,7 @@ cases() ->
         args_moved_to_a_module_that_is_no_worker_are_not_decrypted,
         args_moved_to_another_column_are_not_decrypted,
         a_worker_outside_the_allow_list_is_never_called,
+        a_job_put_back_for_its_worker_is_not_decrypted,
         a_frame_that_does_not_open_fails_the_job,
         a_plaintext_job_is_refused_when_encryption_is_required,
         a_v1_frame_is_refused_once_only_v2_is_read,
@@ -207,6 +210,10 @@ env(TestCase, Format) ->
     ).
 
 overrides(a_worker_outside_the_allow_list_is_never_called) ->
+    #{workers => [shigoto_canary_worker], unrunnable_snooze_limit => 0};
+overrides(args_moved_to_a_module_that_is_no_worker_are_not_decrypted) ->
+    #{unrunnable_snooze_limit => 0};
+overrides(a_job_put_back_for_its_worker_is_not_decrypted) ->
     #{workers => [shigoto_canary_worker]};
 overrides(a_plaintext_job_is_refused_when_encryption_is_required) ->
     #{require_encrypted => true};
@@ -277,6 +284,18 @@ a_worker_outside_the_allow_list_is_never_called(_Config) ->
     Allowed = enqueue(~"ok", Canary),
     _ = performed(),
     _ = await(Allowed, ~"completed").
+
+a_job_put_back_for_its_worker_is_not_decrypted(_Config) ->
+    Canary = canary(),
+    {ok, #{id := Id}} = shigoto:insert(#{
+        worker => shigoto_canary_other_worker, args => #{~"canary" => Canary}
+    }),
+    ok = wait_for(fun() -> errors(row(Id)) =/= [] end),
+    Row = row(Id),
+    ?assertMatch(#{state := ~"available", attempt := 1}, Row),
+    ?assertMatch([#{~"error" := <<"{unknown_worker,", _/binary>>, ~"snoozed" := 30}], errors(Row)),
+    ok = not_performed(shigoto_canary_other_worker),
+    ok = no_canary(Canary, [Row | captured()]).
 
 %%----------------------------------------------------------------------
 %% What is not a valid ciphertext
@@ -887,8 +906,11 @@ a_held_concurrency_lock_snoozes_the_job(_Config) ->
         )
     end),
     %% Snoozed, not run and not failed.
-    ?assertMatch(#{errors := ~"[]"}, row(Id)),
-    ?assertNotEqual(~"completed", maps:get(state, row(Id))),
+    ok = wait_for(fun() -> maps:get(state, row(Id)) =:= ~"available" end),
+    ?assertMatch(
+        [#{~"error" := <<"{gate_failed,global_concurrency,", _/binary>>, ~"snoozed" := 5}],
+        errors(row(Id))
+    ),
     ok = release(Holder),
     ok = due(Id),
     _ = await(Id, ~"completed").

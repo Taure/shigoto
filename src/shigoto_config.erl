@@ -17,6 +17,7 @@ Configuration access for Shigoto. Reads from application env.
     shutdown_timeout/0,
     shutdown_budget/0,
     on_discard_timeout/0,
+    unrunnable_snooze_limit/0,
     notifier_config/0,
     middleware/0,
     encryption_key/0,
@@ -183,6 +184,20 @@ queue nor the caller that discarded the job.
 -spec on_discard_timeout() -> pos_integer().
 on_discard_timeout() ->
     positive_setting(on_discard_timeout, 60000).
+
+-doc """
+How many times in a row a job is put back by a node that cannot run it,
+without using an attempt, before that fails the attempt instead. Default: 20,
+at most 50. A node cannot run a job whose worker it does not know (30 seconds
+each time) or whose resilience gate does not answer (5 seconds each time).
+With 0 both fail the attempt at once.
+""".
+-spec unrunnable_snooze_limit() -> 0..50.
+unrunnable_snooze_limit() ->
+    case setting(unrunnable_snooze_limit, 20) of
+        Value when is_integer(Value), Value >= 0, Value =< 50 -> Value;
+        Other -> error({shigoto_config, {invalid, unrunnable_snooze_limit, Other}})
+    end.
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].
@@ -429,6 +444,7 @@ check() ->
         _ = rescue_interval(),
         _ = shutdown_timeout(),
         _ = on_discard_timeout(),
+        _ = unrunnable_snooze_limit(),
         _ = prune_after_days(),
         _ = archive_after_days(),
         _ = on_dependency_failure(),

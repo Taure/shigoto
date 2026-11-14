@@ -233,6 +233,7 @@ All optional except `perform/1`:
 | `notify_min_interval` | `10` | Minimum milliseconds between notification-driven polls of one queue |
 | `heartbeat_interval` | `30000` | Milliseconds between heartbeats for executing jobs; a job is stale after twice this without one |
 | `rescue_interval` | `60000` | Milliseconds between a node's sweeps that rescue stale jobs |
+| `unrunnable_snooze_limit` | `20` | Times in a row a job is put back by a node that cannot run it before that fails the attempt |
 | `on_dependency_failure` | `run` | What a waiting job does when a dependency is discarded or cancelled, unless the job sets it: `run`, `cancel` or `discard` |
 | `load_shedding` | — | CoDel config map for seki |
 | `queue_weights` | `#{}` | Weighted polling distribution |

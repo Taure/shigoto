@@ -37,11 +37,24 @@ stale-job rescue returns it to the queue.
 
 The job is held as it was claimed, with its encrypted columns still encrypted.
 The worker the row names is checked, and only then are they decrypted, for the
-run alone: a row naming a module that is not a worker, or whose
-args do not open, fails the attempt (`unknown_worker`, `decrypt_failed`,
+run alone: a row whose args do not open fails the attempt (`decrypt_failed`,
 `format_refused`, `plaintext_refused`) without `perform/1` being called. The
 state `sys:get_state/1` and a crash report show is the job without its data
 columns.
+
+## A job this node cannot run
+
+A row naming a module that is not a worker on this node (`unknown_worker`) may
+name one that another node has: a release is being rolled out, or the nodes
+have different `workers` lists. A job whose resilience gate gives no answer
+(see `m:shigoto_resilience`) may be admitted elsewhere, or later. Neither is
+the job's fault, so neither uses an attempt: the job is put back, for 30
+seconds for an unknown worker and 5 for a gate, and its `errors` gain an entry
+with the reason and `snoozed`.
+
+After `unrunnable_snooze_limit` of those in a row (20 by default) the next one
+fails the attempt instead, and the job is retried and then discarded like any
+other. A job from a fanout queue is never put back: its row is not written.
 """.
 -behaviour(gen_server).
 
@@ -49,6 +62,9 @@ columns.
 
 -export([start_link/3, start_link/4, execute_sync/3, run_perform/4, running/1, stop/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, format_status/1]).
+
+-define(GATE_FAILED_SNOOZE, 5).
+-define(UNKNOWN_WORKER_SNOOZE, 30).
 
 -record(state, {
     job :: map(),
@@ -72,6 +88,7 @@ or `fanout`, where every node runs it and none owns the row.
     {completed, term()}
     | {snooze, pos_integer()}
     | {snoozed, pos_integer()}
+    | {put_back, Reason :: term(), Seconds :: pos_integer()}
     | {failed, Stored :: term(), Reported :: term()}
     | {stopped, cancelled | lost | {shutdown, term()}}.
 
@@ -192,23 +209,52 @@ executed(Job, Pool, Timeout, Run) ->
 
 %% The job cannot be run here: it names a module that is not a worker on this
 %% node, or its encrypted columns do not open. Nothing was decrypted and
-%% nothing in the named module was called. It fails like any other attempt, so
-%% it is retried (a node on a newer release may have the worker, or the key)
-%% and then discarded, instead of crashing the executor and leaving the row to
-%% be rescued over and over.
+%% nothing in the named module was called. Columns that do not open fail the
+%% attempt, so the job is retried and then discarded, instead of crashing the
+%% executor and leaving the row to be rescued over and over. So does an
+%% unknown worker in the end, once the job has been put back for it often
+%% enough for a node that has the worker to have taken it.
 unrunnable(Reason, Job, Pool, Run) ->
-    ?LOG_ERROR(#{
+    Outcome = unrunnable_outcome(Reason, Job, Run),
+    ok = unrunnable_logged(Outcome, Reason, Job),
+    concluded(Run, Outcome, Job, Pool, undefined, 0).
+
+-spec unrunnable_outcome(term(), map(), run()) -> outcome().
+unrunnable_outcome({unknown_worker, _Name} = Reason, Job, Run) when Run =/= fanout ->
+    within_limit({put_back, Reason, ?UNKNOWN_WORKER_SNOOZE}, Job);
+unrunnable_outcome(Reason, _Job, _Run) ->
+    {failed, Reason, Reason}.
+
+unrunnable_logged({put_back, _Reason, Seconds}, Reason, Job) ->
+    ?LOG_WARNING((unrunnable_report(Reason, Job))#{
+        action => ~"the job is put back without using an attempt", snoozed => Seconds
+    });
+unrunnable_logged(_Failed, Reason, Job) ->
+    ?LOG_ERROR(unrunnable_report(Reason, Job)).
+
+unrunnable_report(Reason, Job) ->
+    #{
         msg => unrunnable_message(Reason),
         reason => shigoto_error:text(Reason),
         job_id => maps:get(id, Job, undefined),
         worker => maps:get(worker, Job, undefined),
         queue => maps:get(queue, Job, undefined),
         attempt => maps:get(attempt, Job, undefined)
-    }),
-    concluded(Run, {failed, Reason, Reason}, Job, Pool, undefined, 0).
+    }.
 
 unrunnable_message({unknown_worker, _Name}) -> ~"shigoto_job_unknown_worker";
 unrunnable_message(_Unreadable) -> ~"shigoto_job_unreadable".
+
+%% A job is put back at most `unrunnable_snooze_limit` times in a row. The
+%% next time is a failed attempt, which is what ends a job nothing can run.
+-spec within_limit(outcome(), map()) -> outcome().
+within_limit({put_back, Reason, _Seconds} = PutBack, Job) ->
+    case shigoto_error:put_backs(Job) < shigoto_config:unrunnable_snooze_limit() of
+        true -> PutBack;
+        false -> {failed, Reason, Reason}
+    end;
+within_limit(Outcome, _Job) ->
+    Outcome.
 
 %% `Job` is the row as it was claimed and is what every write and event is
 %% made with. `Opened` is its decrypted form, used for the run and nothing else.
@@ -219,11 +265,13 @@ performed_by(Worker, Job, Opened, Pool, Timeout, Run) ->
     _ = shigoto_telemetry:job_start(Job, Carrier),
     T0 = erlang:monotonic_time(native),
     try
-        Outcome = outcome(Opened, Worker, Timeout, caller(Run)),
+        Ran = outcome(Opened, Worker, Timeout, caller(Run)),
+        Outcome = limited(Ran, Job, Run),
         Duration = erlang:monotonic_time(native) - T0,
         _ = run_over(Outcome, Job, Carrier, Duration),
         Answer = concluded(Run, Outcome, Job, Pool, Worker, Duration),
-        ok = gates_told(Outcome, Worker, Run),
+        %% `Ran`: a job failed for a gate that gave no answer did not run.
+        ok = gates_told(Ran, Worker, Run),
         Answer
     after
         shigoto_resilience:release_bulkhead(Worker),
@@ -266,6 +314,11 @@ registered_process(Name) ->
         _ -> undefined
     end.
 
+%% A fanout run writes nothing to its row, so there is nothing to count.
+-spec limited(outcome(), map(), run()) -> outcome().
+limited(Outcome, _Job, fanout) -> Outcome;
+limited(Outcome, Job, _Run) -> within_limit(Outcome, Job).
+
 -spec outcome(map(), module(), timeout() | worker_timeout, caller()) -> outcome().
 outcome(Job, Worker, Timeout, Caller) ->
     try
@@ -276,6 +329,7 @@ outcome(Job, Worker, Timeout, Caller) ->
         )
     catch
         throw:{?MODULE, stopped, Why} -> {stopped, Why};
+        throw:{?MODULE, gate_failed, Failed} -> {put_back, Failed, ?GATE_FAILED_SNOOZE};
         Class:Reason:Stack -> {failed, {Class, Reason, Stack}, {Class, Reason}}
     end.
 
@@ -340,6 +394,9 @@ announced({snooze, Seconds}, Job, _Duration) ->
     {snooze, Seconds};
 announced({snoozed, Seconds}, Job, _Duration) ->
     _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
+    {snooze, Seconds};
+announced({put_back, Reason, Seconds}, Job, _Duration) ->
+    _ = shigoto_telemetry:job_snoozed(Job, snooze_reason(Reason)),
     {snooze, Seconds}.
 
 -spec recorded(outcome(), map(), atom(), module() | undefined, integer()) ->
@@ -363,6 +420,14 @@ recorded({snooze, Seconds}, Job, Pool, _Worker, _Duration) ->
 recorded({snoozed, Seconds}, Job, _Pool, _Worker, _Duration) ->
     _ = shigoto_telemetry:job_snoozed(Job, ~"snooze"),
     {snooze, Seconds};
+recorded({put_back, Reason, Seconds}, Job, Pool, _Worker, _Duration) ->
+    case shigoto_repo:put_back_job(Pool, Job, Seconds, Reason) of
+        ok ->
+            _ = shigoto_telemetry:job_snoozed(Job, snooze_reason(Reason)),
+            {snooze, Seconds};
+        {error, Why} ->
+            unrecorded(snoozed, Job, Why)
+    end;
 recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
     Backoff = compute_backoff(Worker, Job, Stored),
     case shigoto_repo:fail_job(Pool, Job, Stored, Backoff) of
@@ -373,6 +438,9 @@ recorded({failed, Stored, Reported}, Job, Pool, Worker, Duration) ->
         {error, Reason} ->
             unrecorded(failed, Job, Reason)
     end.
+
+snooze_reason({gate_failed, _Gate, _Reason}) -> ~"gate_failed";
+snooze_reason({unknown_worker, _Name}) -> ~"unknown_worker".
 
 %% The circuit breaker hears how the run went, whether or not its outcome
 %% could be written.
@@ -431,6 +499,8 @@ run_with_resilience(Job, Worker, Args, Timeout, Caller) ->
                     Job, milliseconds(erlang:monotonic_time(native) - T0)
                 )
             end;
+        {gate_failed, _Gate, _Reason} = Failed ->
+            throw({?MODULE, gate_failed, Failed});
         Snooze ->
             Snooze
     end.

@@ -624,10 +624,16 @@ test_a_job_naming_no_module_can_be_discarded(_Config) ->
     {ok, [First, _]} = shigoto_repo:claim_jobs(?POOL, ~"default", 10),
     ?assertMatch(#{id := Failing}, First),
     %% There is no on_discard/2 to run, and looking for one must not crash.
-    ?assertEqual(
-        {error, {unknown_worker, ~"shigoto_never_a_module"}},
-        shigoto_executor:execute_sync(First, ?POOL, 5000)
-    ),
+    %% Failed at once: by default the job would be put back first.
+    application:set_env(shigoto, unrunnable_snooze_limit, 0),
+    try
+        ?assertEqual(
+            {error, {unknown_worker, ~"shigoto_never_a_module"}},
+            shigoto_executor:execute_sync(First, ?POOL, 5000)
+        )
+    after
+        application:unset_env(shigoto, unrunnable_snooze_limit)
+    end,
     ?assertMatch({ok, #{state := ~"discarded"}}, shigoto_repo:get_job(?POOL, Failing)),
     ok = last_heard_from(
         Stale,

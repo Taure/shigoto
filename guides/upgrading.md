@@ -61,7 +61,7 @@ The steps for encryption are described in full in
 
 | | 1.10 | Now |
 |---|---|---|
-| A job naming a module that is not a worker | crashed the executor, was rescued, ran again | fails with `{unknown_worker,<<"name">>}`, retried, then discarded |
+| A job naming a module that is not a worker on the node that claims it | crashed the executor, was rescued, ran again | put back for 30 seconds without using an attempt, `unrunnable_snooze_limit` (20) times in a row; then fails with `{unknown_worker,<<"name">>}`, retried, discarded. See [Workers](workers.md#a-job-whose-worker-is-missing) |
 | `perform/1` returning something other than `ok`, `{ok, _}`, `{error, _}`, `{snooze, _}` | crashed the executor | fails the attempt |
 | `errors` with an encryption key | the reason as raised, with its values | the shape of the reason; see [Security](security.md#what-is-recorded-about-a-failure) |
 | A dependency that is discarded or cancelled | its dependents ran; after `cancel_by/1` they waited for ever | each dependent runs, is cancelled or is discarded, by `on_dependency_failure` (default `run`), whichever way the dependency ended |
@@ -69,7 +69,8 @@ The steps for encryption are described in full in
 | Retrying a discarded job of a batch | the batch could finish one job early | the job is counted again when it ends |
 | `shigoto:cancel/1` on a job that cannot be cancelled | `ok`, and a `cancelled` event | `ok`, and no event |
 | `insert_all/1,2` with a unique worker | inserted duplicates | inserts each unique job once, in one transaction; a duplicate is answered as the job already there. Pass `unique => false` to insert duplicates |
-| A worker with `rate_limit/0` or `concurrency/0` when seki is not running | ran ungated | does not run; the job is snoozed |
+| A worker with `rate_limit/0` or `concurrency/0` when seki is not running | ran ungated | does not run; the job is snoozed, and after `unrunnable_snooze_limit` (20) snoozes in a row its attempt fails with `gate_failed` |
+| `errors` of a job that was put back | | has an entry per time, with `snoozed`; an entry without it is a failed attempt |
 | `shigoto_crypto:decrypt/1` of a frame that does not open | answered the ciphertext | raises `{shigoto_crypto, decrypt_failed}` |
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
 

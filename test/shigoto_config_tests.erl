@@ -20,6 +20,7 @@
     rescue_interval,
     shutdown_timeout,
     on_discard_timeout,
+    unrunnable_snooze_limit,
     archive_after_days,
     cron,
     load_shedding,
@@ -152,6 +153,9 @@ every_setting_is_checked_before_anything_starts() ->
         {heartbeat_interval, 0},
         {rescue_interval, -5},
         {on_discard_timeout, 0},
+        {unrunnable_snooze_limit, -1},
+        {unrunnable_snooze_limit, 51},
+        {unrunnable_snooze_limit, infinity},
         {shutdown_timeout, -1},
         {prune_after_days, -1},
         {archive_after_days, soon},
@@ -200,7 +204,13 @@ a_time_that_is_zero_or_negative_is_refused_where_it_is_read() ->
     application:set_env(shigoto, shutdown_timeout, 0),
     ?assertEqual(0, shigoto_config:shutdown_timeout()),
     application:set_env(shigoto, prune_after_days, 0),
-    ?assertEqual(0, shigoto_config:prune_after_days()).
+    ?assertEqual(0, shigoto_config:prune_after_days()),
+    %% So is failing a job at once that this node cannot run.
+    ?assertEqual(20, shigoto_config:unrunnable_snooze_limit()),
+    application:set_env(shigoto, unrunnable_snooze_limit, 0),
+    ?assertEqual(0, shigoto_config:unrunnable_snooze_limit()),
+    application:set_env(shigoto, unrunnable_snooze_limit, 50),
+    ?assertEqual(50, shigoto_config:unrunnable_snooze_limit()).
 
 a_refused_key_is_named_by_its_position() ->
     application:set_env(shigoto, pool, some_pool),

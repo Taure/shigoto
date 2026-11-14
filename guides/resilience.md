@@ -138,6 +138,14 @@ raises, or the global concurrency check cannot take its advisory lock within
 `[shigoto, resilience, gate_failed]` is emitted with the `gate` and a `reason`.
 No gate admits a job it could not check.
 
+Such a snooze is written to the job's `errors`, as an entry with the reason and
+`snoozed`, and it does not go on for ever. After `unrunnable_snooze_limit` of
+them in a row (20 by default, about 100 seconds) the next gate failure fails
+the attempt with `{gate_failed, Gate, Reason}`: the job backs off, is retried,
+and is discarded at `max_attempts` if the gate never answers. A snooze from a
+gate that did answer (rate limit reached, breaker open, bulkhead full, load
+shed) is not counted and has no limit.
+
 That includes seki not running (stopped on its own, or a queue drained with
 `shigoto:drain_queue/1,2` in a node where it was never started): a worker
 that declares `rate_limit/0`, `concurrency/0` or `circuit_breaker/0` is

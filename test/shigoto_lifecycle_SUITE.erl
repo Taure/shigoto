@@ -46,6 +46,9 @@ the application does with it.
     every_fanout_consumer_runs_a_job/1,
     an_unknown_worker_fails_the_job_not_the_queue/1,
     a_module_that_is_not_a_worker_fails_the_job/1,
+    a_worker_unknown_here_is_put_back_before_it_uses_an_attempt/1,
+    a_job_put_back_for_its_worker_runs_once_the_worker_is_known/1,
+    a_gate_that_keeps_failing_fails_the_job_in_the_end/1,
     a_batch_callback_runs_after_its_jobs/1,
     a_cancelled_batch_job_still_finishes_the_batch/1,
     a_retried_job_does_not_finish_its_batch_early/1,
@@ -99,7 +102,9 @@ the application does with it.
     encryption_write_format,
     load_shedding,
     propagator,
-    on_discard_timeout
+    on_discard_timeout,
+    unrunnable_snooze_limit,
+    workers
 ]).
 
 all() ->
@@ -138,6 +143,9 @@ all() ->
         every_fanout_consumer_runs_a_job,
         an_unknown_worker_fails_the_job_not_the_queue,
         a_module_that_is_not_a_worker_fails_the_job,
+        a_worker_unknown_here_is_put_back_before_it_uses_an_attempt,
+        a_job_put_back_for_its_worker_runs_once_the_worker_is_known,
+        a_gate_that_keeps_failing_fails_the_job_in_the_end,
         a_batch_callback_runs_after_its_jobs,
         a_cancelled_batch_job_still_finishes_the_batch,
         a_retried_job_does_not_finish_its_batch_early,
@@ -280,6 +288,18 @@ overrides(a_result_that_looks_like_a_frame_reaches_its_dependent) ->
     #{encryption_key => binary:copy(<<7>>, 32), encryption_write_format => v1};
 overrides(two_sweeps_at_once_follow_a_failed_dependency_once) ->
     #{rescue_interval => 60000};
+overrides(TestCase) when
+    TestCase =:= an_unknown_worker_fails_the_job_not_the_queue;
+    TestCase =:= a_module_that_is_not_a_worker_fails_the_job
+->
+    #{unrunnable_snooze_limit => 0};
+overrides(TestCase) when
+    TestCase =:= a_worker_unknown_here_is_put_back_before_it_uses_an_attempt;
+    TestCase =:= a_gate_that_keeps_failing_fails_the_job_in_the_end
+->
+    #{unrunnable_snooze_limit => 2};
+overrides(a_job_put_back_for_its_worker_runs_once_the_worker_is_known) ->
+    #{workers => [shigoto_lifecycle_worker]};
 overrides(_TestCase) ->
     #{}.
 
@@ -591,9 +611,10 @@ a_declared_gate_is_not_skipped_without_seki(_Config) ->
     after 2000 -> ct:fail(gate_failure_not_reported)
     end,
     ok = idle(~"gated", 500),
-    %% Snoozed, which gives the attempt back and records no error.
+    %% Snoozed, which gives the attempt back. Why is in `errors`, as a snooze.
+    ?assertMatch(#{state := ~"available", attempt := 1, max_attempts := 4}, row(Gated)),
     ?assertMatch(
-        #{state := ~"available", attempt := 1, max_attempts := 4, errors := ~"[]"}, row(Gated)
+        [#{~"error" := <<"{gate_failed,setup,", _/binary>>, ~"snoozed" := 5}], errors(row(Gated))
     ),
     %% A worker that declares no gate has none to lose.
     Plain = enqueue(~"ungated"),
@@ -1202,6 +1223,54 @@ a_module_that_is_not_a_worker_fails_the_job(_Config) ->
     Row = await(Id, ~"discarded"),
     ?assertMatch([#{~"error" := ~"{unknown_worker,<<\"lists\">>}"}], errors(Row)),
     ?assertEqual(nomatch, binary:match(maps:get(errors, Row), ~"191212121212")).
+
+a_worker_unknown_here_is_put_back_before_it_uses_an_attempt(_Config) ->
+    Id = insert_row(~"shigoto_no_such_worker_module", ~"{}", 1),
+    ok = put_back(Id, 1),
+    ?assertMatch(#{attempt := 1, max_attempts := 2}, row(Id)),
+    ?assertMatch(
+        [
+            #{
+                ~"error" := ~"{unknown_worker,<<\"shigoto_no_such_worker_module\">>}",
+                ~"snoozed" := 30
+            }
+        ],
+        errors(row(Id))
+    ),
+    ok = due(Id),
+    ok = put_back(Id, 2),
+    ok = due(Id),
+    %% Twice is the limit of this case: the third time is its one attempt.
+    Row = await(Id, ~"discarded"),
+    ?assertMatch(#{attempt := 3, max_attempts := 3}, Row),
+    [_, _, Failure] = errors(Row),
+    ?assertMatch(#{~"error" := ~"{unknown_worker,<<\"shigoto_no_such_worker_module\">>}"}, Failure),
+    ?assertNot(is_map_key(~"snoozed", Failure)).
+
+a_job_put_back_for_its_worker_runs_once_the_worker_is_known(_Config) ->
+    Id = enqueue(~"known-later", #{worker => shigoto_gated_worker, max_attempts => 1}),
+    ok = put_back(Id, 1),
+    %% What a node on the next release is to this job. This one remembers for
+    %% 30 seconds that the name was no worker.
+    application:set_env(shigoto, workers, [shigoto_lifecycle_worker, shigoto_gated_worker]),
+    true = ets:delete(shigoto_workers, ~"shigoto_gated_worker"),
+    ok = due(Id),
+    instruct(performing(~"known-later"), {return, ok}),
+    ?assertMatch(#{attempt := 2, max_attempts := 2}, await(Id, ~"completed")).
+
+a_gate_that_keeps_failing_fails_the_job_in_the_end(_Config) ->
+    ok = application:stop(seki),
+    Id = enqueue(~"never-admitted", #{worker => shigoto_gated_worker, max_attempts => 1}),
+    ok = put_back(Id, 1),
+    ok = due(Id),
+    ok = put_back(Id, 2),
+    ok = due(Id),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch(#{attempt := 3, max_attempts := 3}, Row),
+    [_, _, Failure] = errors(Row),
+    ?assertMatch(#{~"error" := <<"{gate_failed,setup,", _/binary>>}, Failure),
+    ?assertNot(is_map_key(~"snoozed", Failure)),
+    ok = idle(~"never-admitted", 0).
 
 %%----------------------------------------------------------------------
 %% The rescue and the sweeps
@@ -1844,6 +1913,17 @@ due(Id) ->
         ?POOL, ~"UPDATE shigoto_jobs SET scheduled_at = now() WHERE id = $1", [Id]
     ),
     ok.
+
+%% The job is `available` again and `errors` says it was put back `Times` times.
+put_back(Id, Times) ->
+    wait_for(fun() ->
+        case row(Id) of
+            #{state := ~"available"} = Row ->
+                length([Entry || #{~"snoozed" := _} = Entry <- errors(Row)]) =:= Times;
+            _Other ->
+                false
+        end
+    end).
 
 queue_pid() ->
     case lists:keyfind({shigoto_queue, ?QUEUE}, 1, supervisor:which_children(shigoto_queue_sup)) of

@@ -52,6 +52,9 @@ written, so `completed`, `failed` or `snoozed` still follows, or `lost`.
 `#{}` without one. A job that cannot be run (unknown worker, a column that does
 not open) has no `start`.
 
+`snoozed` has `snooze_reason` `snooze`, or `gate_failed` or `unknown_worker`
+when the node put the job back because it could not run it.
+
 `lost` fires when a run's claim no longer held: the job had been rescued and
 claimed again, or cancelled on another node, while this run was going. Either
 the run finished and its outcome (`transition`: `completed`, `failed` or
@@ -104,7 +107,8 @@ missing, a worker callback raised, the database refused the global concurrency
 count, or the advisory lock for it was not free within
 `advisory_lock_timeout` (`reason` is `lock_timeout`). `gate` is `rate_limit`,
 `bulkhead`, `circuit`, `global_concurrency`, `load` or `setup`. The job is
-snoozed, not run: a gate that cannot answer does not admit.
+snoozed, not run: a gate that cannot answer does not admit. After
+`unrunnable_snooze_limit` such snoozes in a row the attempt fails instead.
 
 ## Batch Events
 

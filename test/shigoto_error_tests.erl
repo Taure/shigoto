@@ -17,7 +17,9 @@ error_test_() ->
             fun only_a_caught_class_prints_as_class_and_reason/0,
             fun text_is_bounded_and_always_valid/0,
             fun an_entry_has_the_documented_fields/0,
-            fun appended_keeps_the_newest_entries/0
+            fun appended_keeps_the_newest_entries/0,
+            fun a_put_back_is_an_entry_marked_snoozed/0,
+            fun put_backs_are_counted_since_the_last_failure/0
         ]}.
 
 a_shape_keeps_atoms_only() ->
@@ -144,3 +146,38 @@ appended_keeps_the_newest_entries() ->
 
 stacktrace(#{~"stacktrace" := Text}) when is_binary(Text) ->
     Text.
+
+a_put_back_is_an_entry_marked_snoozed() ->
+    Job = #{attempt => 2, worker => my_worker},
+    Entry = shigoto_error:put_back(Job, {gate_failed, setup, {error, seki_not_running}}, 5),
+    ?assertMatch(
+        #{
+            ~"error" := ~"{gate_failed,setup,{error,seki_not_running}}",
+            ~"attempt" := 2,
+            ~"worker" := ~"my_worker",
+            ~"snoozed" := 5
+        },
+        Entry
+    ),
+    ?assertEqual(
+        Entry,
+        maps:merge(shigoto_error:entry(Job, {gate_failed, setup, {error, seki_not_running}}), #{
+            ~"snoozed" => 5
+        })
+    ).
+
+put_backs_are_counted_since_the_last_failure() ->
+    Failure = #{~"error" => ~"error:badarg"},
+    PutBack = #{~"error" => ~"{unknown_worker,<<\"w\">>}", ~"snoozed" => 30},
+    ?assertEqual(0, shigoto_error:put_backs(#{})),
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => []})),
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => ~"[]"})),
+    ?assertEqual(2, shigoto_error:put_backs(#{errors => [PutBack, PutBack]})),
+    ?assertEqual(1, shigoto_error:put_backs(#{errors => [PutBack, PutBack, Failure, PutBack]})),
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => [PutBack, Failure]})),
+    Stored = iolist_to_binary(json:encode([Failure, PutBack, PutBack, PutBack])),
+    ?assertEqual(3, shigoto_error:put_backs(#{errors => Stored})),
+    %% A column that is not what shigoto wrote counts as nothing.
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => ~"not json"})),
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => ~"{\"snoozed\": 5}"})),
+    ?assertEqual(0, shigoto_error:put_backs(#{errors => null})).

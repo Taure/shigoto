@@ -18,6 +18,7 @@ for safe multi-node job claiming.
     cancelled_job/2,
     cancel_by/2,
     snooze_job/3,
+    put_back_job/4,
     release_job/2,
     retry_job/2,
     retry_by/2,
@@ -654,6 +655,37 @@ snooze_job(Pool, Claim, Seconds) ->
         RETURNING id
         """,
     case query(Pool, SQL, [JobId, Seconds, Attempt]) of
+        #{rows := [_]} -> ok;
+        #{rows := []} -> {error, lost};
+        {error, _} = Err -> Err
+    end.
+
+-doc false.
+%% Snooze a claimed job this node could not run, through no fault of the job:
+%% a resilience gate did not answer, or the worker is not known here. As for
+%% `snooze_job/3` the attempt is given back. `Reason` goes into `errors` as a
+%% `shigoto_error:put_back/3` entry, which is what the executor counts to stop
+%% putting the job back.
+-spec put_back_job(atom(), map(), pos_integer(), term()) -> ok | {error, lost | term()}.
+put_back_job(Pool, Job, Seconds, Reason) ->
+    {JobId, Attempt} = fence(Job),
+    Entry = encode_json(shigoto_error:put_back(Job, Reason, Seconds)),
+    SQL = iolist_to_binary([
+        ~"""
+        UPDATE shigoto_jobs SET state = 'available',
+          scheduled_at = now() + make_interval(secs => $2),
+          max_attempts = max_attempts + 1,
+          errors =
+        """,
+        ~" ",
+        shigoto_error:appended(~"errors", ~"$4::jsonb"),
+        ~"""
+
+        WHERE id = $1 AND state = 'executing' AND ($3::integer IS NULL OR attempt = $3)
+        RETURNING id
+        """
+    ]),
+    case query(Pool, SQL, [JobId, Seconds, Attempt, Entry]) of
         #{rows := [_]} -> ok;
         #{rows := []} -> {error, lost};
         {error, _} = Err -> Err

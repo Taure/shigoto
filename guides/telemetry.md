@@ -47,6 +47,9 @@ the outcome is written, so `completed`, `failed` or `snoozed` still follows.
 `carrier` is the job's context, see
 [Context Propagation](context-propagation.md).
 
+`snoozed` has `snooze_reason` `snooze`, or `gate_failed` or `unknown_worker`
+when the node put the job back because it could not run it.
+
 `lost` fires when a run's claim no longer held: the job had been rescued and
 claimed again, or cancelled on another node, while this run was going. Either
 the run finished and its outcome (`transition`: `completed`, `failed` or
@@ -104,7 +107,8 @@ normal boot a bad queue config fails the application start instead.
 `gate_failed` fires when a check could not be made: `gate` is `setup`, `load`,
 `rate_limit`, `global_concurrency`, `bulkhead` or `circuit`. The job is snoozed
 for 5 seconds rather than run unchecked, and `shigoto_resilience_gate_failed`
-is logged. For `global_concurrency` the usual reason is `lock_timeout`: another
+is logged. After `unrunnable_snooze_limit` such snoozes in a row the job's
+attempt fails instead (see [Resilience](resilience.md)). For `global_concurrency` the usual reason is `lock_timeout`: another
 session holds the worker's advisory lock.
 
 ### Batch Events

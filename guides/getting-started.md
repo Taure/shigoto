@@ -74,6 +74,7 @@ config :shigoto,
 | `workers` | `undefined` | Modules allowed to run as workers (see [Security](security.md)) |
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
 | `rescue_interval` | `60000` | Milliseconds between the passes of a node that rescue stale jobs, release jobs waiting on a job that has ended, and settle finished batches. One process per node runs them, and only one node of a cluster at a time |
+| `unrunnable_snooze_limit` | `20` | How many times in a row a node that cannot run a job (worker unknown there, or a resilience gate that does not answer) puts it back without using an attempt; the next time fails the attempt. `0` to `50` |
 | `on_discard_timeout` | `60000` | Milliseconds an `on_discard/2` callback may run before it is stopped (see [Workers](workers.md#on_discard-callback)) |
 | `propagator` | `undefined` | Module that carries a trace context from insert to run (see [Context Propagation](context-propagation.md)) |
 | `on_dependency_failure` | `run` | What a waiting job does when a dependency fails, unless the job sets it (see [Dependencies](dependencies.md)) |
