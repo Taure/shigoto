@@ -53,6 +53,9 @@ the application does with it.
     a_crash_ends_the_attempt_with_an_exception_event/1,
     a_propagator_that_misbehaves_fails_nothing/1,
     without_a_propagator_nothing_is_carried/1,
+    an_outcome_that_cannot_be_written_is_run_again/1,
+    a_batch_whose_callback_cannot_be_inserted_is_settled_later/1,
+    losing_every_connection_loses_no_job/1,
     a_child_runs_after_its_parent_with_the_result/1,
     a_discarded_parent_follows_each_childs_policy/1,
     a_burst_of_jobs_all_complete/1,
@@ -125,6 +128,9 @@ all() ->
         a_crash_ends_the_attempt_with_an_exception_event,
         a_propagator_that_misbehaves_fails_nothing,
         without_a_propagator_nothing_is_carried,
+        an_outcome_that_cannot_be_written_is_run_again,
+        a_batch_whose_callback_cannot_be_inserted_is_settled_later,
+        losing_every_connection_loses_no_job,
         a_child_runs_after_its_parent_with_the_result,
         a_discarded_parent_follows_each_childs_policy,
         a_burst_of_jobs_all_complete,
@@ -198,6 +204,10 @@ overrides(TestCase) when
     TestCase =:= a_propagator_that_misbehaves_fails_nothing
 ->
     #{propagator => shigoto_fake_propagator};
+overrides(an_outcome_that_cannot_be_written_is_run_again) ->
+    #{heartbeat_interval => 300};
+overrides(losing_every_connection_loses_no_job) ->
+    #{heartbeat_interval => 300};
 overrides(a_notification_wakes_the_queue) ->
     #{poll_interval => 60000, notifier => connection()};
 overrides(a_scheduled_job_runs_when_due) ->
@@ -536,6 +546,145 @@ performing_any(Tags) ->
             Worker
     after 5000 -> ct:fail({never_performed, Tags})
     end.
+
+%%----------------------------------------------------------------------
+%% When the database fails
+%%----------------------------------------------------------------------
+
+an_outcome_that_cannot_be_written_is_run_again(_Config) ->
+    ok = telemetry:attach(
+        ?MODULE, [shigoto, job, transition_failed], fun ?MODULE:forward/4, self()
+    ),
+    Id = enqueue(~"unwritable"),
+    Worker = performing(~"unwritable"),
+    ok = refusing(~"BEFORE UPDATE", ~"NEW.state = 'completed'"),
+    try
+        instruct(Worker, {return, ok}),
+        receive
+            {telemetry, [shigoto, job, transition_failed], _, Metadata} ->
+                ?assertMatch(#{job_id := Id, transition := completed}, Metadata)
+        after 5000 -> ct:fail(no_transition_failed)
+        end,
+        %% Nothing was written: the job is still this dead run's.
+        ?assertMatch(#{state := ~"executing", attempt := 1}, row(Id))
+    after
+        ok = accepting()
+    end,
+    %% The run is over and no longer heartbeats, so the rescue takes the job.
+    instruct(performing(~"unwritable"), {return, ok}),
+    Done = await(Id, ~"completed"),
+    ?assertMatch(#{attempt := 2}, Done),
+    ?assertMatch([#{~"error" := ~"rescued", ~"attempt" := 1}], errors(Done)).
+
+a_batch_whose_callback_cannot_be_inserted_is_settled_later(_Config) ->
+    BatchId = new_batch(),
+    Id = enqueue(~"batch-unsettled", #{batch => BatchId}),
+    Worker = performing(~"batch-unsettled"),
+    ok = refusing(~"BEFORE INSERT", ~"NEW.worker = 'shigoto_batch_callback_worker'"),
+    try
+        instruct(Worker, {return, ok}),
+        %% The job is completed and counted whatever becomes of the callback.
+        ?assertMatch(#{attempt := 1}, await(Id, ~"completed")),
+        ?assertMatch(
+            {ok, #{state := ~"active", completed_jobs := 1, total_jobs := 1}},
+            shigoto:get_batch(BatchId)
+        ),
+        %% The sweep keeps trying and keeps being refused: the batch never
+        %% leaves active without its callback.
+        receive
+            {batch_callback, _} -> ct:fail(callback_through_a_refusing_table)
+        after 700 -> ok
+        end,
+        ?assertMatch({ok, #{state := ~"active"}}, shigoto:get_batch(BatchId))
+    after
+        ok = accepting()
+    end,
+    receive
+        {batch_callback, _Args} -> ok
+    after 5000 -> ct:fail(no_batch_callback)
+    end,
+    ?assertMatch({ok, #{state := ~"callback_completing"}}, shigoto:get_batch(BatchId)),
+    receive
+        {batch_callback, _} -> ct:fail(second_batch_callback)
+    after 600 -> ok
+    end.
+
+losing_every_connection_loses_no_job(_Config) ->
+    Running = enqueue(~"cut-off"),
+    Worker = performing(~"cut-off"),
+    Waiting = enqueue(~"cut-off-waiting", #{scheduled_at => seconds_from_now(1)}),
+    #{rows := Killed} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+        """,
+        []
+    ),
+    ?assert(length(Killed) >= 1),
+    instruct(Worker, {return, ok}),
+    %% Whether the outcome got through on a new connection or the job was
+    %% rescued and run again, it ends completed, and so does the one after it.
+    ok = answering([~"cut-off", ~"cut-off-waiting"], [Running, Waiting]),
+    ?assertMatch(#{state := ~"completed"}, row(Running)),
+    ?assertMatch(#{state := ~"completed", attempt := 1}, row(Waiting)).
+
+%% Answers every run of these tags with ok until every job is completed.
+answering(Tags, Ids) ->
+    answering(Tags, Ids, 200).
+
+answering(_Tags, Ids, 0) ->
+    ct:fail({never_completed, [row(Id) || Id <- Ids]});
+answering(Tags, Ids, Tries) ->
+    receive
+        {performing, Tag, Worker, _Args} ->
+            ?assert(lists:member(Tag, Tags)),
+            instruct(Worker, {return, ok}),
+            answering(Tags, Ids, Tries)
+    after 50 ->
+        case [Id || Id <- Ids, not completed(Id)] of
+            [] -> ok;
+            _Left -> answering(Tags, Ids, Tries - 1)
+        end
+    end.
+
+completed(Id) ->
+    case row(Id) of
+        #{state := ~"completed"} -> true;
+        _Other -> false
+    end.
+
+%% Makes PostgreSQL refuse a write to the jobs table, as a full disk or a
+%% failed constraint would, for the rows `When` picks.
+refusing(Timing, When) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE OR REPLACE FUNCTION shigoto_test_refuse() RETURNS trigger AS $$
+        BEGIN RAISE EXCEPTION 'refused by the test'; END
+        $$ LANGUAGE plpgsql
+        """,
+        []
+    ),
+    #{} = shigoto_db:query(
+        ?POOL,
+        [
+            ~"CREATE TRIGGER shigoto_test_refuse ",
+            Timing,
+            ~" ON shigoto_jobs FOR EACH ROW WHEN (",
+            When,
+            ~") EXECUTE FUNCTION shigoto_test_refuse()"
+        ],
+        []
+    ),
+    ok.
+
+accepting() ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"DROP TRIGGER IF EXISTS shigoto_test_refuse ON shigoto_jobs", []
+    ),
+    #{} = shigoto_db:query(?POOL, ~"DROP FUNCTION IF EXISTS shigoto_test_refuse()", []),
+    ok.
 
 %%----------------------------------------------------------------------
 %% Context
