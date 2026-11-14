@@ -414,8 +414,8 @@ it, never the key.
 """.
 -spec check_keys() -> ok | {error, term()}.
 check_keys() ->
-    Single = shigoto_config:encryption_key(),
-    Listed = shigoto_config:encryption_keys(),
+    Single = application:get_env(shigoto, encryption_key, undefined),
+    Listed = application:get_env(shigoto, encryption_keys, []),
     case {Single, Listed} of
         {undefined, []} ->
             ok;

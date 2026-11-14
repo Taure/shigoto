@@ -42,27 +42,35 @@ Configuration access for Shigoto. Reads from application env.
 -spec pool() -> atom().
 pool() ->
     case application:get_env(shigoto, repo) of
-        {ok, Repo} ->
+        {ok, Repo} when is_atom(Repo) ->
             Repo;
+        {ok, Repo} ->
+            error({shigoto_config, {invalid, repo, Repo}});
         undefined ->
-            {ok, Pool} = application:get_env(shigoto, pool),
-            Pool
+            case application:get_env(shigoto, pool) of
+                {ok, Pool} when is_atom(Pool) -> Pool;
+                {ok, Pool} -> error({shigoto_config, {invalid, pool, Pool}});
+                undefined -> error({shigoto_config, {not_set, pool}})
+            end
     end.
 
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
--spec queues() -> [{binary(), pos_integer()}].
+-spec queues() -> [{Name :: term(), Concurrency :: term()}].
 queues() ->
-    application:get_env(shigoto, queues, [{~"default", 10}]).
+    case setting(queues, [{~"default", 10}]) of
+        Queues when is_list(Queues) -> [Queue || {_Name, _Concurrency} = Queue <- Queues];
+        Other -> error({shigoto_config, {invalid, queues, Other}})
+    end.
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
 poll_interval() ->
-    application:get_env(shigoto, poll_interval, 5000).
+    integer_setting(poll_interval, 5000).
 
 -doc "Stager interval in milliseconds for surfacing newly-due scheduled/retryable jobs. Default: 1000.".
 -spec stage_interval() -> pos_integer().
 stage_interval() ->
-    application:get_env(shigoto, stage_interval, 1000).
+    integer_setting(stage_interval, 1000).
 
 -doc """
 Testing mode for `insert/1,2` and `insert_all/1,2`. Default: `disabled` (normal
@@ -119,32 +127,40 @@ Cron job entries. Each is `{Name, Schedule, Worker, Args}` or
 """.
 -spec cron_entries() -> list().
 cron_entries() ->
-    application:get_env(shigoto, cron, []).
+    case setting(cron, []) of
+        Entries when is_list(Entries) -> Entries;
+        Other -> error({shigoto_config, {invalid, cron, Other}})
+    end.
 
 -doc "Days to keep completed/discarded jobs before archiving. Default: 14.".
 -spec prune_after_days() -> pos_integer().
 prune_after_days() ->
-    application:get_env(shigoto, prune_after_days, 14).
+    integer_setting(prune_after_days, 14).
 
 -doc "Days to keep archived jobs before permanent deletion. Default: 90.".
 -spec archive_after_days() -> pos_integer().
 archive_after_days() ->
-    application:get_env(shigoto, archive_after_days, 90).
+    integer_setting(archive_after_days, 90).
 
 -doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
 -spec notifier_config() -> map() | undefined.
 notifier_config() ->
-    application:get_env(shigoto, notifier, undefined).
+    map_setting(notifier).
 
 -doc "Milliseconds to wait for in-flight jobs during shutdown. Default: 15000.".
 -spec shutdown_timeout() -> pos_integer().
 shutdown_timeout() ->
-    application:get_env(shigoto, shutdown_timeout, 15000).
+    integer_setting(shutdown_timeout, 15000).
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].
 middleware() ->
-    application:get_env(shigoto, middleware, []).
+    [middleware(Middleware) || Middleware <- list_setting(middleware)].
+
+%% What a fun answers cannot be known before it is called.
+-spec middleware(term()) -> dynamic().
+middleware(Middleware) when is_function(Middleware, 2) -> Middleware;
+middleware(Other) -> error({shigoto_config, {invalid, middleware, Other}}).
 
 -doc """
 AES-256-GCM encryption key, exactly 32 bytes. Returns `undefined` if not
@@ -152,17 +168,21 @@ configured. `m:shigoto_crypto` says which columns it covers.
 """.
 -spec encryption_key() -> binary() | undefined.
 encryption_key() ->
-    application:get_env(shigoto, encryption_key, undefined).
+    case setting(encryption_key, undefined) of
+        undefined -> undefined;
+        Key when is_binary(Key) -> Key;
+        _NotAKey -> error({shigoto_config, {invalid_encryption_key, not_a_binary}})
+    end.
 
 -doc "Heartbeat interval in milliseconds for executing jobs. Default: 30000.".
 -spec heartbeat_interval() -> pos_integer().
 heartbeat_interval() ->
-    application:get_env(shigoto, heartbeat_interval, 30000).
+    integer_setting(heartbeat_interval, 30000).
 
 -doc "Milliseconds between sweeps for stale executing jobs. Default: 60000.".
 -spec rescue_interval() -> pos_integer().
 rescue_interval() ->
-    application:get_env(shigoto, rescue_interval, 60000).
+    integer_setting(rescue_interval, 60000).
 
 -doc """
 Seconds an executing job may go without a heartbeat before it counts as stale:
@@ -187,31 +207,45 @@ on_dependency_failure() ->
 -doc "Load shedding config. Default: undefined (disabled).".
 -spec load_shedding() -> map() | undefined.
 load_shedding() ->
-    application:get_env(shigoto, load_shedding, undefined).
+    map_setting(load_shedding).
 
 -doc "Queue weight config. Map of queue name to weight. Default: #{} (equal weight).".
 -spec queue_weights() -> #{binary() => pos_integer()}.
 queue_weights() ->
-    application:get_env(shigoto, queue_weights, #{}).
+    case setting(queue_weights, #{}) of
+        Weights when is_map(Weights) ->
+            #{
+                Queue => Weight
+             || Queue := Weight <- Weights, is_binary(Queue), is_integer(Weight)
+            };
+        Other ->
+            error({shigoto_config, {invalid, queue_weights, Other}})
+    end.
 
 -doc "Queues that use fair partition-based claiming. Default: [] (all use standard claiming).".
 -spec fair_queues() -> [binary()].
 fair_queues() ->
-    application:get_env(shigoto, fair_queues, []).
+    [Queue || Queue <- list_setting(fair_queues), is_binary(Queue)].
 
 -doc "Ordered list of encryption keys (newest first) for key rotation. Default: [].".
 -spec encryption_keys() -> [binary()].
 encryption_keys() ->
-    application:get_env(shigoto, encryption_keys, []).
+    [
+        case Key of
+            _ when is_binary(Key) -> Key;
+            _NotAKey -> error({shigoto_config, {invalid_encryption_key, not_a_binary}})
+        end
+     || Key <- list_setting(encryption_keys)
+    ].
 
 -doc """
 Fanout queues — every node processes every job. Format:
 `[{QueueName, Concurrency, Opts}]` where Opts may include
 `window` (seconds, default 120). Default: [].
 """.
--spec fanout_queues() -> [{binary(), pos_integer(), map()}].
+-spec fanout_queues() -> [{Name :: term(), Concurrency :: term(), Opts :: term()}].
 fanout_queues() ->
-    application:get_env(shigoto, fanout_queues, []).
+    [Queue || {_Name, _Concurrency, _Opts} = Queue <- list_setting(fanout_queues)].
 
 -doc """
 The frame `m:shigoto_crypto` writes: `v2` (the default) or `v1`.
@@ -340,6 +374,30 @@ checked({error, Reason}) -> error({shigoto_config, Reason}).
 -spec setting(atom(), term()) -> term().
 setting(Key, Default) ->
     application:get_env(shigoto, Key, Default).
+
+%% A setting of the wrong type never worked: it failed further in, at a timer
+%% or in a statement. Here it fails by name.
+-spec integer_setting(atom(), integer()) -> integer().
+integer_setting(Key, Default) ->
+    case setting(Key, Default) of
+        Value when is_integer(Value) -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
+
+-spec map_setting(atom()) -> map() | undefined.
+map_setting(Key) ->
+    case setting(Key, undefined) of
+        undefined -> undefined;
+        Value when is_map(Value) -> Value;
+        _NotAMap -> error({shigoto_config, {invalid, Key, not_a_map}})
+    end.
+
+-spec list_setting(atom()) -> [term()].
+list_setting(Key) ->
+    case setting(Key, []) of
+        Value when is_list(Value) -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
 
 read_formats_checked(Formats) when is_list(Formats), Formats =/= [] ->
     case [Format || Format <- Formats, Format =/= v1, Format =/= v2] of
