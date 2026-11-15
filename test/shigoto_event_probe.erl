@@ -10,6 +10,9 @@ the process that attached.
 -define(EVENTS, [
     [shigoto, job, inserted],
     [shigoto, job, claimed],
+    [shigoto, job, start],
+    [shigoto, job, stop],
+    [shigoto, job, exception],
     [shigoto, job, completed],
     [shigoto, job, failed],
     [shigoto, job, snoozed],
