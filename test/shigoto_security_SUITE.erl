@@ -42,6 +42,10 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_running_job_is_held_encrypted/1,
     a_result_is_encrypted_and_reaches_the_dependent/1,
     a_result_moved_to_another_job_is_not_decrypted/1,
+    a_result_copied_under_its_own_id_reaches_no_other_job/1,
+    a_result_a_job_did_not_wait_for_is_not_handed_to_it/1,
+    a_waiting_job_from_before_the_upgrade_gets_its_results/1,
+    reencrypt_names_what_a_waiting_job_may_read/1,
     batch_callback_args_are_encrypted/1,
     a_batch_naming_no_worker_gets_no_callback/1,
     replaced_args_are_bound_to_the_existing_row/1,
@@ -118,6 +122,10 @@ cases() ->
         a_running_job_is_held_encrypted,
         a_result_is_encrypted_and_reaches_the_dependent,
         a_result_moved_to_another_job_is_not_decrypted,
+        a_result_copied_under_its_own_id_reaches_no_other_job,
+        a_result_a_job_did_not_wait_for_is_not_handed_to_it,
+        a_waiting_job_from_before_the_upgrade_gets_its_results,
+        reencrypt_names_what_a_waiting_job_may_read,
         batch_callback_args_are_encrypted,
         a_batch_naming_no_worker_gets_no_callback,
         replaced_args_are_bound_to_the_existing_row,
@@ -154,6 +162,10 @@ v2_only() ->
         args_moved_to_another_column_are_not_decrypted,
         a_result_is_encrypted_and_reaches_the_dependent,
         a_result_moved_to_another_job_is_not_decrypted,
+        a_result_copied_under_its_own_id_reaches_no_other_job,
+        a_result_a_job_did_not_wait_for_is_not_handed_to_it,
+        a_waiting_job_from_before_the_upgrade_gets_its_results,
+        reencrypt_names_what_a_waiting_job_may_read,
         batch_callback_args_are_encrypted,
         a_v1_frame_is_refused_once_only_v2_is_read,
         v1_is_still_written_and_read_when_set,
@@ -227,6 +239,8 @@ overrides(args_moved_to_a_module_that_is_no_worker_are_not_decrypted) ->
 overrides(a_job_put_back_for_its_worker_is_not_decrypted) ->
     #{workers => [shigoto_canary_worker]};
 overrides(a_plaintext_job_is_refused_when_encryption_is_required) ->
+    #{require_encrypted => true};
+overrides(a_result_copied_under_its_own_id_reaches_no_other_job) ->
     #{require_encrypted => true};
 overrides(v1_is_still_written_and_read_when_set) ->
     #{encryption_write_format => v1};
@@ -606,6 +620,138 @@ a_result_moved_to_another_job_is_not_decrypted(_Config) ->
     ?assertMatch([_ | _], [E || #{~"error" := ~"decrypt_failed"} = E <- errors(Row)]),
     ok = not_performed(shigoto_canary_other_worker),
     ok = no_canary(Canary, [Row | captured()]).
+
+%% A result is bound to the job that produced it, so copied whole, key and
+%% all, it opens. What a job may be handed is the results of the jobs it was
+%% inserted to wait for, and their ids are sealed in its meta.
+a_result_copied_under_its_own_id_reaches_no_other_job(_Config) ->
+    Canary = canary(),
+    Source = enqueue(~"result", Canary),
+    _ = performed(shigoto_canary_worker),
+    #{result := Stolen} = await(Source, ~"completed"),
+    %% Args and meta are bound to the worker, not to the row: those of any job
+    %% of the target's worker will do.
+    {ok, #{id := Donor}} = shigoto:insert(#{
+        worker => shigoto_canary_other_worker,
+        args => #{},
+        scheduled_at => seconds_from_now(3600)
+    }),
+    Target = insert_waiting_row(
+        stored(Donor, args), stored(Donor, meta), #{Source => json:decode(Stolen)}
+    ),
+    Row = await(Target, ~"discarded"),
+    ?assertMatch([#{~"error" := ~"decrypt_failed"}], errors(Row)),
+    ok = not_performed(shigoto_canary_other_worker),
+    ok = no_canary(Canary, [Row | captured()]),
+    %% The job that was inserted to wait for it is handed it.
+    {ok, #{id := Child}} = shigoto:insert(#{
+        worker => shigoto_canary_other_worker, args => #{}, depends_on => [Source]
+    }),
+    {_, ChildArgs} = performed(shigoto_canary_other_worker),
+    ?assertEqual(#{Source => #{~"secret" => Canary}}, maps:get(deps_results, ChildArgs)),
+    _ = await(Child, ~"completed"),
+    {ok, #{meta := Meta}} = shigoto:get_job(Child),
+    ?assertEqual(#{~"_shigoto_deps" => [Source]}, json:decode(Meta)),
+    %% So is one inserted with others.
+    {ok, [_, #{id := Bulk}]} = shigoto:insert_all([
+        #{worker => shigoto_canary_other_worker, args => #{~"n" => 1}},
+        #{worker => shigoto_canary_other_worker, args => #{~"n" => 2}, depends_on => [Source]}
+    ]),
+    Seen = [performed(shigoto_canary_other_worker), performed(shigoto_canary_other_worker)],
+    ?assertEqual(
+        [#{~"n" => 1}, #{~"n" => 2, deps_results => #{Source => #{~"secret" => Canary}}}],
+        lists:sort([Args || {_Worker, Args} <- Seen])
+    ),
+    _ = await(Bulk, ~"completed").
+
+a_result_a_job_did_not_wait_for_is_not_handed_to_it(_Config) ->
+    Canary = canary(),
+    Other = canary(),
+    [Waited, NotWaited] = [enqueue(~"result", C) || C <- [Canary, Other]],
+    _ = [performed(shigoto_canary_worker) || _ <- [Waited, NotWaited]],
+    _ = await(Waited, ~"completed"),
+    #{result := Stolen} = await(NotWaited, ~"completed"),
+    {ok, #{id := Child}} = shigoto:insert(#{
+        worker => shigoto_canary_other_worker,
+        args => #{},
+        depends_on => [Waited],
+        max_attempts => 1,
+        scheduled_at => seconds_from_now(3600)
+    }),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        UPDATE shigoto_jobs SET scheduled_at = now(),
+          deps_results = deps_results || jsonb_build_object($2::text, $3::jsonb)
+        WHERE id = $1
+        """,
+        [Child, integer_to_binary(NotWaited), Stolen]
+    ),
+    Row = await(Child, ~"discarded"),
+    ?assertMatch([#{~"error" := ~"decrypt_failed"}], errors(Row)),
+    ok = not_performed(shigoto_canary_other_worker),
+    ok = no_canary(Other, [Row | captured()]).
+
+%% A job a release before this one inserted has no list. It runs while
+%% plaintext is still accepted, which is how long the upgrade takes.
+a_waiting_job_from_before_the_upgrade_gets_its_results(_Config) ->
+    Canary = canary(),
+    Source = enqueue(~"result", Canary),
+    _ = performed(shigoto_canary_worker),
+    #{result := Result} = await(Source, ~"completed"),
+    Sealed = shigoto_crypto:seal(~"{}", {args, ~"shigoto_canary_other_worker"}),
+    Old = insert_waiting_row(Sealed, ~"{}", #{Source => json:decode(Result)}),
+    {_, Args} = performed(shigoto_canary_other_worker),
+    ?assertEqual(#{Source => #{~"secret" => Canary}}, maps:get(deps_results, Args)),
+    _ = await(Old, ~"completed").
+
+%% `shigoto:reencrypt/0,1` is what the upgrade runs before it sets
+%% `require_encrypted`, so it gives such a job its list.
+reencrypt_names_what_a_waiting_job_may_read(_Config) ->
+    Canary = canary(),
+    Done = enqueue(~"result", Canary),
+    _ = performed(shigoto_canary_worker),
+    #{result := Result} = await(Done, ~"completed"),
+    Pending = parked(Canary),
+    Sealed = shigoto_crypto:seal(~"{}", {args, ~"shigoto_canary_other_worker"}),
+    Old = insert_waiting_row(Sealed, ~"{\"trace\": \"t1\"}", #{Done => json:decode(Result)}, [
+        Pending
+    ]),
+    {ok, #{jobs := #{failed := 0, skipped := 0}}} = shigoto:reencrypt(),
+    {ok, #{meta := Meta}} = shigoto:get_job(Old),
+    ?assertEqual(
+        #{~"trace" => ~"t1", ~"_shigoto_deps" => lists:sort([Done, Pending])}, json:decode(Meta)
+    ),
+    ?assertMatch(<<"\"enc:v2:", _/binary>>, stored(Old, meta)),
+    {ok, #{jobs := Again}} = shigoto:reencrypt(),
+    ?assertMatch(#{rewritten := 0, failed := 0, skipped := 0}, Again),
+    application:set_env(shigoto, require_encrypted, true),
+    #{} = shigoto_db:query(
+        ?POOL, ~"UPDATE shigoto_jobs SET depends_on = '{}' WHERE id = $1", [Old]
+    ),
+    {_, Args} = performed(shigoto_canary_other_worker),
+    ?assertEqual(#{Done => #{~"secret" => Canary}}, maps:get(deps_results, Args)),
+    _ = await(Old, ~"completed").
+
+%% A row of `shigoto_canary_other_worker` written to the table directly, with
+%% results in it.
+insert_waiting_row(Args, Meta, Results) ->
+    insert_waiting_row(Args, Meta, Results, []).
+
+insert_waiting_row(Args, Meta, Results, DependsOn) ->
+    DepsResults = iolist_to_binary(
+        json:encode(#{integer_to_binary(Id) => Result || Id := Result <- Results})
+    ),
+    #{rows := [#{id := Id}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, meta, deps_results, depends_on, max_attempts)
+        VALUES ($1, 'shigoto_canary_other_worker', $2::jsonb, $3::jsonb, $4::jsonb, $5, 1)
+        RETURNING id
+        """,
+        [?QUEUE, Args, Meta, DepsResults, DependsOn]
+    ),
+    Id.
 
 batch_callback_args_are_encrypted(_Config) ->
     Canary = canary(),

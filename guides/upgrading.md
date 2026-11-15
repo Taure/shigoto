@@ -47,9 +47,10 @@ things in. Nothing here needs a change in a worker.
    [Encryption](encryption.md#upgrading-encryption) for what `v2` adds and why
    it must wait.
 7. Run `shigoto:reencrypt()` once. It rewrites jobs, archived jobs and batches
-   as `v2`, encrypts what was stored in the clear, and replaces every
-   `unique_key` with the HMAC under the current key. It is safe while queues
-   run and can be run again.
+   as `v2`, encrypts what was stored in the clear, replaces every
+   `unique_key` with the HMAC under the current key, and gives every waiting
+   job the list of jobs it waits for (`_shigoto_deps` in its `meta`). It is
+   safe while queues run and can be run again.
 8. When it reports `failed => 0` and `skipped => 0`, set
    `{encryption_read_formats, [v2]}` and `{require_encrypted, true}`.
 9. Only then remove an old key from `encryption_keys`.
@@ -107,6 +108,7 @@ Dependencies and batches:
 |---|---|---|
 | A dependency that is discarded or cancelled | its dependents ran; after `cancel_by/1` they waited for ever | each dependent runs, is cancelled or is discarded, by `on_dependency_failure` (default `run`), whichever way the dependency ended |
 | Retrying a job that was cancelled or discarded for a failed dependency | | it waits on that dependency again, and follows it again if it is still failed. See [Job Dependencies](dependencies.md#retrying) |
+| The `meta` of a job with `depends_on`, with an encryption key | as given | also holds `_shigoto_deps`, the ids it was inserted to wait for. With `require_encrypted` and `v2`, a job without that list is handed no result and fails with `decrypt_failed`: run `shigoto:reencrypt()` first (step 7), which adds it |
 | A cancelled job in a batch | held the batch open | counts as ended; the callback gets `_batch_event => discard` |
 | Retrying a discarded job of a batch | the batch could finish one job early | the job is counted again when it ends |
 | A batch finished on a node that cannot run its callback | could be left `callback_*` with no callback job | stays `active` until a node that can run the callback settles it. See [Batches](batches.md#a-callback-a-node-cannot-run) |

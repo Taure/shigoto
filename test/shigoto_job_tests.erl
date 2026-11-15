@@ -25,6 +25,8 @@ job_test_() ->
             fun a_job_for_another_worker_is_not_opened/0,
             fun a_job_that_names_no_worker_is_not_opened/0,
             fun deps_results_open_per_job/0,
+            fun only_the_results_a_job_waited_for_are_opened/0,
+            fun a_job_without_its_list_is_refused_once_plaintext_is/0,
             fun a_readable_job_shows_reasons_not_ciphertext/0,
             fun a_redacted_job_has_no_data/0,
             fun the_table_is_made_once/0,
@@ -125,6 +127,74 @@ deps_results_open_per_job() ->
     ),
     {ok, _, Empty} = shigoto_job:opened(Job#{deps_results => ~"{}"}),
     ?assertEqual(#{}, maps:get(deps_results, Empty)).
+
+only_the_results_a_job_waited_for_are_opened() ->
+    [Five, Six] = [
+        json:decode(shigoto_crypto:seal(~"{\"total\":9}", {result, Id}))
+     || Id <- [5, 6]
+    ],
+    Stored = fun(Results) -> iolist_to_binary(json:encode(Results)) end,
+    Both = Stored(#{~"5" => Five, ~"6" => Six}),
+    Listed = job(?WORKER, #{}, #{~"_shigoto_deps" => [5], ~"trace" => ~"t1"}),
+    {ok, _, Opened} = shigoto_job:opened(Listed#{deps_results => Stored(#{~"5" => Five})}),
+    ?assertEqual(#{5 => #{~"total" => 9}}, maps:get(deps_results, Opened)),
+    ?assertEqual({error, decrypt_failed}, shigoto_job:opened(Listed#{deps_results => Both})),
+    ?assertEqual(
+        {error, decrypt_failed},
+        shigoto_job:opened(Listed#{deps_results => Stored(#{~"6" => Six})})
+    ),
+    %% A result that is not there yet is no result of another job either.
+    ?assertEqual(
+        {error, decrypt_failed},
+        shigoto_job:opened(Listed#{deps_results => Stored(#{~"6" => null})})
+    ),
+    Two = job(?WORKER, #{}, #{~"_shigoto_deps" => [6, 5]}),
+    {ok, _, All} = shigoto_job:opened(Two#{deps_results => Both}),
+    ?assertEqual(#{5 => #{~"total" => 9}, 6 => #{~"total" => 9}}, maps:get(deps_results, All)),
+    %% A list that is none allows nothing, whatever else is set.
+    [
+        ?assertEqual(
+            {NotAList, {error, decrypt_failed}},
+            {NotAList,
+                shigoto_job:opened(
+                    (job(?WORKER, #{}, #{~"_shigoto_deps" => NotAList}))#{
+                        deps_results => Stored(#{~"5" => Five})
+                    }
+                )}
+        )
+     || NotAList <- [~"5", 5, #{~"5" => true}, null]
+    ],
+    %% Meta that was opened before is read the same way.
+    {ok, _, Decoded} = shigoto_job:opened(Listed#{
+        meta := #{~"_shigoto_deps" => [5]}, deps_results => Stored(#{~"5" => Five})
+    }),
+    ?assertEqual(#{5 => #{~"total" => 9}}, maps:get(deps_results, Decoded)).
+
+a_job_without_its_list_is_refused_once_plaintext_is() ->
+    Key = binary:copy(<<1>>, 32),
+    Five = json:decode(shigoto_crypto:seal(~"{\"total\":9}", {result, 5})),
+    Results = iolist_to_binary(json:encode(#{~"5" => Five})),
+    Unlisted = (job(?WORKER, #{}, #{~"trace" => ~"t1"}))#{deps_results => Results},
+    NoMeta = maps:remove(meta, Unlisted),
+    Opens = fun(Job) ->
+        case shigoto_job:opened(Job) of
+            {ok, _, #{deps_results := Opened}} -> Opened;
+            {error, Reason} -> Reason
+        end
+    end,
+    ?assertEqual(#{5 => #{~"total" => 9}}, Opens(Unlisted)),
+    ?assertEqual(#{5 => #{~"total" => 9}}, Opens(NoMeta)),
+    set(#{encryption_key => Key, encryption_write_format => v2, require_encrypted => true}),
+    ?assertEqual(decrypt_failed, Opens(Unlisted)),
+    ?assertEqual(decrypt_failed, Opens(NoMeta)),
+    %% With nothing to hand over there is nothing to refuse.
+    ?assertEqual(#{}, Opens(Unlisted#{deps_results => ~"{}"})),
+    %% `v1` leaves results in the clear, and so bound to nothing.
+    set(#{encryption_key => Key, encryption_write_format => v1, require_encrypted => true}),
+    ?assertEqual(
+        #{5 => #{~"total" => 9}},
+        Opens(Unlisted#{deps_results => ~"{\"5\":{\"total\":9}}"})
+    ).
 
 a_readable_job_shows_reasons_not_ciphertext() ->
     Job = job(?WORKER, #{~"card" => ~"4111"}, #{~"trace" => ~"t1"}),

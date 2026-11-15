@@ -79,13 +79,16 @@ From a release that writes v1 (1.10 and earlier), with a key configured:
    `{encryption_write_format, v2}` on every node. New values are written as
    v2; nodes that have not got the setting yet still read them.
 3. Run `shigoto:reencrypt()` once. It rewrites stored jobs, archived jobs and
-   batches as v2, encrypts what was plaintext and moves every `unique_key` to
-   the HMAC under the current key.
+   batches as v2, encrypts what was plaintext, moves every `unique_key` to
+   the HMAC under the current key, and writes into the `meta` of every waiting
+   job which jobs it waits for (`_shigoto_deps`), which is what a job is
+   handed results by after step 4.
 4. When it reports `failed => 0` and `skipped => 0`, set
    `{encryption_read_formats, [v2]}` and `{require_encrypted, true}`.
 
 After step 4 a v1 frame, or a plaintext row inserted by hand, is refused
-instead of run.
+instead of run, and a job is handed a result only when its sealed `meta` names
+the job that produced it.
 
 What happens when step 2 is done too early: a 1.10 node that claims a job
 written as v2 cannot open its args. It does not fail the job itself; it passes

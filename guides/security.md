@@ -46,19 +46,31 @@ and cron workers go through the same check, so list them too.
 In the `v2` format, which is written once `encryption_write_format` is set to
 `v2`, a ciphertext is bound to the column it was written to and to the worker
 its row names. A job's result is bound to
-the id of the job that produced it.
+the id of the job that produced it, and a job is handed only the results of
+the jobs it was inserted to wait for: their ids are kept in its `meta`, under
+`_shigoto_deps`, which is sealed for its worker.
 
 | Moved from | To | Outcome |
 |---|---|---|
 | `args` of worker A | `args` of worker B | job fails, `decrypt_failed` |
 | `args` | `meta`, `result`, `callback_args` | fails, `decrypt_failed` |
 | `result` of job 1 | `deps_results` entry for job 2 | the waiting job fails, `decrypt_failed` |
+| `result` of job 1 | `deps_results` entry for job 1, in a job that did not wait for job 1 | fails, `decrypt_failed`, with `require_encrypted` set. Without it the row can leave the list out and the result **opens** |
+| `result` of job 1 | `deps_results` entry for job 1, with the `meta` of a job of the same worker that did wait for job 1 | **opens**: that worker was to read it |
 | `args` of worker A | `args` of another job of worker A | **opens**: worker A runs again with args it was given before |
 
-The last row is the limit of the binding: a value is not bound to its row. The
-id of a job is not known when its args are encrypted, and binding to it would
-cost a second statement per insert. Make workers idempotent, which
+The rows that open are the limit of the binding: a value is not bound to its
+row. The id of a job is not known when its args are encrypted, and binding to
+it would cost a second statement per insert. Make workers idempotent, which
 at-least-once delivery asks for anyway.
+
+The list of jobs a job waited for only holds once `require_encrypted` is set.
+Until then a row without the list is accepted, because a job inserted by 1.10,
+or before a key was configured, has none, and because plaintext `meta` can say
+anything. `shigoto:reencrypt/0,1` gives every waiting job its list, so setting
+`require_encrypted` after it loses no job. A worker that sends its
+`deps_results` on (an email, a webhook) is where a copied result would
+surface: set `require_encrypted`.
 
 A v1 ciphertext, written by 1.10 and by this release until
 `encryption_write_format` is set to `v2`, is bound to nothing: none of the

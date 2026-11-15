@@ -87,6 +87,7 @@ interface to write against.
     open_term/2,
     reseal/2,
     is_enabled/0,
+    is_required/1,
     is_frame/1,
     is_frame/2,
     unique_key/1,
@@ -249,13 +250,17 @@ opened_term({error, _} = Failed) ->
     Failed.
 
 plain_term(Term, {Column, _Bound}) ->
-    Refused =
-        keys() =/= [] andalso shigoto_config:require_encrypted() andalso
-            is_covered(Column, <<>>),
-    case Refused of
+    case is_required(Column) of
         true -> {error, plaintext_refused};
         false -> {ok, Term}
     end.
+
+-doc false.
+%% Whether a value of `Column` has to be a ciphertext: a key is configured,
+%% `require_encrypted` is set and the write format encrypts that column.
+-spec is_required(args | meta | cron_args | callback_args | result) -> boolean().
+is_required(Column) ->
+    keys() =/= [] andalso shigoto_config:require_encrypted() andalso is_covered(Column, <<>>).
 
 -doc false.
 %% A stored value as the current settings would write it, when it is not already:

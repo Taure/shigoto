@@ -108,6 +108,12 @@ With `cancel` or `discard`, a job cannot be inserted behind a dependency that
 has already failed: `shigoto:insert/1` answers
 `{error, {dependency_failed, [Id, ...]}}`.
 
+With an encryption key, the ids in `depends_on` are also written into the
+job's `meta` as `_shigoto_deps`, encrypted with it. They say whose results the
+job may be handed: see
+[Security](security.md#what-a-moved-ciphertext-does). The key is shigoto's;
+leave it as it is.
+
 A dependency that has already finished when the dependent job is inserted is
 not waited for. Its result is put into the new job's `deps_results` straight
 away, so depending on a job that completed a moment ago behaves like depending

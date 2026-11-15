@@ -41,7 +41,8 @@
 -type counts() :: shigoto:reencrypt_counts().
 
 -define(TABLES, [
-    {jobs, ~"shigoto_jobs", ~"id, worker, queue, unique_key, args, meta, result, deps_results"},
+    {jobs, ~"shigoto_jobs",
+        ~"id, worker, queue, unique_key, args, meta, result, deps_results, depends_on"},
     {archive, ~"shigoto_jobs_archive", ~"id, worker, args, meta, result, deps_results"},
     {batches, ~"shigoto_batches", ~"id, callback_worker, callback_args"}
 ]).
@@ -139,7 +140,7 @@ changes(#{callback_args := Stored} = Batch) ->
     change(~"callback_args", Stored, {callback_args, Worker});
 changes(#{id := Id, worker := Worker} = Job) when is_binary(Worker) ->
     change(~"args", maps:get(args, Job, null), {args, Worker}) ++
-        change(~"meta", maps:get(meta, Job, null), {meta, Worker}) ++
+        meta_change(Job, Worker) ++
         change(~"result", maps:get(result, Job, null), {result, Id}) ++
         deps_results_change(maps:get(deps_results, Job, null)) ++
         unique_key_change(Job);
@@ -154,6 +155,69 @@ change(Column, Stored, Context) when is_binary(Stored), Stored =/= ~"null" ->
     end;
 change(_Column, _Null, _Context) ->
     [].
+
+%% A job is handed the results of the jobs named in its meta
+%% (`shigoto_job:opened/1`). One inserted by a release that wrote no such list,
+%% or before a key was configured, gets it here, from what it waits for and
+%% what it has been given so far: once `require_encrypted` is set a waiting job
+%% without the list is handed nothing. Like plaintext that is encrypted here,
+%% the row is taken as it is. Only shigoto_jobs is read with `depends_on`:
+%% an archived job does not run.
+meta_change(#{meta := Stored, depends_on := DependsOn} = Job, Worker) when
+    is_binary(Stored), is_list(DependsOn)
+->
+    Waited = lists:usort(
+        [Id || Id <- DependsOn, is_integer(Id)] ++ given(maps:get(deps_results, Job, null))
+    ),
+    case listed(Stored, Worker, Waited) of
+        {ok, Listed} -> [{~"meta", Stored, shigoto_crypto:seal(Listed, {meta, Worker})}];
+        unchanged -> change(~"meta", Stored, {meta, Worker})
+    end;
+meta_change(Job, Worker) ->
+    change(~"meta", maps:get(meta, Job, null), {meta, Worker}).
+
+-spec listed(binary(), binary(), [integer()]) -> {ok, binary()} | unchanged.
+listed(_Stored, _Worker, []) ->
+    unchanged;
+listed(Stored, Worker, Waited) ->
+    try json:decode(plain_meta(Stored, Worker)) of
+        #{~"_shigoto_deps" := _Listed} ->
+            unchanged;
+        Meta when is_map(Meta) ->
+            {ok, iolist_to_binary(json:encode(Meta#{~"_shigoto_deps" => Waited}))};
+        _NotAnObject ->
+            unchanged
+    catch
+        _:_ -> unchanged
+    end.
+
+%% Plaintext is taken as it is, as `shigoto_crypto:reseal/2` takes it. A frame
+%% that does not open is left to `change/3`, which counts it as failed.
+plain_meta(Stored, Worker) ->
+    case shigoto_crypto:is_frame(Stored) of
+        false ->
+            Stored;
+        true ->
+            {ok, Plain} = shigoto_crypto:open(Stored, {meta, Worker}),
+            Plain
+    end.
+
+-spec given(term()) -> [integer()].
+given(Stored) when is_binary(Stored) ->
+    try json:decode(Stored) of
+        Results when is_map(Results) ->
+            [binary_to_integer(Id) || Id := _Result <- Results, is_binary(Id), is_id(Id)];
+        _NotAnObject ->
+            []
+    catch
+        _:_ -> []
+    end;
+given(_Null) ->
+    [].
+
+is_id(Id) ->
+    byte_size(Id) =< 20 andalso
+        re:run(Id, ~"^[0-9]+$", [dollar_endonly, {capture, none}]) =:= match.
 
 %% Only shigoto_jobs is read with its unique_key: a unique insert never looks
 %% in the archive.

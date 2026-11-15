@@ -23,6 +23,7 @@
 -define(WORKERS, shigoto_workers).
 -define(UNKNOWN_FOR, 30).
 -define(DATA_COLUMNS, [args, meta, result, deps_results, errors, callback_args]).
+-define(DEPS, ~"_shigoto_deps").
 
 -doc """
 Create the table that remembers which names are workers. The calling process
@@ -157,15 +158,51 @@ with_meta(Job, _Name) ->
 with_deps_results(#{deps_results := Stored} = Job) when is_binary(Stored) ->
     case decoded(Stored, #{}) of
         Results when is_map(Results) ->
-            Job#{deps_results => #{job_id(Id) => result(Id, Result) || Id := Result <- Results}};
+            Waited = waited_for(Job),
+            Job#{
+                deps_results =>
+                    #{
+                        job_id(Id) => result(job_id(Id), Result, Waited)
+                     || Id := Result <- Results
+                    }
+            };
         _NotAnObject ->
             Job#{deps_results => #{}}
     end;
 with_deps_results(Job) ->
     Job.
 
-result(Id, Result) ->
-    plain(shigoto_crypto:open_term(Result, {result, job_id(Id)})).
+%% A result is bound to the job that produced it, not to a job that reads it:
+%% copied whole into another row it opens. So a job is only handed the results
+%% of the jobs it was inserted to wait for. Their ids are in its meta, under
+%% `_shigoto_deps`, which is sealed for the job's worker.
+%%
+%% A job from a release that wrote no list is handed what its row holds, until
+%% a plaintext result is refused: by then `shigoto:reencrypt/0,1` has given
+%% every waiting job its list.
+-spec waited_for(map()) -> any | [term()].
+waited_for(Job) ->
+    case meta(Job) of
+        #{?DEPS := Ids} when is_list(Ids) ->
+            Ids;
+        #{?DEPS := _NotAList} ->
+            [];
+        _Unlisted ->
+            case shigoto_crypto:is_required(result) of
+                true -> [];
+                false -> any
+            end
+    end.
+
+meta(#{meta := Meta}) when is_binary(Meta) -> decoded(Meta, #{});
+meta(#{meta := Meta}) -> Meta;
+meta(_Job) -> #{}.
+
+result(JobId, Result, Waited) ->
+    case Waited =:= any orelse lists:member(JobId, Waited) of
+        true -> plain(shigoto_crypto:open_term(Result, {result, JobId}));
+        false -> throw({?MODULE, decrypt_failed})
+    end.
 
 job_id(Id) when is_binary(Id) ->
     try

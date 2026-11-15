@@ -103,8 +103,8 @@ Every push to `main` runs release.yml.
   user is meant to call it; what it does goes in a comment under `-doc false`.
   `rebar3 ex_doc` warns when a doc links to something hidden.
 - `meta` keys and batch `callback_args` keys that start with `_shigoto` are
-  shigoto's own (`_shigoto_carrier` so far, and `_batch_event`). Put the next
-  internal key under that prefix.
+  shigoto's own (`_shigoto_carrier`, `_shigoto_deps`, and `_batch_event`). Put
+  the next internal key under that prefix.
 - `{vsn, "git"}` in `shigoto.app.src` - version derives from git tags, never
   hand-edited. Do not publish to Hex (the maintainer does that manually).
 
@@ -205,7 +205,12 @@ rescues jobs that are still running here.
   `shigoto_repo:release_stuck_dependents/1` for jobs waiting on a job that has
   ended or is gone. A job cancelled or discarded for a failed dependency keeps
   the id in `depends_on` (only a job released to run loses it), so a retried
-  job waits on it again and that pass re-applies its policy.
+  job waits on it again and that pass re-applies its policy. With a key, the
+  ids a job is inserted to wait for are sealed into its `meta`
+  (`_shigoto_deps`, `waiting_for/2` in `shigoto_repo`), and
+  `shigoto_job:opened/1` hands it no result of another job: a result is bound
+  to its producer, not to its reader. A row without the list is accepted
+  until `require_encrypted` is set; `shigoto_reencrypt` writes the list.
 - **Context propagation.** `shigoto_propagator` is a behaviour (`inject/0`,
   `attach/1`, `detach/1`) named by the `propagator` setting; shigoto has no
   tracing dependency. The carrier is stamped into `meta` under

@@ -436,6 +436,11 @@ the second time.
 A v1 ciphertext is bound to nothing, so this is also the moment a v1 value
 that was moved between rows gets bound to the row it was moved to. Run it once
 every node writes `v2`, then drop `v1` from `encryption_read_formats`.
+
+A job that waits for other jobs, or holds results of them, and whose `meta`
+does not yet name them (`_shigoto_deps`) gets that list written. A job is
+handed only the results of the jobs named there once `require_encrypted` is
+set, so run this before setting it.
 """.
 -spec reencrypt() ->
     {ok, #{

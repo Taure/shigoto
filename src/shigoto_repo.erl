@@ -94,7 +94,9 @@ insert_validated(Pool, JobParams1, Opts) ->
     DependsOn = maps:get(depends_on, JobParams1, []),
     case validate_dependencies(Pool, DependsOn, effective_policy(JobParams1)) of
         {ok, Pending, Results} ->
-            JobParams = JobParams1#{depends_on => Pending, deps_results => Results},
+            JobParams = (waiting_for(JobParams1, DependsOn))#{
+                depends_on => Pending, deps_results => Results
+            },
             case resolve_unique(JobParams, Opts) of
                 none ->
                     do_insert(Pool, JobParams, Opts, null);
@@ -245,13 +247,30 @@ with_dependencies(Pool, Jobs) ->
 with_dependencies([], _Found, Validated) ->
     {ok, lists:reverse(Validated)};
 with_dependencies([Job | Jobs], Found, Validated) ->
-    case resolved_dependencies(maps:get(depends_on, Job, []), Found, effective_policy(Job)) of
+    DependsOn = maps:get(depends_on, Job, []),
+    case resolved_dependencies(DependsOn, Found, effective_policy(Job)) of
         {ok, Pending, Results} ->
             with_dependencies(Jobs, Found, [
-                Job#{depends_on => Pending, deps_results => Results} | Validated
+                (waiting_for(Job, DependsOn))#{depends_on => Pending, deps_results => Results}
+                | Validated
             ]);
         {error, _} = Refused ->
             Refused
+    end.
+
+%% The jobs a job is inserted to wait for are the ones whose results it may be
+%% handed (`shigoto_job:opened/1`). With a key they are named in its meta,
+%% which is sealed for its worker, so that a result copied into the row of a
+%% job that never waited for it is not opened there.
+-spec waiting_for(map(), [term()]) -> map().
+waiting_for(Job, []) ->
+    Job;
+waiting_for(Job, DependsOn) ->
+    case {shigoto_crypto:is_enabled(), maps:get(meta, Job, #{})} of
+        {true, Meta} when is_map(Meta) ->
+            Job#{meta => (maps:remove('_shigoto_deps', Meta))#{~"_shigoto_deps" => DependsOn}};
+        _NoKeyOrNoObject ->
+            Job
     end.
 
 -define(LOCKS_PER_STATEMENT, 64).
