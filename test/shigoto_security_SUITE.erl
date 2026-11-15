@@ -60,6 +60,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     two_bulk_inserts_at_once_insert_each_unique_job_once/1,
     a_bulk_insert_rolled_back_leaves_no_unique_job/1,
     unique_states_that_are_no_job_state_are_refused/1,
+    keys_that_belong_to_shigoto_are_refused/1,
     insert_all_takes_no_more_unique_locks_than_its_limit/1,
     a_full_lock_table_is_answered_not_raised/1,
     a_unique_insert_the_database_refuses_is_answered_not_raised/1,
@@ -143,6 +144,7 @@ cases() ->
         two_bulk_inserts_at_once_insert_each_unique_job_once,
         a_bulk_insert_rolled_back_leaves_no_unique_job,
         unique_states_that_are_no_job_state_are_refused,
+        keys_that_belong_to_shigoto_are_refused,
         insert_all_takes_no_more_unique_locks_than_its_limit,
         a_full_lock_table_is_answered_not_raised,
         a_unique_insert_the_database_refuses_is_answered_not_raised,
@@ -1123,6 +1125,47 @@ unique_states_that_are_no_job_state_are_refused(_Config) ->
     ?assertNotEqual(Other, Id),
     ?assertMatch(
         {ok, {conflict, #{id := Id}}}, shigoto:insert(Job, #{unique => #{states => Every}})
+    ).
+
+keys_that_belong_to_shigoto_are_refused(_Config) ->
+    Job = waiting(shigoto_canary_worker, 1),
+    [
+        begin
+            Refused = {error, {reserved_key, meta, ~"_shigoto_deps"}},
+            ?assertEqual(Refused, shigoto:insert(Job#{meta => Meta})),
+            ?assertEqual(Refused, shigoto:insert_all([Job, Job#{meta => Meta}]))
+        end
+     || Meta <- [
+            #{~"_shigoto_deps" => [1], ~"mine" => 1},
+            #{'_shigoto_deps' => [1]},
+            ~"{\"_shigoto_deps\":[1]}"
+        ]
+    ],
+    ?assertEqual(0, job_count()),
+    %% A carrier handed over by hand is the one key a caller may set.
+    Carrier = #{~"traceparent" => ~"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+    {ok, #{id := Id}} = shigoto:insert(Job#{
+        meta => #{~"_shigoto_carrier" => Carrier, ~"_mine" => 1}
+    }),
+    {ok, #{meta := Meta}} = shigoto:get_job(Id),
+    ?assertEqual(#{~"_shigoto_carrier" => Carrier, ~"_mine" => 1}, json:decode(Meta)),
+    [
+        ?assertEqual(
+            {error, {reserved_key, callback_args, Key}},
+            shigoto:new_batch(#{
+                callback_worker => shigoto_batch_callback_worker,
+                callback_args => #{Key => ~"discard", ~"mine" => 1}
+            })
+        )
+     || Key <- [~"_batch_event", ~"_shigoto_anything"]
+    ],
+    ?assertEqual(
+        {error, {reserved_key, callback_args, ~"_batch_event"}},
+        shigoto:new_batch(#{callback_args => ~"{\"_batch_event\":\"discard\"}"})
+    ),
+    ?assertMatch(
+        #{rows := [#{count := 0}]},
+        shigoto_db:query(?POOL, ~"SELECT count(*) AS count FROM shigoto_batches", [])
     ).
 
 insert_all_takes_no_more_unique_locks_than_its_limit(_Config) ->

@@ -86,12 +86,17 @@ that has already failed is not inserted: `{error, {dependency_failed, Ids}}`.
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert_job(Pool, JobParams0, Opts) ->
-    JobParams1 = shigoto_propagator:stamped(
-        apply_worker_defaults(JobParams0), shigoto_propagator:injected()
-    ),
-    case insertable(JobParams1, Opts) of
-        {error, _} = Invalid -> Invalid;
-        ok -> insert_validated(Pool, JobParams1, Opts)
+    case own_meta(JobParams0) of
+        ok ->
+            JobParams1 = shigoto_propagator:stamped(
+                apply_worker_defaults(JobParams0), shigoto_propagator:injected()
+            ),
+            case insertable(JobParams1, Opts) of
+                {error, _} = Invalid -> Invalid;
+                ok -> insert_validated(Pool, JobParams1, Opts)
+            end;
+        {error, _} = Reserved ->
+            Reserved
     end.
 
 insert_validated(Pool, JobParams1, Opts) ->
@@ -145,6 +150,12 @@ insert_all(Pool, JobParamsList, Opts) ->
 placed_all(_Pool, [], _Opts) ->
     {ok, []};
 placed_all(Pool, JobParamsList, Opts) ->
+    case [Reserved || Job <- JobParamsList, {error, _} = Reserved <- [own_meta(Job)]] of
+        [Reserved | _] -> Reserved;
+        [] -> placed_own(Pool, JobParamsList, Opts)
+    end.
+
+placed_own(Pool, JobParamsList, Opts) ->
     Carrier = shigoto_propagator:injected(),
     Jobs = [shigoto_propagator:stamped(apply_worker_defaults(J), Carrier) || J <- JobParamsList],
     case [Invalid || Job <- Jobs, {error, _} = Invalid <- [insertable(Job, Opts)]] of
@@ -1430,6 +1441,18 @@ fence(JobId) when is_integer(JobId) -> {JobId, null}.
 %%----------------------------------------------------------------------
 %% Internal: dependency validation
 %%----------------------------------------------------------------------
+
+%% The `_shigoto` keys of a job's meta are shigoto's own: what it reads from
+%% them it trusts (`_shigoto_deps` says whose results a job may be handed). The
+%% one a caller may set is the carrier, which is how a context is handed over
+%% by hand; this is asked before the propagator's own is added.
+-spec own_meta(map()) -> ok | {error, {reserved_key, meta, binary()}}.
+own_meta(JobParams) ->
+    Meta = maps:get(meta, JobParams, #{}),
+    case shigoto_job:reserved_keys(Meta, []) -- [shigoto_propagator:key()] of
+        [] -> ok;
+        [Key | _] -> {error, {reserved_key, meta, Key}}
+    end.
 
 %% What an insert refuses without asking the database.
 -spec insertable(map(), map()) -> ok | {error, term()}.

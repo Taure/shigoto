@@ -103,6 +103,7 @@ Inserting:
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
 | `insert_all/1,2` with more unique jobs than `unique_lock_limit` (1000) allows locks for | | refused: `{error, {too_many_unique_locks, Needed, Limit}}`. Split the list. See [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts) |
 | A unique insert PostgreSQL refuses | raised `transaction_rolled_back` | answers `{error, {pgsql_error, _}}` with the code |
+| `meta` with a key that starts with `_shigoto` | inserted | refused: `{error, {reserved_key, meta, Key}}`. `_shigoto_carrier` is still accepted, to hand over a context by hand |
 | `states` of a `unique` map that are not job states | put into the statement as given; a name that is no state matched nothing, so every insert went in | the insert is refused: `{error, {invalid_unique_states, States}}` |
 
 Dependencies and batches:
@@ -112,6 +113,7 @@ Dependencies and batches:
 | A dependency that is discarded or cancelled | its dependents ran; after `cancel_by/1` they waited for ever | each dependent runs, is cancelled or is discarded, by `on_dependency_failure` (default `run`), whichever way the dependency ended |
 | Retrying a job that was cancelled or discarded for a failed dependency | | it waits on that dependency again, and follows it again if it is still failed. See [Job Dependencies](dependencies.md#retrying) |
 | The `meta` of a job with `depends_on`, with an encryption key | as given | also holds `_shigoto_deps`, the ids it was inserted to wait for. With `require_encrypted` and `v2`, a job without that list is handed no result and fails with `decrypt_failed`: run `shigoto:reencrypt()` first (step 7), which adds it |
+| `new_batch/1` with `_batch_event` or a `_shigoto` key in `callback_args` | stored; the callback of a completed batch saw `_batch_event => discard` | refused: `{error, {reserved_key, callback_args, Key}}`. A batch stored that way no longer hands a completed callback the key |
 | A cancelled job in a batch | held the batch open | counts as ended; the callback gets `_batch_event => discard` |
 | Retrying a discarded job of a batch | the batch could finish one job early | the job is counted again when it ends |
 | A batch finished on a node that cannot run its callback | could be left `callback_*` with no callback job | stays `active` until a node that can run the callback settles it. See [Batches](batches.md#a-callback-a-node-cannot-run) |

@@ -91,9 +91,17 @@ and the callback fires before the rest exist.
     readable/1
 ]).
 
+-define(EVENT, ~"_batch_event").
+
 -doc "Create a new batch.".
 -spec create(atom(), map()) -> {ok, map()} | {error, term()}.
 create(Pool, Opts) ->
+    case shigoto_job:reserved_keys(maps:get(callback_args, Opts, #{}), [?EVENT]) of
+        [] -> created(Pool, Opts);
+        [Key | _] -> {error, {reserved_key, callback_args, Key}}
+    end.
+
+created(Pool, Opts) ->
     Worker = maps:get(callback_worker, Opts, undefined),
     WorkerBin =
         case Worker of
@@ -361,8 +369,10 @@ enqueued({job, JobParams}) ->
         {error, _Reason} -> error({?MODULE, callback_not_enqueued})
     end.
 
-with_event(Args, complete) -> Args;
-with_event(Args, discard) -> Args#{~"_batch_event" => ~"discard"}.
+%% The key is shigoto's: one a row holds already is not what tells the callback
+%% how the batch ended.
+with_event(Args, complete) -> maps:remove(?EVENT, Args);
+with_event(Args, discard) -> Args#{?EVENT => ~"discard"}.
 
 -spec callback_args(map()) -> {ok, term()} | {error, term()}.
 callback_args(#{callback_args := Args}) when is_map(Args) ->

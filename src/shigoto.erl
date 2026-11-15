@@ -92,9 +92,11 @@ row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
 ## Reserved keys
 
 In a job's `meta` and in a batch's `callback_args`, every key that starts with
-`_shigoto` belongs to shigoto, as does `_batch_event` in `callback_args`. Do
-not set them, apart from handing over a carrier by hand (`m:shigoto_propagator`),
-and do not rely on ones that are not documented.
+`_shigoto` belongs to shigoto, as does `_batch_event` in `callback_args`. An
+insert whose `meta` sets one answers `{error, {reserved_key, meta, Key}}`, and
+`new_batch/1` answers `{error, {reserved_key, callback_args, Key}}`. The one a
+caller may set is `_shigoto_carrier`, to hand over a carrier by hand
+(`m:shigoto_propagator`). Do not rely on ones that are not documented.
 """.
 
 -define(TXN_KEY, '$shigoto_txn').
@@ -151,7 +153,7 @@ value does not open under any configured key. `scanned` counts rows.
 insert(JobParams) ->
     insert(JobParams, #{}).
 
--doc "Insert a job with options. Params: worker, args, meta, queue, priority, scheduled_at, max_attempts, unique, tags, batch, depends_on, on_dependency_failure. `meta` keys that start with `_shigoto` are reserved.".
+-doc "Insert a job with options. Params: worker, args, meta, queue, priority, scheduled_at, max_attempts, unique, tags, batch, depends_on, on_dependency_failure. `meta` keys that start with `_shigoto` are reserved: setting one, other than `_shigoto_carrier`, answers `{error, {reserved_key, meta, Key}}`.".
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
     case shigoto_config:testing_mode() of
@@ -376,7 +378,11 @@ paused_queues() ->
             ]
     end.
 
--doc "Create a new batch for grouping jobs.".
+-doc """
+Create a new batch for grouping jobs. Options: `callback_worker` and
+`callback_args`. `callback_args` with `_batch_event` or a key that starts with
+`_shigoto` answers `{error, {reserved_key, callback_args, Key}}`.
+""".
 -spec new_batch(map()) -> {ok, map()} | {error, term()}.
 new_batch(Opts) ->
     shigoto_batch:create(txn_pool(), Opts).

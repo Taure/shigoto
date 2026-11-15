@@ -19,6 +19,7 @@
 %% error term.
 
 -export([worker/1, worker_name/1, opened/1, readable/1, redact/1, new_table/0]).
+-export([reserved_keys/2]).
 
 -define(WORKERS, shigoto_workers).
 -define(UNKNOWN_FOR, 30).
@@ -312,6 +313,31 @@ shown_result(Id, Result) ->
 
 json_text(Term) ->
     iolist_to_binary(json:encode(Term)).
+
+-doc false.
+%% The keys of `Json` that belong to shigoto: every key that starts with
+%% `_shigoto`, and those in `Also`. `Json` is an object as a caller hands it
+%% over, a map or its JSON text.
+-spec reserved_keys(term(), [binary()]) -> [binary()].
+reserved_keys(Json, Also) when is_map(Json) ->
+    lists:sort([
+        Name
+     || Key <- maps:keys(Json), Name <- [key_name(Key)], is_reserved(Name, Also)
+    ]);
+reserved_keys(Json, Also) when is_binary(Json) ->
+    case decoded(Json, #{}) of
+        Object when is_map(Object) -> reserved_keys(Object, Also);
+        _NotAnObject -> []
+    end;
+reserved_keys(_Json, _Also) ->
+    [].
+
+key_name(Key) when is_binary(Key) -> Key;
+key_name(Key) when is_atom(Key) -> atom_to_binary(Key);
+key_name(_Key) -> <<>>.
+
+is_reserved(<<"_shigoto", _/binary>>, _Also) -> true;
+is_reserved(Name, Also) -> lists:member(Name, Also).
 
 -doc """
 A job map without the columns that carry job data (`args`, `meta`, `result`,

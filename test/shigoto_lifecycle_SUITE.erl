@@ -69,6 +69,7 @@ the application does with it.
     without_a_propagator_nothing_is_carried/1,
     an_outcome_that_cannot_be_written_is_run_again/1,
     a_batch_whose_callback_cannot_be_inserted_is_settled_later/1,
+    a_batch_event_stored_in_the_row_does_not_reach_a_completed_batch/1,
     a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can/1,
     batches_this_node_cannot_settle_do_not_hold_up_the_others/1,
     losing_every_connection_loses_no_job/1,
@@ -169,6 +170,7 @@ all() ->
         without_a_propagator_nothing_is_carried,
         an_outcome_that_cannot_be_written_is_run_again,
         a_batch_whose_callback_cannot_be_inserted_is_settled_later,
+        a_batch_event_stored_in_the_row_does_not_reach_a_completed_batch,
         a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can,
         batches_this_node_cannot_settle_do_not_hold_up_the_others,
         losing_every_connection_loses_no_job,
@@ -750,6 +752,28 @@ a_batch_whose_callback_cannot_be_inserted_is_settled_later(_Config) ->
     receive
         {batch_callback, _} -> ct:fail(second_batch_callback)
     after 600 -> ok
+    end.
+
+a_batch_event_stored_in_the_row_does_not_reach_a_completed_batch(_Config) ->
+    {ok, #{id := BatchId}} = shigoto:new_batch(#{
+        callback_worker => shigoto_batch_callback_worker,
+        callback_args => #{~"test_pid" => list_to_binary(pid_to_list(self()))}
+    }),
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        UPDATE shigoto_batches
+        SET callback_args = callback_args || '{"_batch_event": "discard"}'::jsonb
+        WHERE id = $1
+        """,
+        [BatchId]
+    ),
+    Id = enqueue(~"batch-event", #{batch => BatchId}),
+    instruct(performing(~"batch-event"), {return, ok}),
+    ?assertMatch(#{attempt := 1}, await(Id, ~"completed")),
+    receive
+        {batch_callback, Args} -> ?assertNot(maps:is_key(~"_batch_event", Args))
+    after 5000 -> ct:fail(no_batch_callback)
     end.
 
 a_batch_whose_callback_this_node_cannot_run_waits_for_one_that_can(_Config) ->

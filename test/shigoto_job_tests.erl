@@ -31,6 +31,7 @@ job_test_() ->
             fun a_job_without_its_list_is_refused_once_plaintext_is/0,
             fun a_readable_job_shows_reasons_not_ciphertext/0,
             fun a_redacted_job_has_no_data/0,
+            fun the_keys_that_belong_to_shigoto_are_found/0,
             fun the_table_is_made_once/0,
             fun a_name_that_is_no_worker_is_not_asked_about_for_30_seconds/0,
             fun args_already_a_map_are_kept/0,
@@ -238,6 +239,28 @@ a_readable_job_shows_reasons_not_ciphertext() ->
     ?assertEqual(~"{\"n\":1}", maps:get(args, Plain)),
     set(#{}),
     ?assertEqual(Job, shigoto_job:readable(Job)).
+
+the_keys_that_belong_to_shigoto_are_found() ->
+    ?assertEqual([], shigoto_job:reserved_keys(#{}, [])),
+    ?assertEqual([], shigoto_job:reserved_keys(#{~"mine" => 1, ~"_mine" => 1, shigoto => 1}, [])),
+    ?assertEqual(
+        [~"_shigoto", ~"_shigoto_carrier", ~"_shigoto_deps"],
+        shigoto_job:reserved_keys(
+            #{~"_shigoto_deps" => 1, '_shigoto_carrier' => 1, ~"_shigoto" => 1, 7 => 1, ~"a" => 1},
+            []
+        )
+    ),
+    ?assertEqual([], shigoto_job:reserved_keys(#{~"_batch_event" => 1}, [])),
+    ?assertEqual(
+        [~"_batch_event"], shigoto_job:reserved_keys(#{'_batch_event' => 1}, [~"_batch_event"])
+    ),
+    ?assertEqual(
+        [~"_shigoto_deps"], shigoto_job:reserved_keys(~"{\"_shigoto_deps\":[1],\"a\":1}", [])
+    ),
+    [
+        ?assertEqual([], shigoto_job:reserved_keys(NoObject, [~"_batch_event"]))
+     || NoObject <- [~"[\"_shigoto\"]", ~"not json", undefined, [~"_shigoto"]]
+    ].
 
 a_redacted_job_has_no_data() ->
     Job = (job(?WORKER, #{~"card" => ~"4111"}, #{}))#{
