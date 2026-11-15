@@ -79,6 +79,11 @@ anything. `shigoto:reencrypt/0,1` gives every waiting job its list, so setting
 `deps_results` on (an email, a webhook) is where a copied result would
 surface: set `require_encrypted`.
 
+A key of `deps_results` names a job only when it is the id as PostgreSQL
+writes it: `5`, never `05`, `+5` or ` 5`. Under any other key the waiting
+job fails with `decrypt_failed`, `shigoto:reencrypt/0,1` counts the value as
+`failed`, and the job is not put on the list.
+
 A v1 ciphertext, written by 1.10 and by this release until
 `encryption_write_format` is set to `v2`, is bound to nothing: none of the
 rows above fail for it. `v1` is the default because a 1.10 node cannot read

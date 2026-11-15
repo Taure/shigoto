@@ -154,8 +154,14 @@ a_result_under_a_key_no_id_can_be_is_refused() ->
     Huge = binary:copy(~"9", 4000000),
     [
         ?assertEqual({error, decrypt_failed}, shigoto_job:opened(Job#{deps_results => Stored(Key)}))
-     || Key <- [Huge, binary:copy(~"9", 21), ~"5 "]
+     || Key <- [Huge, binary:copy(~"9", 21), ~"5 ", ~" 5", ~"05", ~"+5", ~"-0", ~""]
     ],
+    ?assertEqual(error, shigoto_job:result_id(~"05")),
+    ?assertEqual({ok, 5}, shigoto_job:result_id(~"5")),
+    ?assertEqual({ok, 0}, shigoto_job:result_id(~"0")),
+    ?assertEqual({ok, -5}, shigoto_job:result_id(~"-5")),
+    ?assertEqual({ok, 99999999999999999999}, shigoto_job:result_id(binary:copy(~"9", 20))),
+    ?assertEqual(error, shigoto_job:result_id(binary:copy(~"9", 21))),
     Shown = shigoto_job:readable(Job#{id => 1, deps_results => Stored(Huge)}),
     ?assertEqual(#{Huge => ~"decrypt_failed"}, json:decode(maps:get(deps_results, Shown))).
 

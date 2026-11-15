@@ -19,7 +19,7 @@
 %% error term.
 
 -export([worker/1, worker_name/1, opened/1, readable/1, redact/1, new_table/0]).
--export([reserved_keys/2]).
+-export([reserved_keys/2, result_id/1]).
 
 -define(WORKERS, shigoto_workers).
 -define(UNKNOWN_FOR, 30).
@@ -231,19 +231,35 @@ result(JobId, Result, Waited) ->
         false -> throw({?MODULE, decrypt_failed})
     end.
 
+job_id(Id) when is_binary(Id) ->
+    case result_id(Id) of
+        {ok, JobId} -> JobId;
+        error -> throw({?MODULE, decrypt_failed})
+    end;
+job_id(Id) ->
+    Id.
+
+-doc false.
+%% The job a key of `deps_results` names. Only the text PostgreSQL writes for
+%% an id is one: no plus sign, no leading zero, no blank. So every reader of a
+%% key (the run, `readable/1`, `shigoto_reencrypt`) takes it for the same job.
+%%
 %% A bigint has at most 19 digits and a sign. Longer text is not converted: a
 %% number of millions of digits raises `system_limit`, with the text in the
 %% stack frame.
-job_id(Id) when is_binary(Id), byte_size(Id) =< 20 ->
-    try
-        binary_to_integer(Id)
+-spec result_id(binary()) -> {ok, integer()} | error.
+result_id(Key) when byte_size(Key) =< 20 ->
+    try binary_to_integer(Key) of
+        Id ->
+            case integer_to_binary(Id) of
+                Key -> {ok, Id};
+                _WrittenOtherwise -> error
+            end
     catch
-        error:_ -> throw({?MODULE, decrypt_failed})
+        error:_ -> error
     end;
-job_id(Id) when is_binary(Id) ->
-    throw({?MODULE, decrypt_failed});
-job_id(Id) ->
-    Id.
+result_id(_Longer) ->
+    error.
 
 plain({ok, Plain}) -> Plain;
 plain({error, Reason}) -> throw({?MODULE, Reason}).

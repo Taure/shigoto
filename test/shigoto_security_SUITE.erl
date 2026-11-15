@@ -48,6 +48,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_result_a_job_did_not_wait_for_is_not_handed_to_it/1,
     a_waiting_job_from_before_the_upgrade_gets_its_results/1,
     reencrypt_names_what_a_waiting_job_may_read/1,
+    reencrypt_takes_a_result_key_as_the_run_does/1,
     batch_callback_args_are_encrypted/1,
     a_batch_naming_no_worker_gets_no_callback/1,
     replaced_args_are_bound_to_the_existing_row/1,
@@ -137,6 +138,7 @@ cases() ->
         a_result_a_job_did_not_wait_for_is_not_handed_to_it,
         a_waiting_job_from_before_the_upgrade_gets_its_results,
         reencrypt_names_what_a_waiting_job_may_read,
+        reencrypt_takes_a_result_key_as_the_run_does,
         batch_callback_args_are_encrypted,
         a_batch_naming_no_worker_gets_no_callback,
         replaced_args_are_bound_to_the_existing_row,
@@ -184,6 +186,7 @@ v2_only() ->
         a_result_a_job_did_not_wait_for_is_not_handed_to_it,
         a_waiting_job_from_before_the_upgrade_gets_its_results,
         reencrypt_names_what_a_waiting_job_may_read,
+        reencrypt_takes_a_result_key_as_the_run_does,
         batch_callback_args_are_encrypted,
         a_v1_frame_is_refused_once_only_v2_is_read,
         v1_is_still_written_and_read_when_set,
@@ -818,6 +821,26 @@ reencrypt_names_what_a_waiting_job_may_read(_Config) ->
     {_, Args} = performed(shigoto_canary_other_worker),
     ?assertEqual(#{Done => #{~"secret" => Canary}}, maps:get(deps_results, Args)),
     _ = await(Old, ~"completed").
+
+%% A key PostgreSQL would not have written for an id names no job to the run,
+%% so it names none here: the job is not listed, the entry is not rewritten.
+reencrypt_takes_a_result_key_as_the_run_does(_Config) ->
+    Canary = canary(),
+    Done = enqueue(~"result", Canary),
+    _ = performed(shigoto_canary_worker),
+    #{result := Result} = await(Done, ~"completed"),
+    Pending = parked(Canary),
+    Sealed = shigoto_crypto:seal(~"{}", {args, ~"shigoto_canary_other_worker"}),
+    Odd = insert_waiting_row(Sealed, ~"{}", #{}, [Pending]),
+    Padded = <<"0", (integer_to_binary(Done))/binary>>,
+    #{num_rows := 1} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_jobs SET deps_results = $2::jsonb WHERE id = $1",
+        [Odd, iolist_to_binary(json:encode(#{Padded => json:decode(Result)}))]
+    ),
+    ?assertMatch({ok, #{jobs := #{failed := 1}}}, shigoto:reencrypt()),
+    {ok, #{meta := Meta}} = shigoto:get_job(Odd),
+    ?assertEqual(#{~"_shigoto_deps" => [Pending]}, json:decode(Meta)).
 
 %% A row of `shigoto_canary_other_worker` written to the table directly, with
 %% results in it.

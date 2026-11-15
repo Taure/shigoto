@@ -210,7 +210,10 @@ plain_meta(Stored, Worker) ->
 given(Stored) when is_binary(Stored) ->
     try json:decode(Stored) of
         Results when is_map(Results) ->
-            [binary_to_integer(Id) || Id := _Result <- Results, is_binary(Id), is_id(Id)];
+            [
+                Id
+             || Key := _Result <- Results, is_binary(Key), {ok, Id} <- [shigoto_job:result_id(Key)]
+            ];
         _NotAnObject ->
             []
     catch
@@ -218,10 +221,6 @@ given(Stored) when is_binary(Stored) ->
     end;
 given(_Null) ->
     [].
-
-is_id(Id) ->
-    byte_size(Id) =< 20 andalso
-        re:run(Id, ~"^[0-9]+$", [dollar_endonly, {capture, none}]) =:= match.
 
 %% Only shigoto_jobs is read with its unique_key: a unique insert never looks
 %% in the archive.
@@ -279,13 +278,13 @@ deps_results_change(_Null) ->
 entry(Id, null) ->
     {Id, {current, null}};
 entry(Id, Result) ->
-    try binary_to_integer(Id) of
-        JobId ->
+    case shigoto_job:result_id(Id) of
+        {ok, JobId} ->
             case shigoto_crypto:reseal(iolist_to_binary(json:encode(Result)), {result, JobId}) of
                 current -> {Id, {current, Result}};
                 {resealed, Sealed} -> {Id, {resealed, json:decode(Sealed)}};
                 {error, _} -> failed
-            end
-    catch
-        error:badarg -> failed
+            end;
+        error ->
+            failed
     end.
