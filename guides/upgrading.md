@@ -76,7 +76,7 @@ Running a job:
 | `on_discard/2` | ran in the process that discarded the job (an executor, a queue's rescue, the caller of `cancel/1`), for as long as it took | runs in a process of its own, for at most `on_discard_timeout` (60000 ms), 10 at a time, with at most 10000 rows of 64 MB together waiting. See [Workers](workers.md#on_discard-callback) |
 | A fanout job | the first node to finish wrote the outcome to the row, and the nodes after it never saw the job | no node writes the row; every node runs it |
 | The stale-job rescue and the sweeps | run by every queue of every node | run by one process per node, one node at a time, every `rescue_interval` |
-| The seki limiter, bulkhead and breaker of a worker | named by the atoms `shigoto_rl_<worker>`, `shigoto_bh_<worker>` and `shigoto_cb_<worker>` | named `{shigoto_limiter, Worker}`, `{shigoto_bulkhead, Worker}` and `{shigoto_breaker, Worker}`, which is the `name` in seki's telemetry. Needs seki 0.6. A `rate_limit/0` on `seki_backend_pg` gossips under the new name: until every node is upgraded, old and new nodes count on their own |
+| The seki limiter, bulkhead and breaker of a worker | named by the atoms `shigoto_rl_<worker>`, `shigoto_bh_<worker>` and `shigoto_cb_<worker>` | named `{shigoto_limiter, Worker}`, `{shigoto_bulkhead, Worker}` and `{shigoto_breaker, Worker}`, which is the `name` in seki's telemetry. Needs seki 0.6. A `rate_limit/0` on `seki_backend_pg` gossips under the new name: until every node is upgraded, old and new nodes count on their own, so the cluster as a whole may let through up to twice the limit during the deploy |
 
 What is recorded:
 
