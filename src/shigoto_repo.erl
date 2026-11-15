@@ -1006,7 +1006,7 @@ failed_dependencies_followed(Pool, Failed) ->
 update_progress(Pool, JobId, Progress) ->
     SQL = ~"UPDATE shigoto_jobs SET progress = $2 WHERE id = $1",
     case query(Pool, SQL, [JobId, Progress]) of
-        #{command := update} -> ok;
+        #{} -> ok;
         {error, _} = Err -> Err
     end.
 
@@ -1149,7 +1149,7 @@ upsert_cron_entry(Pool, Entry) ->
             maps:get(last_scheduled_at, Entry, null)
         ])
     of
-        #{command := insert} -> ok;
+        #{} -> ok;
         {error, _} = Err -> Err
     end.
 

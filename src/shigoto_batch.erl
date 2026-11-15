@@ -118,7 +118,7 @@ create(Pool, Opts) ->
 increment_total(Pool, BatchId) ->
     SQL = ~"UPDATE shigoto_batches SET total_jobs = total_jobs + 1 WHERE id = $1",
     case query(Pool, SQL, [BatchId]) of
-        #{command := update} -> ok;
+        #{} -> ok;
         {error, _} = Err -> Err
     end.
 

@@ -8,8 +8,8 @@ for a query rather than for a driver.
 
 ## What a caller gets
 
-`#{command := atom(), num_rows := integer(), rows := [row()]}` for a statement
-that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
+`#{command := atom() | binary(), num_rows := integer(), rows := [row()]}` for a
+statement that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
 Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
 
@@ -137,8 +137,12 @@ opened through kura raises them the same way. A server error keeps only its
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
 
--doc "The shape a statement answers with.".
--type result() :: #{command := atom(), num_rows := term(), rows := [term()]}.
+-doc """
+The shape a statement answers with. `command` is an atom for a command tag
+minato knows and the tag itself, a binary, for one it does not: match on it
+only with a clause for everything else.
+""".
+-type result() :: #{command := atom() | binary(), num_rows := term(), rows := [term()]}.
 
 -doc "What went wrong. `pgsql_error` is the server refusing the statement.".
 -type error() :: {pgsql_error, map()} | {socket, term()} | term().
