@@ -14,6 +14,33 @@ the pull request. CI fails a pull request whose file differs.
 
 ### Bug Fixes
 
+- Stop sending unique fields on every node once none is stored in the clear
+- Answer every refused insert without PostgreSQL's message and detail
+- Cut the worker name in the errors entries a statement builds
+- Keep looking for unique fields in the clear while the check fails
+- Read a deps_results key as a job id in one place
+
+### Documentation
+
+- Describe row keys without naming a minato that is not released
+- Say what an instance made invalid on a running node does
+- Rewrap the insert_all/3 paragraph on unique locks
+- Name the rebar3 and the Hex publishing main brought in
+
+### Refactoring
+
+- Write the empty key name with the binary sigil
+
+### Testing
+
+- Trace what a call sends to PostgreSQL from a module of its own
+- Insert_all at exactly its unique lock limit and one above
+- Name the tables whose columns have to be atoms
+
+## [1.10.2] - 2026-11-15
+
+### Bug Fixes
+
 - Stop writing decrypted job args to the database in the clear
 - Resolve dependencies atomically on fail, discard and cancel
 - Claim retryable jobs once their backoff is over
@@ -110,6 +137,7 @@ the pull request. CI fails a pull request whose file differs.
 
 - Relock to minato 1.1.6 and seki 0.5.0
 - Pin the build plugins
+- Publish to Hex with Workload Identity (#70)
 
 ### Performance
 
