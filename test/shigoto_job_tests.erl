@@ -18,6 +18,7 @@ job_test_() ->
         [
             fun a_worker_exports_perform/0,
             fun a_name_that_is_no_atom_creates_none/0,
+            fun a_name_no_module_can_have_is_cut/0,
             fun the_allow_list_is_checked_before_the_module_is_loaded/0,
             fun the_answer_is_remembered_and_follows_the_allow_list/0,
             fun a_job_is_checked_without_the_table/0,
@@ -56,6 +57,22 @@ a_name_that_is_no_atom_creates_none() ->
     [?assertEqual({error, {unknown_worker, Name}}, shigoto_job:worker(Name)) || _ <- [1, 2, 3]],
     ?assertEqual(Before, erlang:system_info(atom_count)),
     ?assertError(badarg, binary_to_existing_atom(Name)).
+
+a_name_no_module_can_have_is_cut() ->
+    Longest = binary:copy(~"a", 1020),
+    ?assertEqual({error, {unknown_worker, Longest}}, shigoto_job:worker(Longest)),
+    ?assertEqual(Longest, shigoto_job:worker_name(Longest)),
+    ?assertEqual(
+        {error, {unknown_worker, binary:copy(~"a", 255)}},
+        shigoto_job:worker(<<Longest/binary, "a">>)
+    ),
+    Accented = binary:copy(~"é", 600),
+    {error, {unknown_worker, Cut}} = shigoto_job:worker(#{worker => Accented}),
+    ?assertEqual(binary:copy(~"é", 127), Cut),
+    ?assertEqual(Cut, shigoto_job:worker_name(Accented)),
+    ?assertEqual(<<>>, shigoto_job:worker_name(binary:copy(<<255>>, 2000))),
+    ?assertEqual(shigoto_test_worker, shigoto_job:worker_name(shigoto_test_worker)),
+    ?assertEqual(undefined, shigoto_job:worker_name(undefined)).
 
 the_allow_list_is_checked_before_the_module_is_loaded() ->
     set(#{workers => [shigoto_test_worker]}),

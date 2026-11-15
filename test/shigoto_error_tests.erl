@@ -141,7 +141,9 @@ an_entry_has_the_documented_fields() ->
     ),
     Plain = shigoto_error:entry(#{}, timeout),
     ?assertEqual([~"at", ~"attempt", ~"error", ~"worker"], lists:sort(maps:keys(Plain))),
-    ?assertMatch(#{~"attempt" := 0, ~"worker" := ~"undefined"}, Plain).
+    ?assertMatch(#{~"attempt" := 0, ~"worker" := ~"undefined"}, Plain),
+    Long = shigoto_error:entry(#{worker => binary:copy(~"w", 5000)}, timeout),
+    ?assertEqual(binary:copy(~"w", 255), maps:get(~"worker", Long)).
 
 appended_keeps_the_newest_entries() ->
     SQL = shigoto_error:appended(~"errors", ~"$2::jsonb"),

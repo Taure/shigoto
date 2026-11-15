@@ -86,6 +86,7 @@ What is recorded:
 | `{error, {Tag, X}}` returned from `perform/1` | recorded as `Tag:X`, like an exception | recorded as the term, `{Tag,X}`, also for `{error, {error, X}}`; only what was raised is `Class:Reason` |
 | `errors` of a job that was put back | | has an entry per time, with `snoozed`; an entry without it is a failed attempt |
 | `errors` | grew without a bound | the 50 newest entries, 1024 bytes per reason |
+| A row whose `worker` is longer than a module name can be (1020 bytes) | written whole to every `errors` entry, log report and event | refused without being looked up; `errors`, logs and events hold its first 255 bytes |
 | Archiving | copied, then deleted: a job that finished in between was deleted without a copy | one statement deletes and archives |
 
 Inserting:

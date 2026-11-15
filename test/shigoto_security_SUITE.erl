@@ -26,6 +26,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
 -export([
     args_moved_to_another_worker_are_not_decrypted/1,
     args_moved_to_a_module_that_is_no_worker_are_not_decrypted/1,
+    a_worker_name_no_module_can_have_is_written_cut/1,
     args_moved_to_another_column_are_not_decrypted/1,
     a_worker_outside_the_allow_list_is_never_called/1,
     a_job_put_back_for_its_worker_is_not_decrypted/1,
@@ -107,6 +108,7 @@ cases() ->
     [
         args_moved_to_another_worker_are_not_decrypted,
         args_moved_to_a_module_that_is_no_worker_are_not_decrypted,
+        a_worker_name_no_module_can_have_is_written_cut,
         args_moved_to_another_column_are_not_decrypted,
         a_worker_outside_the_allow_list_is_never_called,
         a_job_put_back_for_its_worker_is_not_decrypted,
@@ -238,6 +240,8 @@ overrides(a_worker_outside_the_allow_list_is_never_called) ->
     #{workers => [shigoto_canary_worker], unrunnable_snooze_limit => 0};
 overrides(args_moved_to_a_module_that_is_no_worker_are_not_decrypted) ->
     #{unrunnable_snooze_limit => 0};
+overrides(a_worker_name_no_module_can_have_is_written_cut) ->
+    #{unrunnable_snooze_limit => 0};
 overrides(a_job_put_back_for_its_worker_is_not_decrypted) ->
     #{workers => [shigoto_canary_worker]};
 overrides(a_plaintext_job_is_refused_when_encryption_is_required) ->
@@ -285,6 +289,20 @@ args_moved_to_a_module_that_is_no_worker_are_not_decrypted(_Config) ->
     Row = await(Target, ~"discarded"),
     ?assertMatch([#{~"error" := <<"{unknown_worker,", _/binary>>}], errors(Row)),
     ok = no_canary(Canary, [Row | captured()]).
+
+a_worker_name_no_module_can_have_is_written_cut(_Config) ->
+    Name = <<(binary:copy(~"w", 2000))/binary, "-THE-END">>,
+    Id = insert_row(Name, ~"{}", 1),
+    Row = await(Id, ~"discarded"),
+    ?assertMatch([#{~"worker" := <<_:255/binary>>}], errors(Row)),
+    ?assertEqual(
+        [],
+        [
+            Term
+         || Term <- [maps:get(errors, Row) | captured()],
+            binary:match(printed(Term), ~"-THE-END") =/= nomatch
+        ]
+    ).
 
 args_moved_to_another_column_are_not_decrypted(_Config) ->
     Canary = canary(),

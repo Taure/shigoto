@@ -237,7 +237,7 @@ unrunnable_report(Reason, Job) ->
         msg => unrunnable_message(Reason),
         reason => shigoto_error:text(Reason),
         job_id => maps:get(id, Job, undefined),
-        worker => maps:get(worker, Job, undefined),
+        worker => shigoto_job:worker_name(maps:get(worker, Job, undefined)),
         queue => maps:get(queue, Job, undefined),
         attempt => maps:get(attempt, Job, undefined)
     }.

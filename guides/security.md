@@ -28,6 +28,11 @@ decrypted and nothing in the module is called. The check is remembered per
 name: a known worker costs one ETS read and one `erlang:function_exported/3`
 per job.
 
+A module name has at most 255 characters, 1020 bytes. A longer name is refused
+without being looked up, and `errors`, the log and the events hold its first
+255 bytes: the name is copied into every `errors` entry, so the row's own text
+would otherwise be written 50 times over.
+
 Set `workers` in production. It is optional in 1.x and will be required in
 2.0. Without it every loaded module that exports `perform/1` can be run by
 whoever can insert a row:

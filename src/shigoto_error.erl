@@ -61,7 +61,7 @@ entry(Job, Reason) ->
         ~"error" => Error,
         ~"at" => timestamp(),
         ~"attempt" => maps:get(attempt, Job, 0),
-        ~"worker" => worker_name(maps:get(worker, Job, undefined))
+        ~"worker" => worker_name(shigoto_job:worker_name(maps:get(worker, Job, undefined)))
     },
     case Stack of
         <<>> -> Entry;

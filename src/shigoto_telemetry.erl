@@ -452,7 +452,7 @@ testing_mode_armed(Mode) ->
 job_meta(Job) ->
     #{
         job_id => maps:get(id, Job, undefined),
-        worker => maps:get(worker, Job, undefined),
+        worker => shigoto_job:worker_name(maps:get(worker, Job, undefined)),
         queue => maps:get(queue, Job, undefined),
         attempt => maps:get(attempt, Job, 0),
         priority => maps:get(priority, Job, 0),

@@ -293,7 +293,8 @@ settled(Pool, BatchId) ->
                 {error, Reason} ->
                     {unrunnable, #{
                         batch_id => BatchId,
-                        callback_worker => maps:get(callback_worker, Batch, undefined),
+                        callback_worker =>
+                            shigoto_job:worker_name(maps:get(callback_worker, Batch, undefined)),
                         reason => Reason
                     }};
                 Callback ->

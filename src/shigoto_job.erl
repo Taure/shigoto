@@ -18,10 +18,12 @@
 %% and `redact/1` is the one way a job map goes into a log, a crash report or an
 %% error term.
 
--export([worker/1, opened/1, readable/1, redact/1, new_table/0]).
+-export([worker/1, worker_name/1, opened/1, readable/1, redact/1, new_table/0]).
 
 -define(WORKERS, shigoto_workers).
 -define(UNKNOWN_FOR, 30).
+-define(MAX_NAME_BYTES, 1020).
+-define(WRITTEN_NAME_BYTES, 255).
 -define(DATA_COLUMNS, [args, meta, result, deps_results, errors, callback_args]).
 -define(DEPS, ~"_shigoto_deps").
 
@@ -46,7 +48,9 @@ The module that runs a job, when the job names a worker.
 A worker is a module that can be loaded on this node, exports `perform/1` and,
 when `shigoto_config:workers/0` is set, is in that list. A name outside the
 list is refused before the module is looked for, so it is never loaded. A name
-that is no atom on this node is refused without creating one.
+that is no atom on this node is refused without creating one. A name longer
+than a module name can be is refused without being looked up, and the error
+carries it cut (`worker_name/1`).
 
 The answer is remembered: a known worker costs a table read and an
 `erlang:function_exported/3` per job. A name that is not a worker is not asked
@@ -57,6 +61,8 @@ worker(#{worker := Worker}) ->
     worker(Worker);
 worker(Worker) when is_atom(Worker) ->
     worker(atom_to_binary(Worker));
+worker(Name) when is_binary(Name), byte_size(Name) > ?MAX_NAME_BYTES ->
+    {error, {unknown_worker, worker_name(Name)}};
 worker(Name) when is_binary(Name) ->
     case remembered(Name) of
         {ok, Module} ->
@@ -71,6 +77,22 @@ worker(Name) when is_binary(Name) ->
     end;
 worker(_Job) ->
     {error, {unknown_worker, ~"undefined"}}.
+
+-doc """
+A worker name as it is written to `errors`, a log or an event.
+
+The name is whatever the row holds. A module name has at most 255 characters,
+1020 bytes, so a longer name names no module and is cut to its first 255
+bytes. Anything else is returned as it is.
+""".
+-spec worker_name(term()) -> term().
+worker_name(Name) when is_binary(Name), byte_size(Name) > ?MAX_NAME_BYTES ->
+    case unicode:characters_to_binary(binary:part(Name, 0, ?WRITTEN_NAME_BYTES)) of
+        Whole when is_binary(Whole) -> Whole;
+        {_Cut, Valid, _Rest} -> Valid
+    end;
+worker_name(Name) ->
+    Name.
 
 resolved(Name) ->
     try binary_to_existing_atom(Name, utf8) of
