@@ -144,7 +144,10 @@ The API:
   and `[shigoto, job, lost | rescued | transition_failed]` telemetry events.
 
 New in the log: `shigoto_workers_not_listed`, a warning once per boot while an
-encryption key is configured and `workers` is not set.
+encryption key is configured and `workers` is not set, and
+`shigoto_raw_unique_check_failed`, a warning when a node cannot find out
+whether a unique key is still stored in the clear (see
+[Encryption](encryption.md#unique-jobs)).
 
 New settings with a default: `on_discard_timeout` (60000),
 `unrunnable_snooze_limit` (20), `rescue_interval` (60000),

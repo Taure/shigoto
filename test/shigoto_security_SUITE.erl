@@ -55,6 +55,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_unique_job_from_before_encryption_is_still_a_duplicate/1,
     a_unique_insert_sends_no_plaintext_to_the_database/1,
     a_node_without_queues_stops_looking_for_unique_fields_too/1,
+    a_check_that_fails_keeps_looking_for_unique_fields/1,
     a_unique_job_is_still_found_once_its_key_is_dropped/1,
     insert_all_inserts_a_unique_job_once/1,
     insert_all_takes_uniqueness_from_its_options/1,
@@ -143,6 +144,7 @@ cases() ->
         a_unique_job_from_before_encryption_is_still_a_duplicate,
         a_unique_insert_sends_no_plaintext_to_the_database,
         a_node_without_queues_stops_looking_for_unique_fields_too,
+        a_check_that_fails_keeps_looking_for_unique_fields,
         a_unique_job_is_still_found_once_its_key_is_dropped,
         insert_all_inserts_a_unique_job_once,
         insert_all_takes_uniqueness_from_its_options,
@@ -268,6 +270,8 @@ overrides(insert_all_inserts_nothing_when_a_unique_lock_is_held) ->
     #{advisory_lock_timeout => 200};
 overrides(a_node_without_queues_stops_looking_for_unique_fields_too) ->
     #{queues => [], rescue_interval => 100};
+overrides(a_check_that_fails_keeps_looking_for_unique_fields) ->
+    #{queues => []};
 overrides(insert_all_takes_no_more_unique_locks_than_its_limit) ->
     #{unique_lock_limit => 6};
 overrides(insert_all_takes_exactly_its_limit_of_unique_locks) ->
@@ -1005,6 +1009,39 @@ a_node_without_queues_stops_looking_for_unique_fields_too(_Config) ->
     ),
     ok = wait_for(fun() -> not shigoto_repo:raw_unique_keys(?POOL) end),
     ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)).
+
+%% Whether a unique key is stored in the clear is not known while the check
+%% fails. Taken as "none is", a duplicate of a job from before the key would
+%% be inserted without a word.
+a_check_that_fails_keeps_looking_for_unique_fields(_Config) ->
+    ?assertNot(shigoto_repo:raw_unique_keys(?POOL)),
+    _ = captured(),
+    ok = renamed(~"shigoto_jobs", ~"shigoto_jobs_away"),
+    try
+        ok = shigoto_repo:raw_unique_keys_forgotten(?POOL),
+        ?assert(shigoto_repo:raw_unique_keys(?POOL)),
+        ?assert(shigoto_repo:raw_unique_keys_checked(?POOL)),
+        ok = shigoto_repo:raw_unique_keys_rechecked(?POOL)
+    after
+        ok = renamed(~"shigoto_jobs_away", ~"shigoto_jobs")
+    end,
+    %% Said once, however often it fails.
+    ?assertMatch(
+        [#{reason := {pgsql_error, #{code := ~"42P01"}}}],
+        [
+            Report
+         || {log, #{msg := {report, #{msg := ~"shigoto_raw_unique_check_failed"} = Report}}} <-
+                captured()
+        ]
+    ),
+    %% Kept, and asked again on the rescuer's tick until the database answers.
+    ?assert(shigoto_repo:raw_unique_keys(?POOL)),
+    ok = shigoto_repo:raw_unique_keys_rechecked(?POOL),
+    ?assertNot(shigoto_repo:raw_unique_keys(?POOL)).
+
+renamed(From, To) ->
+    #{} = shigoto_db:query(?POOL, [~"ALTER TABLE ", From, ~" RENAME TO ", To], []),
+    ok.
 
 %% What a node does when its configuration is changed: it starts again.
 restart() ->

@@ -254,7 +254,8 @@ rescues jobs that are still running here.
   them to PostgreSQL as a parameter, while a row still stores them that way
   (`shigoto_repo:raw_unique_keys/1`, kept per node: from boot, after a
   reencrypt on that node, and looked up again on the rescuer's tick while it
-  is `true`, which is how the other nodes learn of a reencrypt). Never add
+  is `true`, which is how the other nodes learn of a reencrypt; a check that
+  fails is kept as `unanswered`, read as `true` and logged once). Never add
   another statement that takes job args in the clear as a parameter while a
   key is set.
 - **Advisory locks.** Every lock goes through `shigoto_lock`, which only uses

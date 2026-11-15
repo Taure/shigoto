@@ -169,6 +169,10 @@ record them. It does that only while such a job is stored:
 - A node whose answer is that none is stored does not look again until it
   starts again. That is every node of an installation that had its key from
   the start, and there a unique insert sends HMACs only.
+- A check PostgreSQL does not answer is taken as "one is stored": the node
+  logs `shigoto_raw_unique_check_failed` once, goes on looking for the form
+  in the clear, and asks again each `rescue_interval`. Read the other way, a
+  duplicate of a job from before the key would be inserted unnoticed.
 - With `{require_encrypted, true}` it never looks for the form in the clear.
 
 What this does not cover is a rollout that turns encryption on one node at a

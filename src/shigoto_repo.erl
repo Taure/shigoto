@@ -4,6 +4,8 @@ All SQL operations for Shigoto jobs. Uses `FOR UPDATE SKIP LOCKED`
 for safe multi-node job claiming.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     insert_job/3,
     insert_all/3,
@@ -1653,19 +1655,23 @@ looks_for_raw(Pool) ->
 %% The answer is kept per node: looked up when the application starts, the
 %% first time it is asked for otherwise, again after `shigoto:reencrypt/0,1`
 %% on the node that ran it, and on the rescuer's tick for as long as it is
-%% `true` (`raw_unique_keys_rechecked/1`). Once it is `false` the node does
-%% not look again: a job a node without a key inserts after that is not seen
-%% as a duplicate by this node until it starts again.
+%% not `false` (`raw_unique_keys_rechecked/1`). Once it is `false` the node
+%% does not look again: a job a node without a key inserts after that is not
+%% seen as a duplicate by this node until it starts again.
 -spec raw_unique_keys(atom()) -> boolean().
 raw_unique_keys(Pool) ->
     case persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) of
-        Known when is_boolean(Known) -> Known;
-        _Unknown -> raw_unique_keys_checked(Pool)
+        unknown -> raw_unique_keys_checked(Pool);
+        Kept -> Kept =/= false
     end.
 
 -doc false.
-%% Look, and keep the answer. A database that does not answer is no reason to
-%% send plaintext: the answer is `false` and is not kept.
+%% Look, and keep the answer. A check the database does not answer is kept as
+%% `unanswered` and read as `true`: not knowing, the insert looks for the form
+%% in the clear as well. The other reading would insert the duplicate of a job
+%% from before the key without a word, and uniqueness is what the caller asked
+%% for. The price is the unique fields in a statement parameter until the
+%% check is answered, which `require_encrypted` rules out whatever is kept.
 -spec raw_unique_keys_checked(atom()) -> boolean().
 raw_unique_keys_checked(Pool) ->
     SQL =
@@ -1676,15 +1682,29 @@ raw_unique_keys_checked(Pool) ->
         """,
     case query(Pool, SQL, []) of
         #{rows := Rows} ->
-            Left = Rows =/= [],
+            raw_unique_keys_kept(Pool, Rows =/= []);
+        {error, Reason} ->
             _ = [
-                persistent_term:put(?RAW_UNIQUE_KEYS(Pool), Left)
-             || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =/= Left
+                ?LOG_WARNING(#{
+                    msg => ~"shigoto_raw_unique_check_failed",
+                    reason => shigoto_db:reduced(Reason),
+                    warning =>
+                        ~"whether a unique key is still stored in the clear is not known, so a unique insert keeps looking for one, which sends its unique fields to PostgreSQL as a parameter",
+                    action =>
+                        ~"asked again every rescue_interval; {require_encrypted, true} ends the lookup"
+                })
+             || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =/= unanswered
             ],
-            Left;
-        {error, _} ->
-            false
+            raw_unique_keys_kept(Pool, unanswered)
     end.
+
+-spec raw_unique_keys_kept(atom(), boolean() | unanswered) -> boolean().
+raw_unique_keys_kept(Pool, Answer) ->
+    _ = [
+        persistent_term:put(?RAW_UNIQUE_KEYS(Pool), Answer)
+     || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =/= Answer
+    ],
+    Answer =/= false.
 
 -doc false.
 %% Look again while this node still sends the unique fields in the clear.
@@ -1693,9 +1713,10 @@ raw_unique_keys_checked(Pool) ->
 %% once the answer is `false`, so a table without such keys costs no query.
 -spec raw_unique_keys_rechecked(atom()) -> ok.
 raw_unique_keys_rechecked(Pool) ->
+    Kept = persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown),
     _ = [
         raw_unique_keys_checked(Pool)
-     || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =:= true, looks_for_raw(Pool)
+     || Kept =:= true orelse Kept =:= unanswered, looks_for_raw(Pool)
     ],
     ok.
 
