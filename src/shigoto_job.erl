@@ -63,7 +63,7 @@ worker(#{worker := Worker}) ->
 worker(Worker) when is_atom(Worker) ->
     worker(atom_to_binary(Worker));
 worker(Name) when is_binary(Name), byte_size(Name) > ?MAX_NAME_BYTES ->
-    {error, {unknown_worker, worker_name(Name)}};
+    {error, {unknown_worker, cut(Name)}};
 worker(Name) when is_binary(Name) ->
     case remembered(Name) of
         {ok, Module} ->
@@ -88,12 +88,16 @@ bytes. Anything else is returned as it is.
 """.
 -spec worker_name(term()) -> term().
 worker_name(Name) when is_binary(Name), byte_size(Name) > ?MAX_NAME_BYTES ->
+    cut(Name);
+worker_name(Name) ->
+    Name.
+
+-spec cut(binary()) -> binary().
+cut(Name) ->
     case unicode:characters_to_binary(binary:part(Name, 0, ?WRITTEN_NAME_BYTES)) of
         Whole when is_binary(Whole) -> Whole;
         {_Cut, Valid, _Rest} -> Valid
-    end;
-worker_name(Name) ->
-    Name.
+    end.
 
 resolved(Name) ->
     try binary_to_existing_atom(Name, utf8) of
@@ -320,10 +324,8 @@ json_text(Term) ->
 %% over, a map or its JSON text.
 -spec reserved_keys(term(), [binary()]) -> [binary()].
 reserved_keys(Json, Also) when is_map(Json) ->
-    lists:sort([
-        Name
-     || Key <- maps:keys(Json), Name <- [key_name(Key)], is_reserved(Name, Also)
-    ]);
+    Names = [key_name(Key) || Key <- maps:keys(Json)],
+    [Name || Name <- lists:sort(Names), is_binary(Name), is_reserved(Name, Also)];
 reserved_keys(Json, Also) when is_binary(Json) ->
     case decoded(Json, #{}) of
         Object when is_map(Object) -> reserved_keys(Object, Also);
@@ -332,10 +334,12 @@ reserved_keys(Json, Also) when is_binary(Json) ->
 reserved_keys(_Json, _Also) ->
     [].
 
+-spec key_name(term()) -> binary().
 key_name(Key) when is_binary(Key) -> Key;
 key_name(Key) when is_atom(Key) -> atom_to_binary(Key);
 key_name(_Key) -> <<>>.
 
+-spec is_reserved(binary(), [binary()]) -> boolean().
 is_reserved(<<"_shigoto", _/binary>>, _Also) -> true;
 is_reserved(Name, Also) -> lists:member(Name, Also).
 

@@ -1189,7 +1189,8 @@ insert_all_takes_no_more_unique_locks_than_its_limit(_Config) ->
     ?assertEqual(0, job_count()),
     ?assertEqual([], inserted_events()),
     %% Jobs that are not unique take no lock and do not count.
-    ?assertMatch({ok, [_ | _]}, shigoto:insert_all(Plain ++ lists:sublist(Unique, 3))),
+    [First, Second, Third | _] = Unique,
+    ?assertMatch({ok, [_ | _]}, shigoto:insert_all(Plain ++ [First, Second, Third])),
     ?assertEqual(23, job_count()).
 
 a_full_lock_table_is_answered_not_raised(_Config) ->
@@ -1197,7 +1198,7 @@ a_full_lock_table_is_answered_not_raised(_Config) ->
     Holder = fill_lock_table(),
     try
         ?assertMatch({error, {pgsql_error, #{code := ~"53200"}}}, shigoto:insert_all(Jobs)),
-        {error, {pgsql_error, Fields}} = shigoto:insert_all(Jobs),
+        {error, {pgsql_error, #{} = Fields}} = shigoto:insert_all(Jobs),
         ?assertEqual([], maps:keys(maps:without([code, severity, severity_non_localised], Fields))),
         ?assertEqual(0, job_count())
     after
@@ -1309,6 +1310,7 @@ written_frame(<<"\"enc:v2:", _/binary>>) -> shigoto_config:encryption_write_form
 written_frame(<<"\"enc:", _/binary>>) -> shigoto_config:encryption_write_format() =:= v1;
 written_frame(_Plain) -> false.
 
+-spec waiting(module(), integer()) -> map().
 waiting(Worker, N) ->
     #{worker => Worker, args => #{~"n" => N}, scheduled_at => seconds_from_now(3600)}.
 

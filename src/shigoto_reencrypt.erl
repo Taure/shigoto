@@ -169,9 +169,10 @@ change(_Column, _Null, _Context) ->
 meta_change(#{meta := Stored, depends_on := DependsOn} = Job, Worker) when
     is_binary(Stored), is_list(DependsOn)
 ->
-    Waited = lists:usort(
-        [Id || Id <- DependsOn, is_integer(Id)] ++ given(maps:get(deps_results, Job, null))
-    ),
+    Waited = [
+        Id
+     || Id <- lists:usort(DependsOn ++ given(maps:get(deps_results, Job, null))), is_integer(Id)
+    ],
     case listed(Stored, Worker, Waited) of
         {ok, Listed} -> [{~"meta", Stored, shigoto_crypto:seal(Listed, {meta, Worker})}];
         unchanged -> change(~"meta", Stored, {meta, Worker})

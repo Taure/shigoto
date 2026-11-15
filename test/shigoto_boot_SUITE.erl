@@ -127,17 +127,32 @@ every_column_is_an_atom_once_the_database_module_is_loaded(_Config) ->
     Columns = [Name || #{name := Name} <- Rows],
     ?assert(length(Columns) > 30),
     {ok, Peer, _Node} = peer:start_link(#{
-        connection => standard_io,
-        args => lists:append([["-pa", Dir] || Dir <- code:get_path(), filelib:is_dir(Dir)])
+        connection => standard_io, args => code_path_args(code:get_path())
     }),
     try
         {module, shigoto_db} = peer:call(Peer, code, ensure_loaded, [shigoto_db]),
         ?assertEqual([], [Name || Name <- Columns, not is_atom_on(Peer, Name)]),
-        Atoms = peer:call(Peer, shigoto_db, columns, []),
-        ?assertEqual(Columns, lists:sort([atom_to_binary(Column) || Column <- Atoms]))
+        Named = [
+            atom_to_binary(Column)
+         || Column <- named_columns(peer:call(Peer, shigoto_db, columns, []))
+        ],
+        ?assertEqual(Columns, lists:sort(Named))
     after
         peer:stop(Peer)
     end.
+
+-spec code_path_args([string()]) -> [string()].
+code_path_args([]) ->
+    [];
+code_path_args([Dir | Dirs]) ->
+    case filelib:is_dir(Dir) of
+        true -> ["-pa", Dir | code_path_args(Dirs)];
+        false -> code_path_args(Dirs)
+    end.
+
+-spec named_columns(term()) -> [atom()].
+named_columns(Columns) when is_list(Columns) ->
+    [Column || Column <- Columns, is_atom(Column)].
 
 is_atom_on(Peer, Name) ->
     try peer:call(Peer, erlang, binary_to_existing_atom, [Name]) of
