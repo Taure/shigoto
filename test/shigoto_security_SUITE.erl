@@ -59,6 +59,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     insert_all_inserts_nothing_when_a_unique_lock_is_held/1,
     two_bulk_inserts_at_once_insert_each_unique_job_once/1,
     a_bulk_insert_rolled_back_leaves_no_unique_job/1,
+    unique_states_that_are_no_job_state_are_refused/1,
     insert_all_takes_no_more_unique_locks_than_its_limit/1,
     a_full_lock_table_is_answered_not_raised/1,
     a_unique_insert_the_database_refuses_is_answered_not_raised/1,
@@ -141,6 +142,7 @@ cases() ->
         insert_all_inserts_nothing_when_a_unique_lock_is_held,
         two_bulk_inserts_at_once_insert_each_unique_job_once,
         a_bulk_insert_rolled_back_leaves_no_unique_job,
+        unique_states_that_are_no_job_state_are_refused,
         insert_all_takes_no_more_unique_locks_than_its_limit,
         a_full_lock_table_is_answered_not_raised,
         a_unique_insert_the_database_refuses_is_answered_not_raised,
@@ -1102,6 +1104,27 @@ a_bulk_insert_rolled_back_leaves_no_unique_job(_Config) ->
 
 %% Every unique job of a call holds its advisory locks until the call ends,
 %% and the lock table is one for the whole server.
+unique_states_that_are_no_job_state_are_refused(_Config) ->
+    {ok, #{id := Other}} = shigoto:insert(waiting(shigoto_canary_other_worker, 1)),
+    Job = waiting(shigoto_canary_worker, 1),
+    %% Put into the statement as it is, this matched every job in the table.
+    Quoted = 'available\') OR (\'1\' = \'1',
+    [
+        begin
+            Refused = {error, {invalid_unique_states, States}},
+            ?assertEqual(Refused, shigoto:insert(Job, #{unique => #{states => States}})),
+            ?assertEqual(Refused, shigoto:insert_all([Job], #{unique => #{states => States}}))
+        end
+     || States <- [[Quoted], [available, scheduled], [~"available"], [], available]
+    ],
+    ?assertEqual(1, job_count()),
+    Every = [available, executing, retryable, completed, discarded, cancelled],
+    {ok, #{id := Id}} = shigoto:insert(Job, #{unique => #{states => Every}}),
+    ?assertNotEqual(Other, Id),
+    ?assertMatch(
+        {ok, {conflict, #{id := Id}}}, shigoto:insert(Job, #{unique => #{states => Every}})
+    ).
+
 insert_all_takes_no_more_unique_locks_than_its_limit(_Config) ->
     _ = captured(),
     Unique = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 7)],

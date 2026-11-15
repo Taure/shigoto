@@ -33,6 +33,8 @@ Any keys you omit fall back to `?DEFAULT_UNIQUE` in `shigoto_repo`:
   in this list. The default covers in-flight work (`available`, `executing`,
   `retryable`) but **not** terminal states, so a `completed`, `discarded`, or
   `cancelled` job never blocks a fresh enqueue.
+  A list that is empty, or names something that is not one of the six job
+  states, refuses the insert: `{error, {invalid_unique_states, States}}`.
 - **period** - `infinity` (match any existing job in the given states) or a
   number of seconds. With a period, `find_existing_job/3` adds
   `inserted_at >= now() - make_interval(secs => Period)`, so a job older than the

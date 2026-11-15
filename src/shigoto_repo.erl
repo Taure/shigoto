@@ -54,6 +54,7 @@ finds no row.
 """.
 -type claim() :: #{id := integer(), attempt => integer(), _ => _} | integer().
 
+-define(JOB_STATES, [available, executing, retryable, completed, discarded, cancelled]).
 -define(DEFAULT_UNIQUE, #{
     keys => [worker, args],
     states => [available, executing, retryable],
@@ -103,6 +104,8 @@ insert_validated(Pool, JobParams1, Opts) ->
             case resolve_unique(JobParams, Opts) of
                 none ->
                     do_insert(Pool, JobParams, Opts, null);
+                {error, _} = Invalid ->
+                    Invalid;
                 UniqueOpts ->
                     insert_unique(Pool, JobParams, Opts, UniqueOpts)
             end;
@@ -151,15 +154,21 @@ placed_all(Pool, JobParamsList, Opts) ->
             case with_dependencies(Pool, Jobs) of
                 {ok, Validated} ->
                     Resolved = [{Job, resolve_unique(Job, Opts)} || Job <- Validated],
-                    case [Job || {Job, none} <- Resolved] of
-                        Plain when length(Plain) =:= length(Resolved) ->
-                            inserted(insert_all_validated(Pool, Plain, Opts));
-                        _Mixed ->
-                            placed_with_unique(Pool, Resolved, Opts)
+                    case [Invalid || {_Job, {error, _} = Invalid} <- Resolved] of
+                        [Invalid | _] -> Invalid;
+                        [] -> placed_resolved(Pool, Resolved, Opts)
                     end;
                 {error, _} = Refused ->
                     Refused
             end
+    end.
+
+placed_resolved(Pool, Resolved, Opts) ->
+    case [Job || {Job, none} <- Resolved] of
+        Plain when length(Plain) =:= length(Resolved) ->
+            inserted(insert_all_validated(Pool, Plain, Opts));
+        _Mixed ->
+            placed_with_unique(Pool, Resolved, Opts)
     end.
 
 inserted({ok, Rows}) -> {ok, [{inserted, Row} || Row <- Rows]};
@@ -1536,19 +1545,30 @@ worker_defaults([Key | Keys], Worker, JobParams) ->
         false -> worker_defaults(Keys, Worker, JobParams#{Key => Worker:Key()})
     end.
 
+-spec resolve_unique(map(), map()) -> none | map() | {error, {invalid_unique_states, term()}}.
 resolve_unique(JobParams, Opts) ->
     case Opts of
         #{unique := UniqueOpts} when is_map(UniqueOpts) ->
-            maps:merge(?DEFAULT_UNIQUE, UniqueOpts);
+            with_job_states(maps:merge(?DEFAULT_UNIQUE, UniqueOpts));
         #{unique := false} ->
             none;
         _ ->
             Worker = maps:get(worker, JobParams),
             case erlang:function_exported(Worker, unique, 0) of
-                true -> maps:merge(?DEFAULT_UNIQUE, Worker:unique());
+                true -> with_job_states(maps:merge(?DEFAULT_UNIQUE, Worker:unique()));
                 false -> none
             end
     end.
+
+%% `states` become part of the statement, so they are job states or the
+%% insert is refused.
+with_job_states(#{states := [_ | _] = States} = UniqueOpts) ->
+    case [State || State <- States, not lists:member(State, ?JOB_STATES)] of
+        [] -> UniqueOpts;
+        _NotStates -> {error, {invalid_unique_states, States}}
+    end;
+with_job_states(#{states := States}) ->
+    {error, {invalid_unique_states, States}}.
 
 insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     UniqueKeys = unique_keys(Pool, JobParams, Opts, UniqueOpts),

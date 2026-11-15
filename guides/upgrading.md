@@ -103,6 +103,7 @@ Inserting:
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
 | `insert_all/1,2` with more unique jobs than `unique_lock_limit` (1000) allows locks for | | refused: `{error, {too_many_unique_locks, Needed, Limit}}`. Split the list. See [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts) |
 | A unique insert PostgreSQL refuses | raised `transaction_rolled_back` | answers `{error, {pgsql_error, _}}` with the code |
+| `states` of a `unique` map that are not job states | put into the statement as given; a name that is no state matched nothing, so every insert went in | the insert is refused: `{error, {invalid_unique_states, States}}` |
 
 Dependencies and batches:
 
