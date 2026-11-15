@@ -14,7 +14,8 @@ is no distribution between them, so what happened is read from the rows.
     two_nodes_run_every_job_once/1,
     a_job_whose_node_died_runs_again_elsewhere/1,
     a_cancel_reaches_the_node_running_the_job/1,
-    one_node_schedules_a_cron_minute/1
+    one_node_schedules_a_cron_minute/1,
+    a_reencrypt_on_one_node_ends_plaintext_lookups_on_the_others/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -25,7 +26,8 @@ all() ->
         two_nodes_run_every_job_once,
         a_job_whose_node_died_runs_again_elsewhere,
         a_cancel_reaches_the_node_running_the_job,
-        one_node_schedules_a_cron_minute
+        one_node_schedules_a_cron_minute,
+        a_reencrypt_on_one_node_ends_plaintext_lookups_on_the_others
     ].
 
 init_per_suite(Config) ->
@@ -49,6 +51,7 @@ end_per_testcase(_TestCase, Config) ->
     _ = application:stop(seki),
     _ = [application:unset_env(shigoto, Key) || Key := _ <- env(main)],
     _ = application:unset_env(shigoto, cron),
+    _ = application:unset_env(shigoto, encryption_key),
     ok = clean().
 
 %%----------------------------------------------------------------------
@@ -134,6 +137,45 @@ one_node_schedules_a_cron_minute(_Config) ->
         stop_peer(Peer),
         shigoto_db:query(?POOL, ~"DELETE FROM shigoto_cron", [])
     end.
+
+%% `shigoto:reencrypt/0,1` runs on one node. The others have to find out from
+%% the table that no unique key is stored in the clear any more.
+a_reencrypt_on_one_node_ends_plaintext_lookups_on_the_others(_Config) ->
+    Canary = <<"CANARY-", (binary:encode_hex(crypto:strong_rand_bytes(8)))/binary>>,
+    Unique = #{unique => #{keys => [worker, args]}},
+    Params = #{
+        worker => shigoto_cluster_worker,
+        args => #{~"canary" => Canary},
+        queue => ~"parked",
+        scheduled_at => {{2999, 1, 1}, {0, 0, 0}}
+    },
+    %% Stored before either node had a key: its unique fields are in the clear.
+    {ok, #{id := Id}} = shigoto_repo:insert_job(?POOL, Params, Unique),
+    Keyed = #{encryption_key => binary:copy(~"k", 32)},
+    Peer = peer(second, Keyed),
+    try
+        ok = shigoto_cluster_node:start(maps:merge(env(main), Keyed)),
+        ?assertMatch(
+            {{ok, {conflict, #{id := Id}}}, [_ | _]}, duplicate_sent(Params, Unique, Canary)
+        ),
+        {ok, #{jobs := #{failed := 0, skipped := 0}}} = peer:call(Peer, shigoto, reencrypt, []),
+        ok = wait_for(fun() ->
+            {{ok, {conflict, #{id := Id}}}, Leaks} = duplicate_sent(Params, Unique, Canary),
+            Leaks =:= []
+        end)
+    after
+        stop_peer(Peer)
+    end.
+
+%% The answer to inserting the job again on this node, and the statements that
+%% carried the canary to PostgreSQL.
+duplicate_sent(Params, Unique, Canary) ->
+    {Answer, Sent} = shigoto_statement_probe:sent(shigoto, insert, [Params, Unique]),
+    {Answer, [
+        Statement
+     || {_SQL, Bound} = Statement <- Sent,
+        binary:match(iolist_to_binary(io_lib:format("~0p", [Bound])), Canary) =/= nomatch
+    ]}.
 
 %%----------------------------------------------------------------------
 %% Nodes

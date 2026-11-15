@@ -53,6 +53,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_unique_job_is_still_found_after_key_rotation/1,
     a_unique_job_from_before_encryption_is_still_a_duplicate/1,
     a_unique_insert_sends_no_plaintext_to_the_database/1,
+    a_node_without_queues_stops_looking_for_unique_fields_too/1,
     a_unique_job_is_still_found_once_its_key_is_dropped/1,
     insert_all_inserts_a_unique_job_once/1,
     insert_all_takes_uniqueness_from_its_options/1,
@@ -137,6 +138,7 @@ cases() ->
         a_unique_job_is_still_found_after_key_rotation,
         a_unique_job_from_before_encryption_is_still_a_duplicate,
         a_unique_insert_sends_no_plaintext_to_the_database,
+        a_node_without_queues_stops_looking_for_unique_fields_too,
         a_unique_job_is_still_found_once_its_key_is_dropped,
         insert_all_inserts_a_unique_job_once,
         insert_all_takes_uniqueness_from_its_options,
@@ -258,6 +260,8 @@ overrides(a_held_unique_lock_does_not_stall_the_insert) ->
     #{advisory_lock_timeout => 200};
 overrides(insert_all_inserts_nothing_when_a_unique_lock_is_held) ->
     #{advisory_lock_timeout => 200};
+overrides(a_node_without_queues_stops_looking_for_unique_fields_too) ->
+    #{queues => [], rescue_interval => 100};
 overrides(insert_all_takes_no_more_unique_locks_than_its_limit) ->
     #{unique_lock_limit => 6};
 overrides(a_full_lock_table_is_answered_not_raised) ->
@@ -941,6 +945,24 @@ a_unique_insert_sends_no_plaintext_to_the_database(_Config) ->
     ]),
     ?assertMatch({ok, {conflict, #{id := Id}}}, Found),
     ok = no_canary(Older, SentAfter).
+
+%% `shigoto:reencrypt/0,1` on another node replaces the last unique key in the
+%% clear. A node that only inserts makes no rescue pass, and finds out as well.
+a_node_without_queues_stops_looking_for_unique_fields_too(_Config) ->
+    Unique = #{unique => #{keys => [worker, args]}},
+    Params = (waiting(shigoto_canary_other_worker, 1))#{queue => ~"parked"},
+    application:unset_env(shigoto, encryption_key),
+    {ok, #{id := Id}} = shigoto:insert(Params, Unique),
+    application:set_env(shigoto, encryption_key, key(1)),
+    ok = restart(),
+    ?assert(shigoto_repo:raw_unique_keys(?POOL)),
+    #{num_rows := 1} = shigoto_db:query(
+        ?POOL,
+        ~"UPDATE shigoto_jobs SET unique_key = $2 WHERE id = $1",
+        [Id, shigoto_crypto:unique_key(~"{\"n\":1}:shigoto_canary_other_worker")]
+    ),
+    ok = wait_for(fun() -> not shigoto_repo:raw_unique_keys(?POOL) end),
+    ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)).
 
 %% What a node does when its configuration is changed: it starts again.
 restart() ->

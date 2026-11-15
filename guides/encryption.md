@@ -158,11 +158,17 @@ means sending them to PostgreSQL as a query parameter, where statement
 logging (`log_statement`, `log_min_duration_statement`, `auto_explain`) can
 record them. It does that only while such a job is stored:
 
-- When the application starts it looks whether `shigoto_jobs` holds a
-  `unique_key` that is no HMAC, and keeps the answer. It looks again after
-  `shigoto:reencrypt/0,1`.
-- With none stored, which is every installation that had its key from the
-  start, a unique insert sends HMACs only.
+- When the application starts, a node looks whether `shigoto_jobs` holds a
+  `unique_key` that is no HMAC, and keeps the answer.
+- The node that ran `shigoto:reencrypt/0,1` looks again when the run ends.
+- Every node whose answer is that one is stored looks again each
+  `rescue_interval` (60 seconds unless set), whether or not it runs a queue.
+  So once a run has replaced the last of them, the node that ran it stops
+  sending the unique fields at once and every other node within one
+  `rescue_interval`, without a restart.
+- A node whose answer is that none is stored does not look again until it
+  starts again. That is every node of an installation that had its key from
+  the start, and there a unique insert sends HMACs only.
 - With `{require_encrypted, true}` it never looks for the form in the clear.
 
 What this does not cover is a rollout that turns encryption on one node at a

@@ -17,6 +17,11 @@
 %% jobs whose callbacks and events had already gone out.
 %%
 %% A node that runs no queue passes nothing, as before.
+%%
+%% The tick also has every node look again whether a unique key is still
+%% stored in the clear (`shigoto_repo:raw_unique_keys_rechecked/1`). That is
+%% this node's own kept answer, wanted by a node that only inserts too, so it
+%% is outside the pass and its lock.
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -53,6 +58,7 @@ handle_info(pass, State) ->
             true -> passed();
             false -> idle
         end,
+    ok = shigoto_repo:raw_unique_keys_rechecked(shigoto_config:pool()),
     _ = scheduled(),
     {noreply, counted(Outcome, State)};
 handle_info(_Info, State) ->

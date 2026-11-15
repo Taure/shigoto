@@ -41,6 +41,7 @@ for safe multi-node job claiming.
     unique_materials/3,
     raw_unique_keys/1,
     raw_unique_keys_checked/1,
+    raw_unique_keys_rechecked/1,
     raw_unique_keys_forgotten/1
 ]).
 
@@ -1639,9 +1640,11 @@ looks_for_raw(Pool) ->
 %% means sending the unique fields of the new job to PostgreSQL in the clear.
 %%
 %% The answer is kept per node: looked up when the application starts, the
-%% first time it is asked for otherwise, and again after
-%% `shigoto:reencrypt/0,1`. A job a node without a key inserts after that is
-%% not seen as a duplicate by this node until it starts again.
+%% first time it is asked for otherwise, again after `shigoto:reencrypt/0,1`
+%% on the node that ran it, and on the rescuer's tick for as long as it is
+%% `true` (`raw_unique_keys_rechecked/1`). Once it is `false` the node does
+%% not look again: a job a node without a key inserts after that is not seen
+%% as a duplicate by this node until it starts again.
 -spec raw_unique_keys(atom()) -> boolean().
 raw_unique_keys(Pool) ->
     case persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) of
@@ -1671,6 +1674,19 @@ raw_unique_keys_checked(Pool) ->
         {error, _} ->
             false
     end.
+
+-doc false.
+%% Look again while this node still sends the unique fields in the clear.
+%% `shigoto:reencrypt/0,1` replaces the last key in the clear from one node,
+%% and every other node has to find that out from the table. Nothing is asked
+%% once the answer is `false`, so a table without such keys costs no query.
+-spec raw_unique_keys_rechecked(atom()) -> ok.
+raw_unique_keys_rechecked(Pool) ->
+    _ = [
+        raw_unique_keys_checked(Pool)
+     || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =:= true, looks_for_raw(Pool)
+    ],
+    ok.
 
 -doc false.
 -spec raw_unique_keys_forgotten(atom()) -> ok.

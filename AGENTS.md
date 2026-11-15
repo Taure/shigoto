@@ -252,9 +252,11 @@ rescues jobs that are still running here.
   values in the current format. A `unique_key` is an HMAC with a key
   configured. The unique fields in the clear are only looked for, which sends
   them to PostgreSQL as a parameter, while a row still stores them that way
-  (`shigoto_repo:raw_unique_keys/1`, kept per node from boot and after a
-  reencrypt). Never add another statement that takes job args in the clear
-  as a parameter while a key is set.
+  (`shigoto_repo:raw_unique_keys/1`, kept per node: from boot, after a
+  reencrypt on that node, and looked up again on the rescuer's tick while it
+  is `true`, which is how the other nodes learn of a reencrypt). Never add
+  another statement that takes job args in the clear as a parameter while a
+  key is set.
 - **Advisory locks.** Every lock goes through `shigoto_lock`, which only uses
   `pg_try_advisory_xact_lock` with a bounded retry. Never add a blocking
   `pg_advisory_xact_lock`: any database role can hold any key forever.

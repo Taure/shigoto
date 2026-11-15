@@ -73,7 +73,7 @@ config :shigoto,
 | `encryption_key` | `undefined` | 32-byte AES-256-GCM key (see [Encryption](encryption.md)) |
 | `workers` | `undefined` | Modules allowed to run as workers (see [Security](security.md)) |
 | `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
-| `rescue_interval` | `60000` | Milliseconds between the passes of a node that rescue stale jobs, release jobs waiting on a job that has ended, and settle finished batches. One process per node runs them, and only one node of a cluster at a time |
+| `rescue_interval` | `60000` | Milliseconds between the passes of a node that rescue stale jobs, release jobs waiting on a job that has ended, and settle finished batches. One process per node runs them, and only one node of a cluster at a time. Also how often a node that still looks for unique keys from before encryption checks whether one is left ([Encryption](encryption.md#unique-jobs)) |
 | `unrunnable_snooze_limit` | `20` | How many times in a row a node that cannot run a job (worker unknown there, or a resilience gate that does not answer) puts it back without using an attempt; the next time fails the attempt. `0` to `50` |
 | `on_discard_timeout` | `60000` | Milliseconds an `on_discard/2` callback may run before it is stopped (see [Workers](workers.md#on_discard-callback)) |
 | `unique_lock_limit` | `1000` | Advisory locks one `insert_all/1,2` call may take for its unique jobs, `1` to `5000`; a longer list is refused (see [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts)) |
