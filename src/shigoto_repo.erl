@@ -38,7 +38,10 @@ for safe multi-node job claiming.
     release_stuck_dependents/1,
     archive_jobs/2,
     fetch_fanout_jobs/3,
-    unique_materials/3
+    unique_materials/3,
+    raw_unique_keys/1,
+    raw_unique_keys_checked/1,
+    raw_unique_keys_forgotten/1
 ]).
 
 -export_type([claim/0]).
@@ -171,7 +174,7 @@ inserted({error, _} = Refused) -> Refused.
 %% The locks are held to the end of the call, in a lock table the whole server
 %% shares, so a call may only take `unique_lock_limit` of them.
 placed_with_unique(Pool, Resolved, Opts) ->
-    Keyed = [keyed(Job, Unique, Opts) || {Job, Unique} <- Resolved],
+    Keyed = [keyed(Pool, Job, Unique, Opts) || {Job, Unique} <- Resolved],
     LockKeys = ordsets:from_list([
         erlang:phash2(Key)
      || {_Job, _Unique, Keys} <- Keyed, Key <- Keys
@@ -211,8 +214,8 @@ undone_when_refused(Pool, Fun) ->
         throw:{?MODULE, refused, Reason} -> {error, Reason}
     end.
 
-keyed(Job, none, _Opts) -> {Job, none, []};
-keyed(Job, Unique, Opts) -> {Job, Unique, unique_keys(Job, Opts, Unique)}.
+keyed(_Pool, Job, none, _Opts) -> {Job, none, []};
+keyed(Pool, Job, Unique, Opts) -> {Job, Unique, unique_keys(Pool, Job, Opts, Unique)}.
 
 %% Runs of jobs that are not unique keep their single statement; ids follow
 %% the order given.
@@ -1548,7 +1551,7 @@ resolve_unique(JobParams, Opts) ->
     end.
 
 insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
-    UniqueKeys = unique_keys(JobParams, Opts, UniqueOpts),
+    UniqueKeys = unique_keys(Pool, JobParams, Opts, UniqueOpts),
     undone_when_refused(Pool, fun() ->
         case unique_locks(Pool, [erlang:phash2(Key) || Key <- UniqueKeys]) of
             ok -> placed_unique(Pool, JobParams, Opts, UniqueOpts, UniqueKeys);
@@ -1558,13 +1561,71 @@ insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
 
 %% One key per configured encryption key, the current one first. The job is
 %% stored under the current one and looked for under all of them, so a job
-%% inserted before a key rotation still counts as the duplicate it is.
--spec unique_keys(map(), map(), map()) -> [binary(), ...].
-unique_keys(JobParams, Opts, UniqueOpts) ->
+%% inserted before a key rotation still counts as the duplicate it is. While a
+%% job from before a key was configured is still stored, the unique fields
+%% themselves come last (`raw_unique_keys/1`).
+-spec unique_keys(atom(), map(), map(), map()) -> [binary(), ...].
+unique_keys(Pool, JobParams, Opts, #{keys := Keys}) ->
     Worker = atom_to_binary(maps:get(worker, JobParams), utf8),
     Args = maps:get(args, JobParams, #{}),
     Queue = maps:get(queue, JobParams, maps:get(queue, Opts, ~"default")),
-    build_unique_keys(UniqueOpts, Worker, Args, Queue).
+    Material = unique_material(Keys, Worker, encode_json(Args), Queue),
+    shigoto_crypto:unique_keys(Material, looks_for_raw(Pool)).
+
+%% Asked last, so a node that cannot find such a job does not look whether
+%% one is stored.
+-spec looks_for_raw(atom()) -> boolean().
+looks_for_raw(Pool) ->
+    shigoto_crypto:is_enabled() andalso not shigoto_config:require_encrypted() andalso
+        raw_unique_keys(Pool).
+
+-define(RAW_UNIQUE_KEYS(Pool), {?MODULE, raw_unique_keys, Pool}).
+
+-doc false.
+%% Whether `shigoto_jobs` holds a `unique_key` that is no digest: the unique
+%% fields in the clear, written by a node that had no encryption key. Only
+%% then does a unique insert with a key have to look for that form, which
+%% means sending the unique fields of the new job to PostgreSQL in the clear.
+%%
+%% The answer is kept per node: looked up when the application starts, the
+%% first time it is asked for otherwise, and again after
+%% `shigoto:reencrypt/0,1`. A job a node without a key inserts after that is
+%% not seen as a duplicate by this node until it starts again.
+-spec raw_unique_keys(atom()) -> boolean().
+raw_unique_keys(Pool) ->
+    case persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) of
+        Known when is_boolean(Known) -> Known;
+        _Unknown -> raw_unique_keys_checked(Pool)
+    end.
+
+-doc false.
+%% Look, and keep the answer. A database that does not answer is no reason to
+%% send plaintext: the answer is `false` and is not kept.
+-spec raw_unique_keys_checked(atom()) -> boolean().
+raw_unique_keys_checked(Pool) ->
+    SQL =
+        ~"""
+        SELECT 1 AS raw FROM shigoto_jobs
+        WHERE unique_key IS NOT NULL AND unique_key !~ '^[0-9A-F]{64}$'
+        LIMIT 1
+        """,
+    case query(Pool, SQL, []) of
+        #{rows := Rows} ->
+            Left = Rows =/= [],
+            _ = [
+                persistent_term:put(?RAW_UNIQUE_KEYS(Pool), Left)
+             || persistent_term:get(?RAW_UNIQUE_KEYS(Pool), unknown) =/= Left
+            ],
+            Left;
+        {error, _} ->
+            false
+    end.
+
+-doc false.
+-spec raw_unique_keys_forgotten(atom()) -> ok.
+raw_unique_keys_forgotten(Pool) ->
+    _ = persistent_term:erase(?RAW_UNIQUE_KEYS(Pool)),
+    ok.
 
 %% Taken in ascending order, a statement's worth at a time, so two calls that
 %% want the same locks never each hold one the other waits for.
@@ -1612,9 +1673,6 @@ placed_unique(Pool, JobParams, Opts, UniqueOpts, [UniqueKey | _] = UniqueKeys) -
         {error, _} = Err ->
             Err
     end.
-
-build_unique_keys(#{keys := Keys}, Worker, Args, Queue) ->
-    shigoto_crypto:unique_keys(unique_material(Keys, Worker, encode_json(Args), Queue)).
 
 -spec unique_material([worker | args | queue], binary(), binary(), binary()) -> binary().
 unique_material(Keys, Worker, ArgsJson, Queue) ->

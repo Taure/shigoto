@@ -324,21 +324,28 @@ a_plaintext_that_would_read_as_a_frame_is_sealed() ->
 
 unique_keys_cover_every_key() ->
     Material = ~"{\"card\":\"4111\"}:my_worker",
-    %% The raw form is looked for while plaintext rows are still accepted.
-    [Digest, Material] = shigoto_crypto:unique_keys(Material),
+    %% The raw form is looked for while a job stored in it is left and
+    %% plaintext rows are still accepted.
+    [Digest, Material] = shigoto_crypto:unique_keys(Material, true),
+    ?assertEqual([Digest], shigoto_crypto:unique_keys(Material, false)),
     ?assertEqual(Digest, shigoto_crypto:unique_key(Material)),
     ?assertEqual(64, byte_size(Digest)),
     ?assertEqual(nomatch, binary:match(Digest, ~"4111")),
     set(#{encryption_keys => [key(2), key(1)]}),
     ?assertMatch(
-        [New, Digest, Material] when New =/= Digest, shigoto_crypto:unique_keys(Material)
+        [New, Digest, Material] when New =/= Digest, shigoto_crypto:unique_keys(Material, true)
     ),
+    ?assertMatch([New, Digest] when New =/= Digest, shigoto_crypto:unique_keys(Material, false)),
+    ?assertNotEqual(Digest, shigoto_crypto:unique_key(Material)),
     set(#{encryption_keys => [key(2), key(1)], require_encrypted => true}),
-    ?assertMatch([New, Digest] when New =/= Digest, shigoto_crypto:unique_keys(Material)),
+    ?assertMatch([New, Digest] when New =/= Digest, shigoto_crypto:unique_keys(Material, true)),
     set(#{encryption_key => key(1), require_encrypted => true}),
-    ?assertEqual([Digest], shigoto_crypto:unique_keys(Material)),
+    ?assertEqual([Digest], shigoto_crypto:unique_keys(Material, true)),
+    ?assertEqual([Digest], shigoto_crypto:unique_keys(Material, false)),
     set(#{}),
-    ?assertEqual([Material], shigoto_crypto:unique_keys(Material)).
+    ?assertEqual([Material], shigoto_crypto:unique_keys(Material, true)),
+    ?assertEqual([Material], shigoto_crypto:unique_keys(Material, false)),
+    ?assertEqual(Material, shigoto_crypto:unique_key(Material)).
 
 a_unique_key_is_moved_to_the_current_key() ->
     Material = ~"{\"card\":\"4111\"}:my_worker",

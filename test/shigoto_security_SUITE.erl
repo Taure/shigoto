@@ -51,6 +51,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     replaced_args_are_bound_to_the_existing_row/1,
     a_unique_job_is_still_found_after_key_rotation/1,
     a_unique_job_from_before_encryption_is_still_a_duplicate/1,
+    a_unique_insert_sends_no_plaintext_to_the_database/1,
     a_unique_job_is_still_found_once_its_key_is_dropped/1,
     insert_all_inserts_a_unique_job_once/1,
     insert_all_takes_uniqueness_from_its_options/1,
@@ -131,6 +132,7 @@ cases() ->
         replaced_args_are_bound_to_the_existing_row,
         a_unique_job_is_still_found_after_key_rotation,
         a_unique_job_from_before_encryption_is_still_a_duplicate,
+        a_unique_insert_sends_no_plaintext_to_the_database,
         a_unique_job_is_still_found_once_its_key_is_dropped,
         insert_all_inserts_a_unique_job_once,
         insert_all_takes_uniqueness_from_its_options,
@@ -850,6 +852,8 @@ a_unique_job_from_before_encryption_is_still_a_duplicate(_Config) ->
     {ok, #{id := Id, unique_key := Raw}} = shigoto:insert(Params, Unique),
     ?assertEqual(Material, Raw),
     application:set_env(shigoto, encryption_key, key(1)),
+    ok = restart(),
+    ?assert(shigoto_repo:raw_unique_keys(?POOL)),
     ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)),
     %% The raw form is looked for, never stored.
     {ok, #{unique_key := Hashed}} = shigoto:insert(Params#{args => #{~"n" => 2}}, Unique),
@@ -859,9 +863,87 @@ a_unique_job_from_before_encryption_is_still_a_duplicate(_Config) ->
     %% form no longer has to be looked for.
     {ok, #{jobs := #{failed := 0, skipped := 0}}} = shigoto:reencrypt(),
     ?assertEqual(shigoto_crypto:unique_key(Material), stored(Id, unique_key)),
+    ?assertNot(shigoto_repo:raw_unique_keys(?POOL)),
+    ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)),
     application:set_env(shigoto, require_encrypted, true),
-    ?assertEqual([shigoto_crypto:unique_key(Material)], shigoto_crypto:unique_keys(Material)),
     ?assertMatch({ok, {conflict, #{id := Id}}}, shigoto:insert(Params, Unique)).
+
+%% PostgreSQL can log the parameters of a statement, to a place that is
+%% usually less protected than the table.
+a_unique_insert_sends_no_plaintext_to_the_database(_Config) ->
+    Canary = canary(),
+    Unique = #{unique => #{keys => [worker, args, queue]}},
+    Params = #{
+        worker => shigoto_canary_other_worker,
+        args => #{~"canary" => Canary},
+        scheduled_at => seconds_from_now(3600)
+    },
+    {Inserted, Sent} = sent_to_the_database(fun() -> shigoto:insert(Params, Unique) end),
+    ?assertMatch({ok, #{id := _}}, Inserted),
+    ?assertMatch([_ | _], Sent),
+    ok = no_canary(Canary, Sent),
+    {Again, SentAgain} = sent_to_the_database(fun() ->
+        shigoto:insert_all([Params, Params#{args => #{~"canary" => Canary, ~"n" => 2}}], Unique)
+    end),
+    ?assertMatch({ok, [_, _]}, Again),
+    ok = no_canary(Canary, SentAgain),
+    ?assertEqual(2, job_count()),
+    %% A job from before the key was configured has its unique fields in the
+    %% clear in the table already, and is only found by them.
+    ok = clean(),
+    Older = canary(),
+    application:unset_env(shigoto, encryption_key),
+    {ok, #{id := Id}} = shigoto:insert(Params#{args => #{~"canary" => Older}}, Unique),
+    application:set_env(shigoto, encryption_key, key(1)),
+    ok = restart(),
+    ?assertMatch(
+        {ok, {conflict, #{id := Id}}},
+        shigoto:insert(Params#{args => #{~"canary" => Older}}, Unique)
+    ),
+    %% Until reencrypt has replaced the last of them.
+    {ok, #{jobs := #{failed := 0, skipped := 0}}} = shigoto:reencrypt(),
+    {Found, SentAfter} = sent_to_the_database(fun() ->
+        shigoto:insert(Params#{args => #{~"canary" => Older}}, Unique)
+    end),
+    ?assertMatch({ok, {conflict, #{id := Id}}}, Found),
+    ok = no_canary(Older, SentAfter).
+
+%% What `Insert` hands to `shigoto_db:query/3,4`. A process cannot trace
+%% itself, so the insert runs in one of its own.
+sent_to_the_database(Insert) ->
+    Patterns = [{shigoto_db, query, 3}, {shigoto_db, query, 4}],
+    _ = [erlang:trace_pattern(Pattern, true, [global]) || Pattern <- Patterns],
+    Test = self(),
+    {Inserter, Monitor} = spawn_monitor(fun() ->
+        receive
+            go -> Test ! {answered, self(), Insert()}
+        end
+    end),
+    _ = erlang:trace(Inserter, true, [call]),
+    Inserter ! go,
+    try
+        receive
+            {answered, Inserter, Answer} -> {Answer, traced_calls()};
+            {'DOWN', Monitor, process, Inserter, Reason} -> ct:fail({insert_died, Reason})
+        after 10000 -> ct:fail(insert_never_answered)
+        end
+    after
+        erlang:demonitor(Monitor, [flush]),
+        _ = [erlang:trace_pattern(Pattern, false, [global]) || Pattern <- Patterns]
+    end.
+
+traced_calls() ->
+    receive
+        {trace, _Pid, call, {shigoto_db, query, [_Pool, SQL, Params | _Opts]}} ->
+            [{iolist_to_binary(SQL), Params} | traced_calls()]
+    after 100 -> []
+    end.
+
+%% What a node does when its configuration is changed: it starts again.
+restart() ->
+    ok = application:stop(shigoto),
+    {ok, _} = application:ensure_all_started(shigoto),
+    ok.
 
 a_unique_job_is_still_found_once_its_key_is_dropped(_Config) ->
     ByArgs = #{unique => #{keys => [worker, args]}},

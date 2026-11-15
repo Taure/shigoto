@@ -59,7 +59,10 @@ run(Pool, Opts) ->
         true -> tables(Pool, maps:get(batch_size, Opts, 500), ?TABLES, #{})
     end.
 
-tables(_Pool, _BatchSize, [], Done) ->
+%% A clean run leaves no `unique_key` in the clear, and unique inserts stop
+%% looking for one.
+tables(Pool, _BatchSize, [], Done) ->
+    _ = shigoto_repo:raw_unique_keys_checked(Pool),
     {ok, Done};
 tables(Pool, BatchSize, [{Name, Table, Columns} | Tables], Done) ->
     Zero = #{scanned => 0, rewritten => 0, skipped => 0, failed => 0},

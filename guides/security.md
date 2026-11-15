@@ -223,10 +223,11 @@ taken for no instance.
 - `errors` is in the clear, with the limits above.
 - `unique_key` is an HMAC of the unique fields when a key is configured, and
   the fields themselves otherwise. A key stored before encryption was turned
-  on stays in the clear until `shigoto:reencrypt/0` replaces it, and until
-  `require_encrypted` is set a unique insert sends the unique fields to
-  PostgreSQL as a query parameter to find such jobs (see
-  [Unique jobs](encryption.md#unique-jobs)).
+  on stays in the clear until `shigoto:reencrypt/0` replaces it. While one is
+  stored, and `require_encrypted` is not set, a unique insert sends the
+  unique fields to PostgreSQL as a query parameter to find such jobs, where
+  statement logging can record them; with none stored it sends HMACs only
+  (see [Unique jobs](encryption.md#unique-jobs)).
 - Do not remove an old key from `encryption_keys` before
   `shigoto:reencrypt/0` reports `failed => 0` and `skipped => 0`.
 - With `encryption_write_format` `v1`, the default: `result`, `deps_results`

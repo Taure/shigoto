@@ -151,13 +151,28 @@ a clean run `OldKey` can be removed and duplicates are still found. A
 counted as `failed`.
 
 Turning encryption on is covered the same way. A job inserted before a key
-was configured has its unique fields in `unique_key` in the clear. While
-`require_encrypted` is not set, a unique insert also looks for that form
-(never storing it), and `reencrypt` replaces it with the HMAC. To look for it
-the unique fields of the job being inserted are sent to PostgreSQL as a query
-parameter, where statement logging can record them. Setting
-`{require_encrypted, true}` after a clean `reencrypt` ends that: the insert
-then sends HMACs only.
+was configured has its unique fields in `unique_key` in the clear, and
+`reencrypt` replaces that with the HMAC. Until it has, a unique insert has to
+look for such a job by the unique fields of the job being inserted, which
+means sending them to PostgreSQL as a query parameter, where statement
+logging (`log_statement`, `log_min_duration_statement`, `auto_explain`) can
+record them. It does that only while such a job is stored:
+
+- When the application starts it looks whether `shigoto_jobs` holds a
+  `unique_key` that is no HMAC, and keeps the answer. It looks again after
+  `shigoto:reencrypt/0,1`.
+- With none stored, which is every installation that had its key from the
+  start, a unique insert sends HMACs only.
+- With `{require_encrypted, true}` it never looks for the form in the clear.
+
+What this does not cover is a rollout that turns encryption on one node at a
+time. A node without the key stores and finds unique fields in the clear; a
+node with the key stores HMACs, and finds jobs in the clear only if one was
+stored when it started. So while both kinds of node insert, the same unique
+job can be inserted once by each. Give every node the key in one deploy if
+your unique jobs cannot tolerate that, or run `shigoto:reencrypt()` on a node
+with the key once the last node has it. Nodes on 1.10 with the same key are
+not affected: they store the same HMAC and take the same lock.
 
 A key should encrypt fewer than 2^32 values. In `v1` that counts every value
 the key ever wrote. In `v2` each worker and column has its own derived key, so

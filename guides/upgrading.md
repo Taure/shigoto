@@ -98,6 +98,7 @@ Inserting:
 | `depends_on` a job that has already finished | waited for ever | not waited for; its result is in `deps_results` |
 | `depends_on` jobs that depend on one another | refused as a cycle | accepted |
 | A job with `batch` for a fanout queue | inserted; the batch never finished | refused: `{error, {fanout_job_in_batch, Queue}}` |
+| A unique insert with an encryption key | sent only the HMAC of the unique fields, and did not find a job stored before the key was configured | also finds such a job, by sending the unique fields in the clear, but only while one is stored: checked when the application starts and after `shigoto:reencrypt()`. See [Encryption](encryption.md#unique-jobs) for what a rollout that turns encryption on node by node does not deduplicate |
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
 | `insert_all/1,2` with more unique jobs than `unique_lock_limit` (1000) allows locks for | | refused: `{error, {too_many_unique_locks, Needed, Limit}}`. Split the list. See [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts) |
 | A unique insert PostgreSQL refuses | raised `transaction_rolled_back` | answers `{error, {pgsql_error, _}}` with the code |

@@ -66,11 +66,12 @@ of `{ok, Job}`, so callers can tell a deduplicated enqueue from a fresh one.
 and no `unique/0` callback) it goes straight to `do_insert/4` - a plain insert
 with no deduplication. Otherwise it calls `insert_unique/4`, which:
 
-1. Builds the `unique_key` with `build_unique_keys/4`. With encryption keys
+1. Builds the `unique_key`s with `unique_keys/4`. With encryption keys
    configured there is one per key, the current key's first, so a job stored
-   before a key rotation is still found, and, until `require_encrypted` is
-   set, the form in the clear, so a job stored before encryption was turned
-   on is found as well. Only the first is ever stored.
+   before a key rotation is still found. While a job from before encryption
+   was turned on is still stored (and `require_encrypted` is not set) the
+   form in the clear is added, so that job is found as well; see
+   [Encryption](encryption.md#unique-jobs). Only the first is ever stored.
 2. Derives a lock key with `erlang:phash2/1` from each.
 3. Opens a `shigoto_db:transaction/2` (or joins the one already open) and takes a **Postgres advisory transaction
    lock** per key with `pg_try_advisory_xact_lock`, in one statement. This

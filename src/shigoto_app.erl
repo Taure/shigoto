@@ -43,7 +43,14 @@ start(_StartType, _StartArgs) ->
             _ = shigoto_config:on_dependency_failure(),
             _ = shigoto_db:kura_available(),
             ok = shigoto_db:ignore_sandbox(),
-            shigoto_sup:start_link(shigoto_migrator:boot(shigoto_config:pool()));
+            Pool = shigoto_config:pool(),
+            Current = shigoto_migrator:boot(Pool),
+            ok = shigoto_repo:raw_unique_keys_forgotten(Pool),
+            _ = [
+                shigoto_repo:raw_unique_keys_checked(Pool)
+             || Current, shigoto_crypto:is_enabled()
+            ],
+            shigoto_sup:start_link(Current);
         {error, Reason} ->
             {error, Reason}
     end.
