@@ -197,7 +197,8 @@ contains a key: a key is described by its position in the list and what is
 wrong with it.
 
 With a key configured, `shigoto_plaintext_jobs_accepted` is logged once per
-boot while `require_encrypted` is not set.
+boot while `require_encrypted` is not set, and `shigoto_workers_not_listed`
+while `workers` is not set.
 
 A setting changed while the application runs (`application:set_env/3`, a
 release upgrade) is not checked again, so the two that guard something are

@@ -15,7 +15,8 @@
     an_unstamped_schema_boots_with_a_dml_role/1,
     the_heartbeat_stops_after_the_queues_and_executors/1,
     a_node_that_cuts_the_shutdown_short_is_warned_about/1,
-    a_node_that_requires_encryption_without_a_key_does_not_start/1
+    a_node_that_requires_encryption_without_a_key_does_not_start/1,
+    a_node_with_a_key_and_no_list_of_workers_is_warned_about/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -32,7 +33,8 @@ all() ->
         an_unstamped_schema_boots_with_a_dml_role,
         the_heartbeat_stops_after_the_queues_and_executors,
         a_node_that_cuts_the_shutdown_short_is_warned_about,
-        a_node_that_requires_encryption_without_a_key_does_not_start
+        a_node_that_requires_encryption_without_a_key_does_not_start,
+        a_node_with_a_key_and_no_list_of_workers_is_warned_about
     ].
 
 init_per_suite(Config) ->
@@ -65,6 +67,8 @@ end_per_testcase(_TestCase, _Config) ->
     application:unset_env(shigoto, shutdown_timeout),
     application:unset_env(kernel, shutdown_timeout),
     application:unset_env(shigoto, require_encrypted),
+    application:unset_env(shigoto, encryption_key),
+    application:unset_env(shigoto, workers),
     ok = shigoto_migration:up(?POOL).
 
 %% A key that was meant to come from a secret and did not.
@@ -78,6 +82,31 @@ a_node_that_requires_encryption_without_a_key_does_not_start(_Config) ->
             }}},
         application:ensure_all_started(shigoto)
     ).
+
+a_node_with_a_key_and_no_list_of_workers_is_warned_about(_Config) ->
+    Warned = fun() ->
+        {ok, _} = application:ensure_all_started(shigoto),
+        Reports = unlisted_reports(),
+        ok = application:stop(shigoto),
+        Reports
+    end,
+    ok = shigoto_log_probe:attach(),
+    try
+        ?assertEqual([], Warned()),
+        application:set_env(shigoto, encryption_key, binary:copy(<<7>>, 32)),
+        ?assertMatch([#{action := _}], Warned()),
+        application:set_env(shigoto, workers, [shigoto_test_worker]),
+        ?assertEqual([], Warned())
+    after
+        shigoto_log_probe:detach()
+    end.
+
+unlisted_reports() ->
+    receive
+        {log, warning, #{msg := ~"shigoto_workers_not_listed"} = Report} ->
+            [Report | unlisted_reports()]
+    after 300 -> []
+    end.
 
 %% A supervisor stops its children last started first.
 the_heartbeat_stops_after_the_queues_and_executors(_Config) ->

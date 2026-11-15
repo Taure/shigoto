@@ -18,7 +18,8 @@ that is zero or negative. The application does not start with one of those,
 and the reason, `{shigoto_config, {invalid, Setting, Value}}`, names the
 setting, never a key. Once per boot it logs
 `shigoto_plaintext_jobs_accepted` while a key is configured and
-`require_encrypted` is not set, and `shigoto_shutdown_cut_short` when
+`require_encrypted` is not set, `shigoto_workers_not_listed` while a key is
+configured and `workers` is not set, and `shigoto_shutdown_cut_short` when
 `kernel`'s `shutdown_timeout` is shorter than shigoto needs to stop
 (`shigoto_config:shutdown_budget/0`).
 
@@ -56,12 +57,25 @@ start(_StartType, _StartArgs) ->
     end.
 
 %% Once per boot, and only with a key configured: plaintext rows still being
-%% accepted.
+%% accepted, and any module allowed to run them.
 warn_about_encryption() ->
     case shigoto_crypto:is_enabled() of
-        false -> ok;
-        true -> warn_if_plaintext_accepted(shigoto_config:require_encrypted())
+        false ->
+            ok;
+        true ->
+            warn_if_plaintext_accepted(shigoto_config:require_encrypted()),
+            warn_if_workers_not_listed(shigoto_config:workers())
     end.
+
+warn_if_workers_not_listed(undefined) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_workers_not_listed",
+        warning =>
+            ~"a job row may name any module on this node that exports perform/1, so someone who can write to the jobs table chooses what runs, with args of their choosing",
+        action => ~"set {workers, [Module]} to the modules that are workers"
+    });
+warn_if_workers_not_listed(_Workers) ->
+    ok.
 
 warn_if_plaintext_accepted(true) ->
     ok;

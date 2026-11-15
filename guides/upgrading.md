@@ -142,6 +142,9 @@ The API:
 - `[shigoto, job, start]`, `[shigoto, job, stop]`, `[shigoto, job, exception]`
   and `[shigoto, job, lost | rescued | transition_failed]` telemetry events.
 
+New in the log: `shigoto_workers_not_listed`, a warning once per boot while an
+encryption key is configured and `workers` is not set.
+
 New settings with a default: `on_discard_timeout` (60000),
 `unrunnable_snooze_limit` (20), `rescue_interval` (60000),
 `advisory_lock_timeout` (5000), `unique_lock_limit` (1000),
