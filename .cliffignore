@@ -1,0 +1,6 @@
+# Commits CHANGELOG.md leaves out, by SHA.
+#
+# v2 frames were made the default write format and, before any release, v1
+# was made the default again. Neither is a change from 1.10.
+30884f6bb5ca119543b09f26e0cf4347260650d0
+4cf70240cf266a66a346c1d3566ff498eb3ece3e

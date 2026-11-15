@@ -328,3 +328,5 @@ with `git cliff -o CHANGELOG.md`, committed as `chore(changelog): regenerate`
 whose file differs from what its branch generates; dependabot's are not
 checked and show up at the next regeneration. The newest section is headed
 `[unreleased]` until the pull request after the release names it.
+A commit that was undone before a release, and the one that undid it, are
+listed by SHA in `.cliffignore` so the changelog does not announce either.
