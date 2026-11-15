@@ -13,14 +13,15 @@ statement that ran, and `{error, Reason}` for one that did not, with `{pgsql_err
 Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
 
-A row is a map keyed by column name. The names are chosen by the server, and a
-client that never makes an atom for one (minato after 1.1) answers a column
-under an atom only where that atom exists on the node, and under the name as a
-binary otherwise. Every column of shigoto's own tables is an atom from the
-moment this module is loaded (`columns/0`), so a job, a batch or a cron entry
-is keyed by atoms whichever module reads it. A column you add to one of the
-tables, or alias in a statement of your own, is an atom only if your code
-names it.
+A row is a map keyed by column name, an atom. The names are chosen by the
+server, and shigoto asks its client for them as atoms. Every column of
+shigoto's own tables is an atom from the moment this module is loaded
+(`columns/0`), which does not depend on the client: a client that makes no
+atom for a name it is sent, and answers a column under an atom only where one
+exists on the node and under the name as a binary otherwise, still keys a job,
+a batch or a cron entry by atoms, whichever module reads it. With such a
+client, a column you add to one of the tables, or alias in a statement of your
+own, is an atom only if your code names it.
 
 ## Transactions
 
