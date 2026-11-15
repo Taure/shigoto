@@ -592,15 +592,12 @@ breaker_told(_Queued, Worker, Result) ->
         undefined ->
             ok;
         _ ->
-            try seki:call(breaker_name(Worker), fun() -> Result end) of
+            try seki:call(shigoto_resilience:breaker_name(Worker), fun() -> Result end) of
                 _ -> ok
             catch
                 _:_ -> ok
             end
     end.
-
-breaker_name(Worker) ->
-    binary_to_existing_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>).
 
 %%----------------------------------------------------------------------
 %% Internal: backoff

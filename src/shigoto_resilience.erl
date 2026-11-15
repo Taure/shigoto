@@ -59,6 +59,7 @@ ungated: its jobs are snoozed like any other gate failure, with the reason
     check_load/1,
     complete_load/2,
     ensure_worker_primitives/1,
+    breaker_name/1,
     new_table/0,
     setup_load_shedder/0
 ]).
@@ -440,19 +441,16 @@ maybe_create_breaker(Worker) ->
         end,
     seki:new_breaker(Name, Opts).
 
-%% Atom creation is safe: bounded by the number of worker modules (loaded at compile time).
-%% Each worker creates at most 3 atoms, once, on first use.
 limiter_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_rl_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_limiter, Worker}.
 
 bulkhead_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_bh_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_bulkhead, Worker}.
 
+-doc false.
+-spec breaker_name(module()) -> {shigoto_breaker, module()}.
 breaker_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_breaker, Worker}.
 
 priority_to_seki(P) when P >= 10 -> 0;
 priority_to_seki(P) when P >= 5 -> 1;

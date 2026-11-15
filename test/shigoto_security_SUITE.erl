@@ -455,9 +455,7 @@ fails_without_leaking(Mode, Canary, Extra) ->
 
 %% Every job in these cases fails, which is what opens a worker's breaker.
 closed_breaker() ->
-    Breaker = shigoto_cb_shigoto_canary_worker,
-    _ = [seki:reset_breaker(Breaker) || whereis(Breaker) =/= undefined],
-    ok.
+    seki:reset_breaker({shigoto_breaker, shigoto_canary_worker}).
 
 a_running_job_is_held_encrypted(_Config) ->
     Canary = canary(),
