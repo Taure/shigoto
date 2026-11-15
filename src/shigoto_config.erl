@@ -381,6 +381,15 @@ Raises `{shigoto_config, {invalid, instance, Value}}` for anything else, also
 when it is changed while the application runs: it is never read as no
 instance, which would be the locks and the channel of every unnamed
 installation in the database.
+
+The application does not start with such a value, so the raise is only seen
+on a node whose `instance` was changed while it ran. There it is raised
+wherever a lock key or the channel is needed: a unique insert raises in its
+caller, a job of a worker with `global_concurrency/0` is put back, and the
+rescue, cron and staging passes fail and are tried again, so no stale job is
+rescued and no cron job scheduled by that node until the value is valid. The
+node itself stays up. Change `instance` in the configuration and restart the
+node.
 """.
 -spec instance() -> binary() | undefined.
 instance() ->

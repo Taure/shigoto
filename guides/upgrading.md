@@ -130,7 +130,7 @@ The API:
 | The same key twice in `encryption_keys` | accepted | the application does not start |
 | A setting shigoto cannot use | failed where it was used, each in its own way | the application does not start: `{shigoto_config, {invalid, Setting, Value}}` (step 3) |
 | `{require_encrypted, true}` without an encryption key | started, stored and ran plaintext | the application does not start: `{shigoto_config, {invalid, require_encrypted, no_encryption_key}}` |
-| `require_encrypted` or `instance` changed to something invalid while the application runs | read as `false`, and as no instance | `require_encrypted` is on unless it is `false`; an invalid `instance` raises `{shigoto_config, {invalid, instance, Value}}` where it is read |
+| `require_encrypted` or `instance` changed to something invalid while the application runs | read as `false`, and as no instance | `require_encrypted` is on unless it is `false`; an invalid `instance` raises `{shigoto_config, {invalid, instance, Value}}` where it is read: in the caller of a unique insert, and in the rescue, cron and staging passes, which fail until it is valid. See [Security](security.md#configuration-is-checked-at-boot) |
 
 ## New, and off until you use it
 

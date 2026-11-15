@@ -208,7 +208,10 @@ read to fail closed. `require_encrypted` is on unless it is exactly `false`.
 An `instance` that is not a valid name raises
 `{shigoto_config, {invalid, instance, Value}}` wherever it is read (a lock,
 the stager, the migration, which answers it as `{error, _}`): it is never
-taken for no instance.
+taken for no instance. On that node a unique insert then raises in its
+caller, and the passes that take a lock (rescue, cron, staging) fail and are
+tried again until the value is valid; the node stays up. Change `instance`
+in the configuration and restart the node.
 
 ## Options
 
