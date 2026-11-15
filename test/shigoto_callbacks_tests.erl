@@ -2,7 +2,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 callbacks_test_() ->
-    {foreach, fun setup/0, fun cleanup/1, [
+    {foreach, fun setup/0, fun(_) -> cleanup() end, [
         fun at_most_max_running_run_at_once/0,
         fun what_does_not_fit_the_backlog_is_dropped/0,
         fun a_callback_is_stopped_at_the_timeout/0,
@@ -25,7 +25,7 @@ listen() ->
     true = register(shigoto_callbacks_test, self()),
     flush().
 
-cleanup(_) ->
+cleanup() ->
     case whereis(shigoto_callbacks) of
         Pid when is_pid(Pid) ->
             unlink(Pid),

@@ -1,4 +1,5 @@
 -module(shigoto_cluster_SUITE).
+-behaviour(ct_suite).
 -moduledoc """
 Two nodes on one database. The second is a `peer` node that shares nothing
 with this one but PostgreSQL, which is all two shigoto nodes ever share: there
