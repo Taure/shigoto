@@ -197,10 +197,13 @@ reported(#state{dropped = Dropped} = State) ->
 
 %% The callback's own process. A raise leaves as an exit reason without the
 %% values it failed on, so nothing of the job reaches a crash report.
--spec run(module(), map()) -> no_return().
+-spec run(module(), map()) -> ok.
 run(Worker, Job) ->
     ok = shigoto_db:ignore_sandbox(),
-    exit(called(Worker, Job)).
+    case called(Worker, Job) of
+        normal -> ok;
+        Failed -> exit(Failed)
+    end.
 
 called(Worker, #{errors := Errors} = Job) ->
     case shigoto_job:opened(Job) of
