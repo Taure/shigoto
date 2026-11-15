@@ -82,11 +82,13 @@ kill its mutants. The modules whose behaviour is a statement or a process
 `shigoto_cron`, ...) are covered by the CT suites, which the plugin cannot scope
 to a module, and are left out.
 
-Every push to `main` runs release.yml.
+Every push to `main` runs release.yml (`@v2.3.2`), once `ci` and every
+PostgreSQL major are green, and a release it cuts is published to Hex by
+hex-publish.yml through Workload Identity.
 
 ## Conventions
 
-- OTP 28+ (`.tool-versions`: erlang 28.4.1, rebar 3.26.0); README floor OTP 27+,
+- OTP 28+ (`.tool-versions`: erlang 28.4.1, rebar 3.28.0); README floor OTP 27+,
   PostgreSQL 9.5+.
 - The `~"..."` sigil for binaries, never `<<"...">>` (see `shigoto_notifier`).
 - No `lists:foldl/foldr` - list comprehensions + `maps:from_list`, or explicit
@@ -106,7 +108,8 @@ Every push to `main` runs release.yml.
   shigoto's own (`_shigoto_carrier`, `_shigoto_deps`, and `_batch_event`). Put
   the next internal key under that prefix.
 - `{vsn, "git"}` in `shigoto.app.src` - version derives from git tags, never
-  hand-edited. Do not publish to Hex (the maintainer does that manually).
+  hand-edited. Do not publish to Hex: the `hex-publish` job does, from the
+  tag a release cut.
 
 ## Architecture
 
