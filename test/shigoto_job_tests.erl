@@ -162,7 +162,10 @@ a_name_that_is_no_worker_is_not_asked_about_for_30_seconds() ->
     Before = erlang:monotonic_time(second),
     ?assertEqual({error, {unknown_worker, ?WORKER}}, shigoto_job:worker(?WORKER)),
     After = erlang:monotonic_time(second),
-    [{?WORKER, unknown, Until}] = ets:lookup(shigoto_workers, ?WORKER),
+    Until =
+        case ets:lookup(shigoto_workers, ?WORKER) of
+            [{?WORKER, unknown, At}] when is_integer(At) -> At
+        end,
     ?assert(Before =< Until - 30 andalso Until - 30 =< After),
     %% On the list now, and still refused: the answer is the remembered one.
     set(#{workers => [shigoto_test_worker]}),
