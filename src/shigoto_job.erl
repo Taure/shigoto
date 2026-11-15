@@ -337,7 +337,7 @@ reserved_keys(_Json, _Also) ->
 -spec key_name(term()) -> binary().
 key_name(Key) when is_binary(Key) -> Key;
 key_name(Key) when is_atom(Key) -> atom_to_binary(Key);
-key_name(_Key) -> <<>>.
+key_name(_Key) -> ~"".
 
 -spec is_reserved(binary(), [binary()]) -> boolean().
 is_reserved(<<"_shigoto", _/binary>>, _Also) -> true;
