@@ -5,7 +5,13 @@ per-worker rate limiting, circuit breaking, bulkhead (concurrency limiting),
 and system-level load shedding. All primitives are lazily initialized on
 first use.
 
-When seki is not running, all resilience checks are no-ops.
+A worker's primitives are named `{shigoto_limiter, Worker}`,
+`{shigoto_bulkhead, Worker}` and `{shigoto_breaker, Worker}`, so seki's own
+functions work on them: `seki:state({shigoto_breaker, my_worker})`. Naming by
+term needs seki 0.6 or later.
+
+When seki is not running, a worker that declares one of these does not run
+without it: see [Execution Pipeline](#execution-pipeline).
 
 ## Rate Limiting
 
