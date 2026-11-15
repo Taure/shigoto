@@ -205,25 +205,28 @@ run(Worker, Job) ->
         Failed -> exit(Failed)
     end.
 
-called(Worker, #{errors := Errors} = Job) ->
-    case shigoto_job:opened(Job) of
-        {ok, _Worker, #{args := Args} = Opened} ->
-            %% As in the executor, where the callback used to run. Neither is
-            %% undone: both go when this process does.
-            logger:update_process_metadata(#{
-                shigoto_job_id => maps:get(id, Job, undefined),
-                shigoto_worker => Worker,
-                shigoto_queue => maps:get(queue, Job, undefined),
-                shigoto_attempt => maps:get(attempt, Job, 0)
-            }),
-            _ = shigoto_propagator:attached(shigoto_propagator:carrier(Opened)),
-            try Worker:on_discard(Args, decoded_errors(Errors)) of
-                _ -> normal
-            catch
-                Class:Reason -> {raised, shigoto_error:shape({Class, Reason})}
-            end;
-        {error, Reason} ->
-            {unreadable, shigoto_error:shape(Reason)}
+%% All of it is inside the `try`: a raise outside it would end this process
+%% with an error the emulator prints, arguments included.
+called(Worker, Job) ->
+    try
+        case shigoto_job:opened(Job) of
+            {ok, _Worker, #{args := Args} = Opened} ->
+                %% As in the executor, where the callback used to run. Neither
+                %% is undone: both go when this process does.
+                logger:update_process_metadata(#{
+                    shigoto_job_id => maps:get(id, Job, undefined),
+                    shigoto_worker => Worker,
+                    shigoto_queue => maps:get(queue, Job, undefined),
+                    shigoto_attempt => maps:get(attempt, Job, 0)
+                }),
+                _ = shigoto_propagator:attached(shigoto_propagator:carrier(Opened)),
+                _ = Worker:on_discard(Args, decoded_errors(maps:get(errors, Job, []))),
+                normal;
+            {error, Unreadable} ->
+                {unreadable, shigoto_error:shape(Unreadable)}
+        end
+    catch
+        Class:Reason -> {raised, shigoto_error:shape({Class, Reason})}
     end.
 
 decoded_errors(Errors) when is_binary(Errors) -> json:decode(Errors);

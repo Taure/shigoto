@@ -204,12 +204,17 @@ result(JobId, Result, Waited) ->
         false -> throw({?MODULE, decrypt_failed})
     end.
 
-job_id(Id) when is_binary(Id) ->
+%% A bigint has at most 19 digits and a sign. Longer text is not converted: a
+%% number of millions of digits raises `system_limit`, with the text in the
+%% stack frame.
+job_id(Id) when is_binary(Id), byte_size(Id) =< 20 ->
     try
         binary_to_integer(Id)
     catch
-        error:badarg -> throw({?MODULE, decrypt_failed})
+        error:_ -> throw({?MODULE, decrypt_failed})
     end;
+job_id(Id) when is_binary(Id) ->
+    throw({?MODULE, decrypt_failed});
 job_id(Id) ->
     Id.
 

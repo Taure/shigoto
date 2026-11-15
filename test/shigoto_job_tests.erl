@@ -25,6 +25,7 @@ job_test_() ->
             fun a_job_for_another_worker_is_not_opened/0,
             fun a_job_that_names_no_worker_is_not_opened/0,
             fun deps_results_open_per_job/0,
+            fun a_result_under_a_key_no_id_can_be_is_refused/0,
             fun only_the_results_a_job_waited_for_are_opened/0,
             fun a_job_without_its_list_is_refused_once_plaintext_is/0,
             fun a_readable_job_shows_reasons_not_ciphertext/0,
@@ -127,6 +128,18 @@ deps_results_open_per_job() ->
     ),
     {ok, _, Empty} = shigoto_job:opened(Job#{deps_results => ~"{}"}),
     ?assertEqual(#{}, maps:get(deps_results, Empty)).
+
+a_result_under_a_key_no_id_can_be_is_refused() ->
+    Result = json:decode(shigoto_crypto:seal(~"{\"total\":9}", {result, 5})),
+    Job = job(?WORKER, #{}, #{}),
+    Stored = fun(Key) -> iolist_to_binary(json:encode(#{Key => Result})) end,
+    Huge = binary:copy(~"9", 4000000),
+    [
+        ?assertEqual({error, decrypt_failed}, shigoto_job:opened(Job#{deps_results => Stored(Key)}))
+     || Key <- [Huge, binary:copy(~"9", 21), ~"5 "]
+    ],
+    Shown = shigoto_job:readable(Job#{id => 1, deps_results => Stored(Huge)}),
+    ?assertEqual(#{Huge => ~"decrypt_failed"}, json:decode(maps:get(deps_results, Shown))).
 
 only_the_results_a_job_waited_for_are_opened() ->
     [Five, Six] = [

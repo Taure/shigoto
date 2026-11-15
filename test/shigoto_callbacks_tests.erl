@@ -1,6 +1,8 @@
 -module(shigoto_callbacks_tests).
 -include_lib("eunit/include/eunit.hrl").
 
+-export([log/2]).
+
 callbacks_test_() ->
     {foreach, fun setup/0, fun(_) -> cleanup() end, [
         fun at_most_max_running_run_at_once/0,
@@ -9,7 +11,8 @@ callbacks_test_() ->
         fun a_callback_that_raises_stops_nothing/0,
         fun only_a_discarded_job_with_the_callback_is_handed_over/0,
         fun without_the_process_the_callback_runs_before_the_call_returns/0,
-        fun without_the_process_the_call_returns_at_the_timeout/0
+        fun without_the_process_the_call_returns_at_the_timeout/0,
+        fun a_row_that_cannot_be_read_is_not_printed_by_the_emulator/0
     ]}.
 
 setup() ->
@@ -121,6 +124,42 @@ without_the_process_the_call_returns_at_the_timeout() ->
     ok = shigoto_callbacks:discarded(job(1, ~"wait")),
     {1, Stuck} = started_tagged(),
     ?assertNot(is_process_alive(Stuck)).
+
+a_row_that_cannot_be_read_is_not_printed_by_the_emulator() ->
+    ok = listen(),
+    ok = logger:add_handler(?MODULE, ?MODULE, #{config => #{pid => self()}, level => all}),
+    Huge = binary:copy(~"9", 4000000),
+    Unreadable = (job(1, ~"return"))#{
+        deps_results => iolist_to_binary(json:encode(#{Huge => 1}))
+    },
+    try
+        ok = shigoto_callbacks:discarded(Unreadable),
+        ok = shigoto_callbacks:discarded(maps:remove(errors, job(2, ~"return"))),
+        ?assertMatch({2, _}, started_tagged()),
+        ok = shigoto_callbacks:discarded(job(3, ~"crash")),
+        ?assertMatch({3, _}, started_tagged()),
+        Logged = logged(),
+        ?assertEqual([], [Event || #{meta := #{error_logger := _}} = Event <- Logged]),
+        ?assertMatch(
+            [
+                #{msg := ~"shigoto_on_discard_failed", job_id := 1, reason := decrypt_failed},
+                #{msg := ~"shigoto_on_discard_failed", job_id := 3}
+            ],
+            [Report || #{msg := {report, Report}} <- Logged]
+        )
+    after
+        logger:remove_handler(?MODULE)
+    end.
+
+log(Event, #{config := #{pid := Pid}}) ->
+    Pid ! {logged, Event},
+    ok.
+
+logged() ->
+    receive
+        {logged, Event} -> [Event | logged()]
+    after 100 -> []
+    end.
 
 job(Tag, Then) ->
     #{
