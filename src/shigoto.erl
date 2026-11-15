@@ -185,6 +185,12 @@ transaction: all of it is inserted or none of it. Where such a job is a
 duplicate, the answer holds the job that is already there in its place, and no
 `[shigoto, job, inserted]` is emitted for it. `unique => false` in `Opts`
 inserts every job without looking.
+
+The unique jobs of one call may take `unique_lock_limit` advisory locks
+between them (1000 unless set, `shigoto_config:unique_lock_limit/0` says how
+many a job takes). A call that needs more answers
+`{error, {too_many_unique_locks, Needed, Limit}}` with nothing inserted: split
+the list and insert each part with a call of its own.
 """.
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->

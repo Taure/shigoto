@@ -123,6 +123,21 @@ it is inserted in one transaction: the unique locks of the whole list are taken
 first, then the jobs go in, in the order given. A lock that cannot be had
 answers `{error, {lock_timeout, unique}}` and nothing is inserted.
 
+The locks are held until the call ends, in a lock table the whole PostgreSQL
+server shares, so one call may take `unique_lock_limit` of them: 1000 unless
+set, at most 5000. A unique job takes one lock per configured encryption key
+(one without a key), and one more while unique keys from before encryption
+are still looked for (see [Encryption](encryption.md#unique-jobs)). A call
+that needs more answers `{error, {too_many_unique_locks, Needed, Limit}}` and
+inserts nothing. Split the list and insert each part with its own call; each
+call is then its own all-or-nothing unit. Calls made inside one
+`shigoto:transaction/1` keep their locks until it ends, so there they add up:
+keep the whole transaction under the limit.
+
+An insert the database refuses is answered, not raised: `{error, Reason}`
+with a `{pgsql_error, _}` cut down to its code, and nothing of the call is
+kept.
+
 The answer is still `{ok, Jobs}` with one job per job given. Where a job was a
 duplicate (of a stored job, or of an earlier one in the same list) its place
 holds the job that is already there, so the same id can appear twice, and no

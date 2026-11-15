@@ -53,6 +53,9 @@ event (with metadata) and every shigoto telemetry event the case produced.
     insert_all_inserts_nothing_when_a_unique_lock_is_held/1,
     two_bulk_inserts_at_once_insert_each_unique_job_once/1,
     a_bulk_insert_rolled_back_leaves_no_unique_job/1,
+    insert_all_takes_no_more_unique_locks_than_its_limit/1,
+    a_full_lock_table_is_answered_not_raised/1,
+    a_unique_insert_the_database_refuses_is_answered_not_raised/1,
     insert_all_encrypts_the_meta/1,
     insert_all_validates_dependencies/1,
     a_bad_key_stops_the_boot_without_printing_it/1,
@@ -82,6 +85,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     unrunnable_snooze_limit,
     instance,
     advisory_lock_timeout,
+    unique_lock_limit,
     notify_min_interval
 ]).
 
@@ -125,6 +129,9 @@ cases() ->
         insert_all_inserts_nothing_when_a_unique_lock_is_held,
         two_bulk_inserts_at_once_insert_each_unique_job_once,
         a_bulk_insert_rolled_back_leaves_no_unique_job,
+        insert_all_takes_no_more_unique_locks_than_its_limit,
+        a_full_lock_table_is_answered_not_raised,
+        a_unique_insert_the_database_refuses_is_answered_not_raised,
         insert_all_encrypts_the_meta,
         insert_all_validates_dependencies,
         a_bad_key_stops_the_boot_without_printing_it,
@@ -227,6 +234,10 @@ overrides(a_held_unique_lock_does_not_stall_the_insert) ->
     #{advisory_lock_timeout => 200};
 overrides(insert_all_inserts_nothing_when_a_unique_lock_is_held) ->
     #{advisory_lock_timeout => 200};
+overrides(insert_all_takes_no_more_unique_locks_than_its_limit) ->
+    #{unique_lock_limit => 6};
+overrides(a_full_lock_table_is_answered_not_raised) ->
+    #{unique_lock_limit => 5000};
 overrides(a_held_concurrency_lock_snoozes_the_job) ->
     #{advisory_lock_timeout => 200};
 overrides(a_flood_of_notifications_is_rate_limited) ->
@@ -842,6 +853,118 @@ a_bulk_insert_rolled_back_leaves_no_unique_job(_Config) ->
     ?assertEqual([], inserted_events()),
     %% The lock went with the transaction.
     ?assertMatch({ok, [#{id := _}]}, shigoto:insert_all([waiting(shigoto_unique_worker, 1)])).
+
+%% Every unique job of a call holds its advisory locks until the call ends,
+%% and the lock table is one for the whole server.
+insert_all_takes_no_more_unique_locks_than_its_limit(_Config) ->
+    _ = captured(),
+    Unique = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 7)],
+    Plain = [waiting(shigoto_canary_other_worker, N) || N <- lists:seq(1, 20)],
+    {error, {too_many_unique_locks, Needed, 6}} = shigoto:insert_all(Plain ++ Unique),
+    ?assert(Needed >= 7),
+    ?assertEqual(0, job_count()),
+    ?assertEqual([], inserted_events()),
+    %% Jobs that are not unique take no lock and do not count.
+    ?assertMatch({ok, [_ | _]}, shigoto:insert_all(Plain ++ lists:sublist(Unique, 3))),
+    ?assertEqual(23, job_count()).
+
+a_full_lock_table_is_answered_not_raised(_Config) ->
+    Jobs = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 600)],
+    Holder = fill_lock_table(),
+    try
+        ?assertMatch({error, {pgsql_error, #{code := ~"53200"}}}, shigoto:insert_all(Jobs)),
+        {error, {pgsql_error, Fields}} = shigoto:insert_all(Jobs),
+        ?assertEqual([], maps:keys(maps:without([code, severity, severity_non_localised], Fields))),
+        ?assertEqual(0, job_count())
+    after
+        ok = release(Holder)
+    end,
+    ?assertMatch({ok, [_ | _]}, shigoto:insert_all(Jobs)),
+    ?assertEqual(600, job_count()).
+
+%% Another session takes advisory locks until PostgreSQL has no room for 500
+%% more, and keeps what it got.
+fill_lock_table() ->
+    Test = self(),
+    Holder = spawn_link(fun() ->
+        shigoto_db:transaction(?POOL, fun() ->
+            ok = filled(1 bsl 40),
+            Test ! {holding, self()},
+            receive
+                release -> ok
+            after 60000 -> ok
+            end
+        end),
+        Test ! {released, self()}
+    end),
+    receive
+        {holding, Holder} -> Holder
+    after 60000 -> ct:fail(lock_table_not_filled)
+    end.
+
+filled(From) ->
+    #{} = shigoto_db:query(?POOL, ~"SAVEPOINT filling", []),
+    Taken = shigoto_db:query(
+        ?POOL,
+        ~"SELECT count(pg_advisory_xact_lock(key)) AS taken FROM generate_series($1::bigint, $2::bigint) key",
+        [From, From + 499]
+    ),
+    case Taken of
+        #{rows := [#{taken := 500}]} ->
+            #{} = shigoto_db:query(?POOL, ~"RELEASE SAVEPOINT filling", []),
+            filled(From + 500);
+        {error, {pgsql_error, #{code := ~"53200"}}} ->
+            #{} = shigoto_db:query(?POOL, ~"ROLLBACK TO SAVEPOINT filling", []),
+            ok
+    end.
+
+a_unique_insert_the_database_refuses_is_answered_not_raised(_Config) ->
+    ok = refusing(~"BEFORE INSERT", ~"NEW.worker = 'shigoto_unique_worker'"),
+    try
+        {error, {pgsql_error, Fields}} = shigoto:insert(waiting(shigoto_unique_worker, 1)),
+        ?assertMatch(#{code := ~"P0001"}, Fields),
+        ?assertNot(is_map_key(message, Fields)),
+        ?assertMatch(
+            {error, {pgsql_error, #{code := ~"P0001"}}},
+            shigoto:insert_all([
+                waiting(shigoto_canary_other_worker, 1), waiting(shigoto_unique_worker, 1)
+            ])
+        ),
+        ?assertEqual(0, job_count())
+    after
+        ok = accepting()
+    end,
+    ?assertMatch({ok, #{id := _}}, shigoto:insert(waiting(shigoto_unique_worker, 1))).
+
+refusing(Timing, When) ->
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        CREATE OR REPLACE FUNCTION shigoto_test_refuse() RETURNS trigger AS $$
+        BEGIN RAISE EXCEPTION 'refused by the test'; END
+        $$ LANGUAGE plpgsql
+        """,
+        []
+    ),
+    #{} = shigoto_db:query(
+        ?POOL,
+        [
+            ~"CREATE TRIGGER shigoto_test_refuse ",
+            Timing,
+            ~" ON shigoto_jobs FOR EACH ROW WHEN (",
+            When,
+            ~") EXECUTE FUNCTION shigoto_test_refuse()"
+        ],
+        []
+    ),
+    ok.
+
+accepting() ->
+    #{} = shigoto_db:query(
+        ?POOL, ~"DROP TRIGGER IF EXISTS shigoto_test_refuse ON shigoto_jobs", []
+    ),
+    #{} = shigoto_db:query(?POOL, ~"DROP FUNCTION IF EXISTS shigoto_test_refuse()", []),
+    ok.
 
 insert_all_encrypts_the_meta(_Config) ->
     Canary = canary(),

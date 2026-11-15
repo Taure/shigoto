@@ -118,6 +118,14 @@ long as its session lives. shigoto cannot prevent that. What it does:
   `{error, lock_timeout}`.
 - No gate fails open. If the concurrency check cannot be made, the job does
   not run.
+- One call takes a bounded number of them. The locks of every session share
+  one table in PostgreSQL (`max_locks_per_transaction * max_connections`
+  entries, 6400 by default), and a session that fills it makes the others
+  fail with `out of shared memory`. A single insert takes a handful.
+  `insert_all/1,2` takes at most `unique_lock_limit` for its unique jobs
+  (default 1000) and refuses a longer list with
+  `{error, {too_many_unique_locks, Needed, Limit}}`. Do not hand it a list
+  whose length a user chooses without splitting it.
 
 With `instance` set, the lock keys and the notification channel are derived
 from that name, so two installations in one database do not share them:
@@ -192,6 +200,7 @@ taken for no instance.
 | `require_encrypted` | `false` | Refuse to run a job whose args or meta are plaintext (and, in `v2`, to hand on a plaintext result). Needs a key: with `true` and no key the application does not start (`{invalid, require_encrypted, no_encryption_key}`) |
 | `instance` | `undefined` | Name of this installation, for its own locks and notification channel |
 | `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock |
+| `unique_lock_limit` | `1000` | Advisory locks one `insert_all/1,2` call may take for its unique jobs, at most 5000 |
 | `notify_min_interval` | `10` | Minimum milliseconds between polls caused by notifications, per queue |
 
 ## What is not protected

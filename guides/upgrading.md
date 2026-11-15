@@ -98,6 +98,8 @@ Inserting:
 | `depends_on` jobs that depend on one another | refused as a cycle | accepted |
 | A job with `batch` for a fanout queue | inserted; the batch never finished | refused: `{error, {fanout_job_in_batch, Queue}}` |
 | Advisory locks | waited without a bound | at most `advisory_lock_timeout` (5000 ms); a unique insert can answer `{error, {lock_timeout, unique}}` |
+| `insert_all/1,2` with more unique jobs than `unique_lock_limit` (1000) allows locks for | | refused: `{error, {too_many_unique_locks, Needed, Limit}}`. Split the list. See [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts) |
+| A unique insert PostgreSQL refuses | raised `transaction_rolled_back` | answers `{error, {pgsql_error, _}}` with the code |
 
 Dependencies and batches:
 
@@ -135,7 +137,8 @@ The API:
 
 New settings with a default: `on_discard_timeout` (60000),
 `unrunnable_snooze_limit` (20), `rescue_interval` (60000),
-`advisory_lock_timeout` (5000), `notify_min_interval` (10). They are described
+`advisory_lock_timeout` (5000), `unique_lock_limit` (1000),
+`notify_min_interval` (10). They are described
 in [Getting Started](getting-started.md).
 
 ## Connection poolers

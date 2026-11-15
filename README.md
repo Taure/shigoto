@@ -230,6 +230,7 @@ All optional except `perform/1`:
 | `workers` | `undefined` | Modules allowed to run as workers; `undefined` allows any module exporting `perform/1` |
 | `instance` | `undefined` | Name of this installation, giving it its own advisory locks and NOTIFY channel |
 | `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock before giving up |
+| `unique_lock_limit` | `1000` | Advisory locks one `insert_all/1,2` call may take for its unique jobs (1 to 5000); a longer list answers `{error, {too_many_unique_locks, Needed, Limit}}` |
 | `notify_min_interval` | `10` | Minimum milliseconds between notification-driven polls of one queue |
 | `heartbeat_interval` | `30000` | Milliseconds between heartbeats for executing jobs; a job is stale after twice this without one |
 | `rescue_interval` | `60000` | Milliseconds between a node's sweeps that rescue stale jobs |

@@ -35,6 +35,7 @@ Configuration access for Shigoto. Reads from application env.
     workers/0,
     instance/0,
     advisory_lock_timeout/0,
+    unique_lock_limit/0,
     notify_min_interval/0,
     notify_channel/0,
     fanout_queues/0,
@@ -407,6 +408,26 @@ advisory_lock_timeout() ->
     end.
 
 -doc """
+The most advisory locks one `insert_all/1,2` call may take for its unique
+jobs. Default: 1000, at most 5000. A call that needs more answers
+`{error, {too_many_unique_locks, Needed, Limit}}` and inserts nothing.
+
+A unique job takes one lock per configured encryption key, one without a key,
+and one more while unique keys stored before encryption are still looked for.
+The locks are held until the call ends, or until the caller's transaction
+does, and PostgreSQL keeps the locks of every session in one table of about
+`max_locks_per_transaction * max_connections` entries (6400 by default). A
+session that fills it makes other sessions fail with `out of shared memory`.
+Raise this setting only together with `max_locks_per_transaction`.
+""".
+-spec unique_lock_limit() -> 1..5000.
+unique_lock_limit() ->
+    case setting(unique_lock_limit, 1000) of
+        Limit when is_integer(Limit), Limit >= 1, Limit =< 5000 -> Limit;
+        Other -> error({shigoto_config, {invalid, unique_lock_limit, Other}})
+    end.
+
+-doc """
 The shortest time, in milliseconds, between two polls of one queue caused by
 notifications. Default: 10.
 """.
@@ -465,6 +486,7 @@ check() ->
         _ = shutdown_timeout(),
         _ = on_discard_timeout(),
         _ = unrunnable_snooze_limit(),
+        _ = unique_lock_limit(),
         _ = prune_after_days(),
         _ = archive_after_days(),
         _ = on_dependency_failure(),

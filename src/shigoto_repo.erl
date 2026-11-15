@@ -117,7 +117,9 @@ exports `unique/0`, or every job when `Opts` has a `unique` map, is inserted
 the way `insert_job/3` inserts it, and the whole call is then one transaction:
 the unique locks of every such job are taken first, and a lock that cannot be
 had in `advisory_lock_timeout` answers `{error, {lock_timeout, unique}}` with
-nothing inserted. A job that turns out to be a duplicate, of a stored job or of
+nothing inserted. A call may take `unique_lock_limit` locks (1000 unless set):
+one that needs more answers `{error, {too_many_unique_locks, Needed, Limit}}`
+and inserts nothing. Split such a list; each call is then its own unit. A job that turns out to be a duplicate, of a stored job or of
 an earlier one in the same call, is answered as the job that is already there
 (replaced or debounced as its `unique` options say), in its place in the list.
 `unique => false` in `Opts` inserts every job without looking.
@@ -163,18 +165,48 @@ inserted({error, _} = Refused) -> Refused.
 %% can stop the call, and the raise undoes what the call wrote. Joined to a
 %% transaction the caller opened there is nothing to undo here: PostgreSQL has
 %% already failed that transaction.
+%%
+%% The locks are held to the end of the call, in a lock table the whole server
+%% shares, so a call may only take `unique_lock_limit` of them.
 placed_with_unique(Pool, Resolved, Opts) ->
     Keyed = [keyed(Job, Unique, Opts) || {Job, Unique} <- Resolved],
-    LockKeys = [erlang:phash2(Key) || {_Job, _Unique, Keys} <- Keyed, Key <- Keys],
+    LockKeys = ordsets:from_list([
+        erlang:phash2(Key)
+     || {_Job, _Unique, Keys} <- Keyed, Key <- Keys
+    ]),
+    Limit = shigoto_config:unique_lock_limit(),
+    case length(LockKeys) of
+        Needed when Needed > Limit ->
+            {error, {too_many_unique_locks, Needed, Limit}};
+        _Allowed ->
+            try
+                undone_when_refused(Pool, fun() ->
+                    case unique_locks(Pool, LockKeys) of
+                        ok -> {ok, placed_in_order(Pool, Keyed, Opts)};
+                        {error, _} = Refused -> Refused
+                    end
+                end)
+            catch
+                throw:{?MODULE, insert_all_failed, {error, Reason}} ->
+                    {error, shigoto_db:reduced(Reason)}
+            end
+    end.
+
+%% A transaction whose function answers `{error, _}` is rolled back and
+%% answers that error. Committed, a transaction in which a statement failed is
+%% answered with ROLLBACK, and the caller would get `transaction_rolled_back`
+%% raised in place of the reason.
+-spec undone_when_refused(atom(), fun(() -> Answer)) -> Answer | {error, term()}.
+undone_when_refused(Pool, Fun) ->
     try
         shigoto_db:transaction(Pool, fun() ->
-            case unique_locks(Pool, LockKeys) of
-                ok -> {ok, placed_in_order(Pool, Keyed, Opts)};
-                {error, _} = Refused -> Refused
+            case Fun() of
+                {error, Reason} -> throw({?MODULE, refused, shigoto_db:reduced(Reason)});
+                Answer -> Answer
             end
         end)
     catch
-        throw:{?MODULE, insert_all_failed, Refused} -> Refused
+        throw:{?MODULE, refused, Reason} -> {error, Reason}
     end.
 
 keyed(Job, none, _Opts) -> {Job, none, []};
@@ -1498,7 +1530,7 @@ resolve_unique(JobParams, Opts) ->
 
 insert_unique(Pool, JobParams, Opts, UniqueOpts) ->
     UniqueKeys = unique_keys(JobParams, Opts, UniqueOpts),
-    shigoto_db:transaction(Pool, fun() ->
+    undone_when_refused(Pool, fun() ->
         case unique_locks(Pool, [erlang:phash2(Key) || Key <- UniqueKeys]) of
             ok -> placed_unique(Pool, JobParams, Opts, UniqueOpts, UniqueKeys);
             {error, _} = Refused -> Refused

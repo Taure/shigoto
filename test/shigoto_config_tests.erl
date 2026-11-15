@@ -30,6 +30,7 @@
     workers,
     instance,
     advisory_lock_timeout,
+    unique_lock_limit,
     notify_min_interval,
     on_dependency_failure,
     propagator,
@@ -185,6 +186,9 @@ every_setting_is_checked_before_anything_starts() ->
         {instance, ~"Not Valid"},
         {instance, billing},
         {advisory_lock_timeout, -1},
+        {unique_lock_limit, 0},
+        {unique_lock_limit, 5001},
+        {unique_lock_limit, infinity},
         {notify_min_interval, soon},
         {on_dependency_failure, sometimes},
         {propagator, lists}
@@ -233,7 +237,16 @@ a_time_that_is_zero_or_negative_is_refused_where_it_is_read() ->
     application:set_env(shigoto, unrunnable_snooze_limit, 0),
     ?assertEqual(0, shigoto_config:unrunnable_snooze_limit()),
     application:set_env(shigoto, unrunnable_snooze_limit, 50),
-    ?assertEqual(50, shigoto_config:unrunnable_snooze_limit()).
+    ?assertEqual(50, shigoto_config:unrunnable_snooze_limit()),
+    ?assertEqual(1000, shigoto_config:unique_lock_limit()),
+    application:set_env(shigoto, unique_lock_limit, 1),
+    ?assertEqual(1, shigoto_config:unique_lock_limit()),
+    application:set_env(shigoto, unique_lock_limit, 5000),
+    ?assertEqual(5000, shigoto_config:unique_lock_limit()),
+    application:set_env(shigoto, unique_lock_limit, 5001),
+    ?assertError(
+        {shigoto_config, {invalid, unique_lock_limit, 5001}}, shigoto_config:unique_lock_limit()
+    ).
 
 a_refused_key_is_named_by_its_position() ->
     application:set_env(shigoto, pool, some_pool),
