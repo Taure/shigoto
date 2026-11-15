@@ -57,7 +57,8 @@ config_test_() ->
         fun the_shutdown_budget_counts_every_queue/0,
         fun a_job_is_stale_after_two_heartbeats/0,
         fun an_instance_names_its_own_channel/0,
-        fun a_complete_configuration_passes_the_check/0
+        fun a_complete_configuration_passes_the_check/0,
+        fun requiring_encryption_needs_a_key/0
     ]}.
 
 unset() ->
@@ -395,4 +396,19 @@ a_complete_configuration_passes_the_check() ->
         propagator => shigoto_fake_propagator
     },
     [application:set_env(shigoto, Setting, Value) || Setting := Value <- Configured],
+    ?assertEqual(ok, shigoto_config:check()).
+
+%% Without a key nothing is encrypted, so the setting that says nothing may be
+%% in the clear cannot be honoured.
+requiring_encryption_needs_a_key() ->
+    application:set_env(shigoto, pool, some_pool),
+    application:set_env(shigoto, require_encrypted, true),
+    ?assertEqual(
+        {error, {shigoto_config, {invalid, require_encrypted, no_encryption_key}}},
+        shigoto_config:check()
+    ),
+    application:set_env(shigoto, encryption_keys, [crypto:strong_rand_bytes(32)]),
+    ?assertEqual(ok, shigoto_config:check()),
+    application:unset_env(shigoto, encryption_keys),
+    application:set_env(shigoto, require_encrypted, false),
     ?assertEqual(ok, shigoto_config:check()).

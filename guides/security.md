@@ -165,7 +165,8 @@ sees ciphertext.
 The application does not start with a key that is not 32 bytes, a key listed
 twice, an unknown `encryption_write_format` or `encryption_read_formats`, a
 `workers` that is not a list of atoms, an `instance` that is not lower-case
-letters, digits and `_`, or any other setting it cannot run with. The error is
+letters, digits and `_`, `require_encrypted` without a key, or any other
+setting it cannot run with. The error is
 `{shigoto_config, {invalid, Setting, Value}}`. It names the setting and never
 contains a key: a key is described by its position in the list and what is
 wrong with it.
@@ -180,7 +181,7 @@ boot while `require_encrypted` is not set.
 | `workers` | `undefined` | Modules that may run as workers. `undefined` allows every module that exports `perform/1`. Optional in 1.x, required from 2.0: set it now |
 | `encryption_write_format` | `v1` | `v1` is what 1.10 writes and reads. `v2` binds ciphertexts and also encrypts results and batch callback args, and 1.10 cannot read it: set it once every node runs this release and none will be rolled back, or the 1.10 nodes fail those jobs and in the end discard them. Planned to become the default in a later release |
 | `encryption_read_formats` | `[v1, v2]` | Frames that are opened. Drop `v1` once `shigoto:reencrypt/0` has rewritten everything |
-| `require_encrypted` | `false` | Refuse to run a job whose args or meta are plaintext (and, in `v2`, to hand on a plaintext result) |
+| `require_encrypted` | `false` | Refuse to run a job whose args or meta are plaintext (and, in `v2`, to hand on a plaintext result). Needs a key: with `true` and no key the application does not start (`{invalid, require_encrypted, no_encryption_key}`) |
 | `instance` | `undefined` | Name of this installation, for its own locks and notification channel |
 | `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock |
 | `notify_min_interval` | `10` | Minimum milliseconds between polls caused by notifications, per queue |

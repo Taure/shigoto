@@ -342,7 +342,8 @@ encryption_read_formats() ->
 
 -doc """
 Whether a plaintext value in a column this installation encrypts fails the job
-instead of being run. Default: `false`. Only applies with a key configured.
+instead of being run. Default: `false`. It needs a key: with `true` and no
+`encryption_key` or `encryption_keys` the application does not start.
 """.
 -spec require_encrypted() -> boolean().
 require_encrypted() ->
@@ -420,7 +421,8 @@ one the application cannot run with: a value of the wrong type, a time that is
 zero or negative, a name that is not one of the choices. `Value` is what was
 configured, except where that could be a secret: an encryption key is
 described by its position and what is wrong with it, a `notifier` that is not
-a map as `not_a_map`.
+a map as `not_a_map`. `require_encrypted` without a key is refused as
+`{invalid, require_encrypted, no_encryption_key}`.
 
 The readers of this module raise the same term, as
 `error({shigoto_config, {invalid, Setting, Value}})`, when a setting is changed
@@ -452,6 +454,7 @@ check() ->
         _ = encryption_write_format(),
         ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
         ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
+        ok = checked(required_has_a_key(require_encrypted(), shigoto_crypto:is_enabled())),
         ok = checked(workers_checked(setting(workers, undefined))),
         ok = checked(instance_checked(setting(instance, undefined))),
         ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000))),
@@ -511,6 +514,9 @@ read_formats_checked(Formats) ->
 
 boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
 boolean_checked(Setting, Value) -> {error, {invalid, Setting, Value}}.
+
+required_has_a_key(true, false) -> {error, {invalid, require_encrypted, no_encryption_key}};
+required_has_a_key(_Required, _HasAKey) -> ok.
 
 workers_checked(undefined) ->
     ok;

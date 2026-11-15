@@ -14,7 +14,8 @@
     retries_asked_together_run_once/1,
     an_unstamped_schema_boots_with_a_dml_role/1,
     the_heartbeat_stops_after_the_queues_and_executors/1,
-    a_node_that_cuts_the_shutdown_short_is_warned_about/1
+    a_node_that_cuts_the_shutdown_short_is_warned_about/1,
+    a_node_that_requires_encryption_without_a_key_does_not_start/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -30,7 +31,8 @@ all() ->
         retries_asked_together_run_once,
         an_unstamped_schema_boots_with_a_dml_role,
         the_heartbeat_stops_after_the_queues_and_executors,
-        a_node_that_cuts_the_shutdown_short_is_warned_about
+        a_node_that_cuts_the_shutdown_short_is_warned_about,
+        a_node_that_requires_encryption_without_a_key_does_not_start
     ].
 
 init_per_suite(Config) ->
@@ -62,7 +64,20 @@ end_per_testcase(_TestCase, _Config) ->
     application:unset_env(shigoto, fanout_queues),
     application:unset_env(shigoto, shutdown_timeout),
     application:unset_env(kernel, shutdown_timeout),
+    application:unset_env(shigoto, require_encrypted),
     ok = shigoto_migration:up(?POOL).
+
+%% A key that was meant to come from a secret and did not.
+a_node_that_requires_encryption_without_a_key_does_not_start(_Config) ->
+    application:set_env(shigoto, require_encrypted, true),
+    ?assertMatch(
+        {error,
+            {shigoto, {
+                {shigoto_config, {invalid, require_encrypted, no_encryption_key}},
+                {shigoto_app, start, _}
+            }}},
+        application:ensure_all_started(shigoto)
+    ).
 
 %% A supervisor stops its children last started first.
 the_heartbeat_stops_after_the_queues_and_executors(_Config) ->

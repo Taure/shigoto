@@ -226,7 +226,7 @@ All optional except `perform/1`:
 | `encryption_keys` | `[]` | Ordered key list for rotation (newest first) |
 | `encryption_write_format` | `v1` | Frame written: `v1` (what 1.10 writes and reads) or `v2` (bound to column and worker; also covers results and batch callback args). Set `v2` only once no node runs 1.10 or can be rolled back to it |
 | `encryption_read_formats` | `[v1, v2]` | Frames that are opened |
-| `require_encrypted` | `false` | Refuse to run a job with plaintext args or meta when a key is configured |
+| `require_encrypted` | `false` | Refuse to run a job with plaintext args or meta. Needs a key: with `true` and no key the application does not start |
 | `workers` | `undefined` | Modules allowed to run as workers; `undefined` allows any module exporting `perform/1` |
 | `instance` | `undefined` | Name of this installation, giving it its own advisory locks and NOTIFY channel |
 | `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock before giving up |
