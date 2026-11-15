@@ -115,14 +115,26 @@ unlisted_reports() ->
 %% nothing of shigoto but `shigoto_db` stands for the worst case: a row handed
 %% to a module that is loaded after the row was read.
 every_column_is_an_atom_once_the_database_module_is_loaded(_Config) ->
+    Tables = [~"shigoto_batches", ~"shigoto_cron", ~"shigoto_jobs", ~"shigoto_jobs_archive"],
+    %% A table the migration gains has to be named here, and its columns below.
+    #{rows := Found} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT table_name::text AS name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name LIKE 'shigoto\_%'
+        ORDER BY 1
+        """,
+        []
+    ),
+    ?assertEqual(Tables, [Name || #{name := Name} <- Found]),
     #{rows := Rows} = shigoto_db:query(
         ?POOL,
         ~"""
         SELECT DISTINCT column_name::text AS name FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name LIKE 'shigoto%'
+        WHERE table_schema = current_schema() AND table_name::text = ANY($1::text[])
         ORDER BY 1
         """,
-        []
+        [Tables]
     ),
     Columns = [Name || #{name := Name} <- Rows],
     ?assert(length(Columns) > 30),
