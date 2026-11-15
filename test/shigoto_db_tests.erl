@@ -14,7 +14,9 @@ db_test_() ->
     {foreach, fun() -> ok end, fun(_) -> erlang:erase({{shigoto_db, holder}, ?POOL}) end, [
         fun a_command_minato_does_not_know_is_answered_as_it_came/0,
         fun a_statement_that_ran_is_ok_whatever_its_command/0,
-        fun a_statement_that_failed_is_still_an_error/0
+        fun a_statement_that_failed_is_still_an_error/0,
+        fun a_column_under_its_name_as_a_binary_is_passed_on/0,
+        fun the_columns_are_named_once/0
     ]}.
 
 a_command_minato_does_not_know_is_answered_as_it_came() ->
@@ -48,6 +50,30 @@ a_statement_that_failed_is_still_an_error() ->
     ?assertEqual(Refused, shigoto_repo:update_progress(?POOL, 1, 50)),
     ?assertEqual(Refused, shigoto_batch:increment_total(?POOL, 1)),
     ?assertEqual(Refused, shigoto_db:query(?POOL, ~"SELECT 1", [])).
+
+%% What a client that makes no atoms answers for a column no module names.
+a_column_under_its_name_as_a_binary_is_passed_on() ->
+    Row = #{
+        id => 7,
+        worker => ~"shigoto_test_worker",
+        queue => ~"default",
+        state => ~"discarded",
+        args => ~"{}",
+        meta => ~"{}",
+        errors => ~"[]",
+        ~"added_by_the_operator" => ~"kept"
+    },
+    answering(#{command => select, num_rows => 1, rows => [Row]}),
+    ?assertEqual({ok, Row}, shigoto_repo:get_job(?POOL, 7)),
+    ?assertMatch(#{~"added_by_the_operator" := ~"kept"}, shigoto_job:redact(Row)),
+    {ok, shigoto_test_worker, Opened} = shigoto_job:opened(Row),
+    ?assertMatch(#{~"added_by_the_operator" := ~"kept", args := #{}}, Opened),
+    ?assertMatch(#{~"worker" := ~"shigoto_test_worker"}, shigoto_error:entry(Row, timeout)).
+
+the_columns_are_named_once() ->
+    Columns = shigoto_db:columns(),
+    ?assertEqual(lists:usort(Columns), Columns),
+    ?assert(lists:all(fun is_atom/1, Columns)).
 
 answering(Answer) ->
     Connection = spawn_link(fun() -> answer(Answer) end),

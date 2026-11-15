@@ -13,6 +13,15 @@ statement that ran, and `{error, Reason}` for one that did not, with `{pgsql_err
 Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
 
+A row is a map keyed by column name. The names are chosen by the server, and a
+client that never makes an atom for one (minato after 1.1) answers a column
+under an atom only where that atom exists on the node, and under the name as a
+binary otherwise. Every column of shigoto's own tables is an atom from the
+moment this module is loaded (`columns/0`), so a job, a batch or a cron entry
+is keyed by atoms whichever module reads it. A column you add to one of the
+tables, or alias in a statement of your own, is an atom only if your code
+names it.
+
 ## Transactions
 
 `transaction/2` borrows one connection, runs `BEGIN`, calls the function, and
@@ -109,7 +118,8 @@ opened through kura raises them the same way. A server error keeps only its
     ignore_sandbox/0,
     ignores_sandbox/0,
     start_pool/2,
-    start_listener/2
+    start_listener/2,
+    columns/0
 ]).
 
 -define(HOLDER, {?MODULE, holder}).
@@ -625,6 +635,49 @@ kura_repo(Pool) ->
 %%----------------------------------------------------------------------
 %% Shapes
 %%----------------------------------------------------------------------
+
+-doc false.
+%% The columns of shigoto's tables. Naming them here is what makes them atoms
+%% before the first statement is sent: see the moduledoc.
+-spec columns() -> [atom(), ...].
+columns() ->
+    [
+        archived_at,
+        args,
+        attempt,
+        attempted_at,
+        batch_id,
+        callback_args,
+        callback_worker,
+        cancelled_at,
+        completed_at,
+        completed_jobs,
+        depends_on,
+        deps_results,
+        discarded_at,
+        discarded_jobs,
+        errors,
+        heartbeat_at,
+        id,
+        inserted_at,
+        last_scheduled_at,
+        max_attempts,
+        meta,
+        name,
+        on_dependency_failure,
+        partition_key,
+        priority,
+        progress,
+        queue,
+        result,
+        schedule,
+        scheduled_at,
+        state,
+        tags,
+        total_jobs,
+        unique_key,
+        worker
+    ].
 
 -spec answered({ok, result()} | {error, error()}) -> result() | {error, error()}.
 answered({ok, Result}) -> Result;

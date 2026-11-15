@@ -16,7 +16,8 @@
     the_heartbeat_stops_after_the_queues_and_executors/1,
     a_node_that_cuts_the_shutdown_short_is_warned_about/1,
     a_node_that_requires_encryption_without_a_key_does_not_start/1,
-    a_node_with_a_key_and_no_list_of_workers_is_warned_about/1
+    a_node_with_a_key_and_no_list_of_workers_is_warned_about/1,
+    every_column_is_an_atom_once_the_database_module_is_loaded/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -34,7 +35,8 @@ all() ->
         the_heartbeat_stops_after_the_queues_and_executors,
         a_node_that_cuts_the_shutdown_short_is_warned_about,
         a_node_that_requires_encryption_without_a_key_does_not_start,
-        a_node_with_a_key_and_no_list_of_workers_is_warned_about
+        a_node_with_a_key_and_no_list_of_workers_is_warned_about,
+        every_column_is_an_atom_once_the_database_module_is_loaded
     ].
 
 init_per_suite(Config) ->
@@ -106,6 +108,42 @@ unlisted_reports() ->
         {log, warning, #{msg := ~"shigoto_workers_not_listed"} = Report} ->
             [Report | unlisted_reports()]
     after 300 -> []
+    end.
+
+%% A client that makes no atom for a name the server sends answers a column
+%% under an atom only where the atom exists already. A node that has loaded
+%% nothing of shigoto but `shigoto_db` stands for the worst case: a row handed
+%% to a module that is loaded after the row was read.
+every_column_is_an_atom_once_the_database_module_is_loaded(_Config) ->
+    #{rows := Rows} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT DISTINCT column_name::text AS name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name LIKE 'shigoto%'
+        ORDER BY 1
+        """,
+        []
+    ),
+    Columns = [Name || #{name := Name} <- Rows],
+    ?assert(length(Columns) > 30),
+    {ok, Peer, _Node} = peer:start_link(#{
+        connection => standard_io,
+        args => lists:append([["-pa", Dir] || Dir <- code:get_path(), filelib:is_dir(Dir)])
+    }),
+    try
+        {module, shigoto_db} = peer:call(Peer, code, ensure_loaded, [shigoto_db]),
+        ?assertEqual([], [Name || Name <- Columns, not is_atom_on(Peer, Name)]),
+        Atoms = peer:call(Peer, shigoto_db, columns, []),
+        ?assertEqual(Columns, lists:sort([atom_to_binary(Column) || Column <- Atoms]))
+    after
+        peer:stop(Peer)
+    end.
+
+is_atom_on(Peer, Name) ->
+    try peer:call(Peer, erlang, binary_to_existing_atom, [Name]) of
+        Atom -> is_atom(Atom)
+    catch
+        error:badarg -> false
     end.
 
 %% A supervisor stops its children last started first.
