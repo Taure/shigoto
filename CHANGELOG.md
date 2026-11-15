@@ -108,6 +108,7 @@ the pull request. CI fails a pull request whose file differs.
 - Read settings through typed readers
 - Bring src to no eqwalizer errors
 - Clear the eqwalizer errors and elp lints of the new code
+- End the on_discard process by returning when its callback did
 - Name a worker's seki limiter, bulkhead and breaker by a term
 
 ### Testing
@@ -127,6 +128,7 @@ the pull request. CI fails a pull request whose file differs.
 - Give the broken time zone file a directory of its own
 - Cover the lock statements and what mutation testing found untested
 - Read the remembered time as an integer
+- Clear what hank reports in the test tree
 
 ## [1.10.1] - 2026-11-08
 
