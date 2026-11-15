@@ -912,13 +912,13 @@ a_unique_insert_sends_no_plaintext_to_the_database(_Config) ->
         args => #{~"canary" => Canary},
         scheduled_at => seconds_from_now(3600)
     },
-    {Inserted, Sent} = sent_to_the_database(fun() -> shigoto:insert(Params, Unique) end),
+    {Inserted, Sent} = shigoto_statement_probe:sent(shigoto, insert, [Params, Unique]),
     ?assertMatch({ok, #{id := _}}, Inserted),
     ?assertMatch([_ | _], Sent),
     ok = no_canary(Canary, Sent),
-    {Again, SentAgain} = sent_to_the_database(fun() ->
-        shigoto:insert_all([Params, Params#{args => #{~"canary" => Canary, ~"n" => 2}}], Unique)
-    end),
+    {Again, SentAgain} = shigoto_statement_probe:sent(shigoto, insert_all, [
+        [Params, Params#{args => #{~"canary" => Canary, ~"n" => 2}}], Unique
+    ]),
     ?assertMatch({ok, [_, _]}, Again),
     ok = no_canary(Canary, SentAgain),
     ?assertEqual(2, job_count()),
@@ -936,42 +936,11 @@ a_unique_insert_sends_no_plaintext_to_the_database(_Config) ->
     ),
     %% Until reencrypt has replaced the last of them.
     {ok, #{jobs := #{failed := 0, skipped := 0}}} = shigoto:reencrypt(),
-    {Found, SentAfter} = sent_to_the_database(fun() ->
-        shigoto:insert(Params#{args => #{~"canary" => Older}}, Unique)
-    end),
+    {Found, SentAfter} = shigoto_statement_probe:sent(shigoto, insert, [
+        Params#{args => #{~"canary" => Older}}, Unique
+    ]),
     ?assertMatch({ok, {conflict, #{id := Id}}}, Found),
     ok = no_canary(Older, SentAfter).
-
-%% What `Insert` hands to `shigoto_db:query/3,4`. A process cannot trace
-%% itself, so the insert runs in one of its own.
-sent_to_the_database(Insert) ->
-    Patterns = [{shigoto_db, query, 3}, {shigoto_db, query, 4}],
-    _ = [erlang:trace_pattern(Pattern, true, [global]) || Pattern <- Patterns],
-    Test = self(),
-    {Inserter, Monitor} = spawn_monitor(fun() ->
-        receive
-            go -> Test ! {answered, self(), Insert()}
-        end
-    end),
-    _ = erlang:trace(Inserter, true, [call]),
-    Inserter ! go,
-    try
-        receive
-            {answered, Inserter, Answer} -> {Answer, traced_calls()};
-            {'DOWN', Monitor, process, Inserter, Reason} -> ct:fail({insert_died, Reason})
-        after 10000 -> ct:fail(insert_never_answered)
-        end
-    after
-        erlang:demonitor(Monitor, [flush]),
-        _ = [erlang:trace_pattern(Pattern, false, [global]) || Pattern <- Patterns]
-    end.
-
-traced_calls() ->
-    receive
-        {trace, _Pid, call, {shigoto_db, query, [_Pool, SQL, Params | _Opts]}} ->
-            [{iolist_to_binary(SQL), Params} | traced_calls()]
-    after 100 -> []
-    end.
 
 %% What a node does when its configuration is changed: it starts again.
 restart() ->
