@@ -903,8 +903,10 @@ Answers how many jobs were rescued.
 """.
 -spec rescue_stale_jobs(atom(), number()) -> {ok, non_neg_integer()} | {error, term()}.
 rescue_stale_jobs(Pool, StaleSeconds) ->
+    %% The name is the row's own text, cut as `shigoto_job:worker_name/1` cuts
+    %% it for the entries built in Erlang: no module name has more characters.
     Entry =
-        ~"jsonb_build_object('error', 'rescued', 'at', $2::text, 'attempt', j.attempt, 'worker', j.worker)",
+        ~"jsonb_build_object('error', 'rescued', 'at', $2::text, 'attempt', j.attempt, 'worker', left(j.worker, 255))",
     SQL = with_dependents(
         [
             ~"""
@@ -1393,7 +1395,7 @@ with_dependents(Done, DefaultPolicy, #{own := Own, count_batches := CountOwn}) -
           'error', 'dependency_failed',
           'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
           'attempt', d.attempt,
-          'worker', d.worker
+          'worker', left(d.worker, 255)
         )
         """,
     Errors = shigoto_error:appended(~"d.errors", Entry),

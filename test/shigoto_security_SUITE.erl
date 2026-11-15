@@ -27,6 +27,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     args_moved_to_another_worker_are_not_decrypted/1,
     args_moved_to_a_module_that_is_no_worker_are_not_decrypted/1,
     a_worker_name_no_module_can_have_is_written_cut/1,
+    a_worker_name_is_cut_in_the_entries_a_statement_adds/1,
     args_moved_to_another_column_are_not_decrypted/1,
     a_worker_outside_the_allow_list_is_never_called/1,
     a_job_put_back_for_its_worker_is_not_decrypted/1,
@@ -113,6 +114,7 @@ cases() ->
         args_moved_to_another_worker_are_not_decrypted,
         args_moved_to_a_module_that_is_no_worker_are_not_decrypted,
         a_worker_name_no_module_can_have_is_written_cut,
+        a_worker_name_is_cut_in_the_entries_a_statement_adds,
         args_moved_to_another_column_are_not_decrypted,
         a_worker_outside_the_allow_list_is_never_called,
         a_job_put_back_for_its_worker_is_not_decrypted,
@@ -314,6 +316,38 @@ a_worker_name_no_module_can_have_is_written_cut(_Config) ->
          || Term <- [maps:get(errors, Row) | captured()],
             binary:match(printed(Term), ~"-THE-END") =/= nomatch
         ]
+    ).
+
+%% The rescue and a failed dependency add their entry in the statement, where
+%% the name is the row's own text as well.
+a_worker_name_is_cut_in_the_entries_a_statement_adds(_Config) ->
+    Name = <<(binary:copy(~"w", 2000))/binary, "-THE-END">>,
+    #{rows := [#{id := Stale}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, state, attempt, max_attempts, attempted_at)
+        VALUES ('parked', $1, '{}'::jsonb, 'executing', 1, 1, now() - interval '1 hour')
+        RETURNING id
+        """,
+        [Name]
+    ),
+    #{rows := [#{id := Dependent}]} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        INSERT INTO shigoto_jobs (queue, worker, args, depends_on, on_dependency_failure)
+        VALUES ('parked', $1, '{}'::jsonb, ARRAY[$2::bigint], 'discard')
+        RETURNING id
+        """,
+        [Name, Stale]
+    ),
+    ?assertEqual({ok, 1}, shigoto_repo:rescue_stale_jobs(?POOL, 60)),
+    Cut = binary:copy(~"w", 255),
+    ?assertMatch(
+        [#{~"error" := ~"rescued", ~"worker" := Cut}], errors(await(Stale, ~"discarded"))
+    ),
+    ?assertMatch(
+        [#{~"error" := ~"dependency_failed", ~"worker" := Cut}],
+        errors(await(Dependent, ~"discarded"))
     ).
 
 args_moved_to_another_column_are_not_decrypted(_Config) ->

@@ -31,7 +31,9 @@ per job.
 A module name has at most 255 characters, 1020 bytes. A longer name is refused
 without being looked up, and `errors`, the log and the events hold its first
 255 bytes: the name is copied into every `errors` entry, so the row's own text
-would otherwise be written 50 times over.
+would otherwise be written 50 times over. The entry a rescue or a failed
+dependency adds is built by PostgreSQL, which keeps the first 255 characters
+of the name.
 
 Set `workers` in production. It is optional in 1.x and will be required in
 2.0. Without it every loaded module that exports `perform/1` can be run by
