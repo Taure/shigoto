@@ -16,6 +16,10 @@ so anything published while the listener was away is gone. minato says when that
 happened, and this process answers it by polling every queue once, which is the
 catch up the missed notifications would have caused.
 
+A listener that cannot be started, a subscription it refuses and a listener
+that goes away are all tried again (after 5, 5 and 1 seconds). The first
+failure logs `shigoto_notifier_not_listening`; the queues poll throughout.
+
 Requires `notifier` config with database connection details:
 
 ```erlang
@@ -34,14 +38,20 @@ relies solely on polling.
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -record(state, {
     listener :: atom() | undefined,
     channel :: binary(),
     queues = {[], undefined} :: {[{binary(), pid()}], integer() | undefined},
-    wakes = #{} :: #{binary() => integer() | deferred}
+    wakes = #{} :: #{binary() => integer() | deferred},
+    watching :: reference() | undefined,
+    failing = false :: boolean()
 }).
 
 -define(LISTENER, shigoto_listener).
+-define(SUBSCRIBE_AGAIN_MS, 5000).
+-define(START_AGAIN_MS, 1000).
 %% How long the list of queue processes is trusted before it is read again.
 -define(QUEUES_FOR_MS, 1000).
 
@@ -64,13 +74,15 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -doc false.
-handle_info(connect, #state{channel = Channel} = State) ->
-    case start_listener(Channel) of
-        {ok, Listener} ->
-            {noreply, State#state{listener = Listener}};
-        {error, _Reason} ->
-            erlang:send_after(5000, self(), connect),
-            {noreply, State#state{listener = undefined}}
+handle_info(connect, #state{channel = Channel} = State0) ->
+    case watched(State0) of
+        {ok, State} ->
+            case subscribed(Channel) of
+                ok -> {noreply, State#state{listener = ?LISTENER, failing = false}};
+                {error, Reason} -> {noreply, trying_again(Reason, State)}
+            end;
+        {error, Reason} ->
+            {noreply, trying_again(Reason, State0)}
     end;
 handle_info({minato_notification, Channel, Payload, _From}, #state{channel = Channel} = State) ->
     {noreply, notified(queue_named(Payload), State)};
@@ -81,9 +93,9 @@ handle_info({minato_listener, _Name, resubscribed}, State) ->
     %% rather than wait for a notification that already happened.
     notify_every_queue(),
     {noreply, State};
-handle_info({'DOWN', _Ref, process, _Pid, _Reason}, State) ->
-    erlang:send_after(1000, self(), connect),
-    {noreply, State#state{listener = undefined}};
+handle_info({'DOWN', Monitor, process, _Pid, _Reason}, #state{watching = Monitor} = State) ->
+    _ = erlang:send_after(?START_AGAIN_MS, self(), connect),
+    {noreply, State#state{listener = undefined, watching = undefined}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -91,25 +103,47 @@ handle_info(_Info, State) ->
 %% Internal
 %%----------------------------------------------------------------------
 
-start_listener(Channel) ->
+%% The listener, started unless this process already watches one.
+-spec watched(#state{}) -> {ok, #state{}} | {error, term()}.
+watched(#state{watching = Monitor} = State) when is_reference(Monitor) ->
+    {ok, State};
+watched(State) ->
     case shigoto_config:notifier_config() of
         undefined ->
             {error, notifier_not_configured};
         Config ->
             case shigoto_db:start_listener(?LISTENER, Config) of
-                {ok, Pid} ->
-                    erlang:monitor(process, Pid),
-                    listening(?LISTENER, Channel);
-                {error, _Reason} = Failed ->
-                    Failed
+                {ok, Pid} -> {ok, State#state{watching = erlang:monitor(process, Pid)}};
+                {error, _Reason} = Failed -> Failed
             end
     end.
 
-listening(Listener, Channel) ->
-    case minato:listen(Listener, Channel) of
-        ok -> {ok, Listener};
-        {error, _Reason} = Failed -> Failed
+%% Whatever the listener answers, and a listener that does not answer or is
+%% gone, is a subscription to ask for again. This process never dies of it:
+%% restarting in a loop would take the queues down with it, and they poll
+%% whether or not anyone listens.
+-spec subscribed(binary()) -> ok | {error, term()}.
+subscribed(Channel) ->
+    try minato:listen(?LISTENER, Channel) of
+        ok -> ok;
+        {error, Reason} -> {error, Reason}
+    catch
+        exit:Reason -> {error, Reason}
     end.
+
+-spec trying_again(term(), #state{}) -> #state{}.
+trying_again(Reason, #state{failing = Failing} = State) ->
+    _ = [
+        ?LOG_WARNING(#{
+            msg => ~"shigoto_notifier_not_listening",
+            reason => shigoto_error:shape(Reason),
+            retry_ms => ?SUBSCRIBE_AGAIN_MS,
+            note => ~"queues poll meanwhile; this is logged once until it listens again"
+        })
+     || not Failing
+    ],
+    _ = erlang:send_after(?SUBSCRIBE_AGAIN_MS, self(), connect),
+    State#state{listener = undefined, failing = true}.
 
 notify_every_queue() ->
     lists:foreach(
