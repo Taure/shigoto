@@ -177,9 +177,9 @@ not in the queue, and not in the process whose `shigoto:cancel/1` ended a job
 others were waiting on. It may take up to `on_discard_timeout` (60000 ms) and is
 stopped after that (`shigoto_on_discard_timeout` is logged). One that raises is
 logged as `shigoto_on_discard_failed`, with the shape of the reason and none
-of its values. At most 10 run at a time on a node and up to 10000 wait their
-turn; past that, callbacks are not run and `shigoto_on_discard_dropped` says
-how many. It is a notification, not a step of the job: a node that stops
+of its values. At most 10 run at a time on a node, and up to 10000 wait their
+turn as long as their rows are no more than 64 MB together; past either,
+callbacks are not run and `shigoto_on_discard_dropped` says how many. It is a notification, not a step of the job: a node that stops
 between the discard and the callback does not run it. Work that must happen
 belongs in a job.
 

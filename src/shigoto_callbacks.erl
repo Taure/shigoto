@@ -9,10 +9,12 @@
 %%
 %% Each callback runs in a process of its own, linked to this one, at most
 %% `max_running` at a time and for at most `on_discard_timeout`. What cannot
-%% start yet waits in a backlog of at most `max_pending`; past that a callback
-%% is dropped and counted. `on_discard/2` was never guaranteed (a node that
-%% dies between the discard and the callback does not run it), so dropping is
-%% within the contract, and the alternative is an unbounded mailbox.
+%% start yet waits in a backlog of at most `max_pending` jobs and
+%% `max_pending_bytes` of rows: a row carries its args and up to 50 `errors`
+%% entries, so a count alone bounds nothing. Past either a callback is dropped
+%% and counted. `on_discard/2` was never guaranteed (a node that dies between
+%% the discard and the callback does not run it), so dropping is within the
+%% contract, and the alternative is an unbounded mailbox.
 %%
 %% Without this process (a repo call or a drain while the application is not
 %% running) the callback runs before `discarded/1` returns, in a process of
@@ -25,14 +27,17 @@
 
 -define(MAX_RUNNING, 10).
 -define(MAX_PENDING, 10000).
+-define(MAX_PENDING_BYTES, 64 * 1024 * 1024).
 -define(DROPPED_REPORT_MS, 5000).
 
 -record(state, {
     max_running :: pos_integer(),
     max_pending :: non_neg_integer(),
+    max_pending_bytes :: non_neg_integer(),
     running = #{} :: #{pid() => {reference(), map()}},
-    pending = queue:new() :: queue:queue({module(), map()}),
+    pending = queue:new() :: queue:queue({module(), map(), non_neg_integer()}),
     pending_count = 0 :: non_neg_integer(),
+    pending_bytes = 0 :: non_neg_integer(),
     dropped = 0 :: non_neg_integer(),
     report_timer :: reference() | undefined
 }).
@@ -41,7 +46,11 @@
 start_link() ->
     start_link(#{}).
 
--spec start_link(#{max_running => pos_integer(), max_pending => non_neg_integer()}) ->
+-spec start_link(#{
+    max_running => pos_integer(),
+    max_pending => non_neg_integer(),
+    max_pending_bytes => non_neg_integer()
+}) ->
     gen_server:start_ret().
 start_link(Limits) ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, Limits, []).
@@ -89,7 +98,8 @@ init(Limits) ->
     ok = shigoto_db:ignore_sandbox(),
     {ok, #state{
         max_running = maps:get(max_running, Limits, ?MAX_RUNNING),
-        max_pending = maps:get(max_pending, Limits, ?MAX_PENDING)
+        max_pending = maps:get(max_pending, Limits, ?MAX_PENDING),
+        max_pending_bytes = maps:get(max_pending_bytes, Limits, ?MAX_PENDING_BYTES)
     }}.
 
 handle_call(_Request, _From, State) ->
@@ -136,14 +146,8 @@ terminate(_Reason, #state{running = Running, pending_count = Pending} = State) -
             })
     end.
 
-format_status(#{state := #state{running = Running, pending_count = Pending} = State} = Status) ->
-    Status#{
-        state := State#state{
-            running = #{Pid => {Timer, shigoto_job:redact(Job)} || Pid := {Timer, Job} <- Running},
-            pending = queue:new(),
-            pending_count = Pending
-        }
-    };
+format_status(#{state := #state{} = State} = Status) ->
+    Status#{state := State#state{pending = queue:new()}};
 format_status(Status) ->
     Status.
 
@@ -156,13 +160,29 @@ accepted(Worker, Job, #state{running = Running, max_running = Max} = State) when
     map_size(Running) < Max
 ->
     started(Worker, Job, State);
-accepted(
-    Worker, Job, #state{pending_count = Count, max_pending = Max, pending = Pending} = State
+accepted(Worker, Job, #state{pending_count = Count, max_pending = Max} = State) when Count < Max ->
+    waiting(Worker, Job, erlang:external_size(Job), State);
+accepted(_Worker, _Job, State) ->
+    dropped(State).
+
+waiting(
+    Worker,
+    Job,
+    Bytes,
+    #state{pending = Pending, pending_count = Count, pending_bytes = Held, max_pending_bytes = Max} =
+        State
 ) when
-    Count < Max
+    Held + Bytes =< Max
 ->
-    State#state{pending = queue:in({Worker, Job}, Pending), pending_count = Count + 1};
-accepted(_Worker, _Job, #state{dropped = Dropped, report_timer = Timer} = State) ->
+    State#state{
+        pending = queue:in({Worker, Job, Bytes}, Pending),
+        pending_count = Count + 1,
+        pending_bytes = Held + Bytes
+    };
+waiting(_Worker, _Job, _Bytes, State) ->
+    dropped(State).
+
+dropped(#state{dropped = Dropped, report_timer = Timer} = State) ->
     State#state{dropped = Dropped + 1, report_timer = report_timer(Timer)}.
 
 report_timer(undefined) -> erlang:send_after(?DROPPED_REPORT_MS, self(), report_dropped);
@@ -172,13 +192,15 @@ report_timer(Timer) -> Timer.
 started(Worker, Job, #state{running = Running} = State) ->
     Pid = spawn_link(fun() -> run(Worker, Job) end),
     Timer = erlang:start_timer(shigoto_config:on_discard_timeout(), self(), {on_discard, Pid}),
-    State#state{running = Running#{Pid => {Timer, Job}}}.
+    State#state{running = Running#{Pid => {Timer, maps:with([id, worker], Job)}}}.
 
 -spec next(#state{}) -> #state{}.
-next(#state{pending = Pending, pending_count = Count} = State) ->
+next(#state{pending = Pending, pending_count = Count, pending_bytes = Held} = State) ->
     case queue:out(Pending) of
-        {{value, {Worker, Job}}, Rest} ->
-            started(Worker, Job, State#state{pending = Rest, pending_count = Count - 1});
+        {{value, {Worker, Job, Bytes}}, Rest} ->
+            started(Worker, Job, State#state{
+                pending = Rest, pending_count = Count - 1, pending_bytes = Held - Bytes
+            });
         {empty, _} ->
             State
     end.

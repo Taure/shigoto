@@ -7,6 +7,8 @@ callbacks_test_() ->
     {foreach, fun setup/0, fun(_) -> cleanup() end, [
         fun at_most_max_running_run_at_once/0,
         fun what_does_not_fit_the_backlog_is_dropped/0,
+        fun the_backlog_holds_no_more_than_its_bytes/0,
+        fun the_server_keeps_no_job_data_of_a_running_callback/0,
         fun a_callback_is_stopped_at_the_timeout/0,
         fun a_callback_that_raises_stops_nothing/0,
         fun only_a_discarded_job_with_the_callback_is_handed_over/0,
@@ -74,6 +76,45 @@ what_does_not_fit_the_backlog_is_dropped() ->
     {2, Second} = started_tagged(),
     Second ! go,
     ?assertEqual(none, started(100)).
+
+the_backlog_holds_no_more_than_its_bytes() ->
+    ok = listen(),
+    {ok, _} = shigoto_callbacks:start_link(#{
+        max_running => 1, max_pending => 10, max_pending_bytes => 3000
+    }),
+    Heavy = fun(N) -> (job(N, ~"wait"))#{errors := json_list(2000)} end,
+    [ok = shigoto_callbacks:discarded(Heavy(N)) || N <- lists:seq(1, 4)],
+    ok = shigoto_callbacks:discarded(job(5, ~"wait")),
+    %% 1 runs, 2 waits, 3 and 4 do not fit beside it, 5 is small and does.
+    {1, First} = started_tagged(),
+    First ! go,
+    {2, Second} = started_tagged(),
+    Second ! go,
+    {5, Fifth} = started_tagged(),
+    %% What left the backlog made room again.
+    ok = shigoto_callbacks:discarded(Heavy(6)),
+    Fifth ! go,
+    {6, Sixth} = started_tagged(),
+    Sixth ! go,
+    ?assertEqual(none, started(100)).
+
+the_server_keeps_no_job_data_of_a_running_callback() ->
+    ok = listen(),
+    {ok, Server} = shigoto_callbacks:start_link(#{max_running => 1, max_pending => 10}),
+    Canary = ~"CANARY-in-the-args",
+    Job = job(1, ~"wait"),
+    ok = shigoto_callbacks:discarded(Job#{meta := json_text(#{~"note" => Canary})}),
+    {1, Running} = started_tagged(),
+    State = iolist_to_binary(io_lib:format("~0tp", [sys:get_state(Server)])),
+    ?assertEqual(nomatch, binary:match(State, Canary)),
+    ?assertEqual(nomatch, binary:match(State, ~"\"then\"")),
+    Running ! go.
+
+json_list(Bytes) ->
+    json_text([binary:copy(~"e", Bytes)]).
+
+json_text(Term) ->
+    iolist_to_binary(json:encode(Term)).
 
 a_callback_is_stopped_at_the_timeout() ->
     ok = listen(),
