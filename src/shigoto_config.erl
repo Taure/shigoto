@@ -344,10 +344,13 @@ encryption_read_formats() ->
 Whether a plaintext value in a column this installation encrypts fails the job
 instead of being run. Default: `false`. It needs a key: with `true` and no
 `encryption_key` or `encryption_keys` the application does not start.
+
+The boot accepts `true` and `false` only. Changed while the application runs,
+only `false` turns it off: any other value is read as `true`.
 """.
 -spec require_encrypted() -> boolean().
 require_encrypted() ->
-    application:get_env(shigoto, require_encrypted, false) =:= true.
+    setting(require_encrypted, false) =/= false.
 
 -doc """
 The worker modules this node runs. Default: `undefined`, any module that
@@ -372,12 +375,24 @@ are its own, so two installations in one database (two schemas) do not share
 them. Lower-case letters, digits and `_`, at most 32 bytes. Every node of one
 installation has to name the same instance: a node with a name and one without
 do not exclude each other.
+
+Raises `{shigoto_config, {invalid, instance, Value}}` for anything else, also
+when it is changed while the application runs: it is never read as no
+instance, which would be the locks and the channel of every unnamed
+installation in the database.
 """.
 -spec instance() -> binary() | undefined.
 instance() ->
-    case application:get_env(shigoto, instance, undefined) of
-        Instance when is_binary(Instance) -> Instance;
-        _Unnamed -> undefined
+    case setting(instance, undefined) of
+        undefined ->
+            undefined;
+        Instance when is_binary(Instance) ->
+            case instance_checked(Instance) of
+                ok -> Instance;
+                {error, Invalid} -> error({shigoto_config, Invalid})
+            end;
+        Other ->
+            error({shigoto_config, {invalid, instance, Other}})
     end.
 
 -doc """
@@ -426,7 +441,10 @@ a map as `not_a_map`. `require_encrypted` without a key is refused as
 
 The readers of this module raise the same term, as
 `error({shigoto_config, {invalid, Setting, Value}})`, when a setting is changed
-to something invalid while the application runs.
+to something invalid while the application runs. The few that do not raise
+fall back to the careful side: `require_encrypted` is on unless it is `false`,
+an invalid `workers` allows no worker and an invalid
+`encryption_read_formats` reads nothing.
 """.
 -spec check() -> ok | {error, {shigoto_config, {invalid, atom(), term()}}}.
 check() ->
@@ -456,7 +474,7 @@ check() ->
         ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
         ok = checked(required_has_a_key(require_encrypted(), shigoto_crypto:is_enabled())),
         ok = checked(workers_checked(setting(workers, undefined))),
-        ok = checked(instance_checked(setting(instance, undefined))),
+        _ = instance(),
         ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000))),
         ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10))),
         ok = checked(shigoto_propagator:check(setting(propagator, undefined)))
@@ -528,15 +546,12 @@ workers_checked(Workers) when is_list(Workers) ->
 workers_checked(Workers) ->
     {error, {invalid, workers, Workers}}.
 
-instance_checked(undefined) ->
-    ok;
-instance_checked(Instance) when is_binary(Instance) ->
+-spec instance_checked(binary()) -> ok | {error, {invalid, instance, binary()}}.
+instance_checked(Instance) ->
     case re:run(Instance, ~"^[a-z0-9_]{1,32}$", [dollar_endonly, {capture, none}]) of
         match -> ok;
         nomatch -> {error, {invalid, instance, Instance}}
-    end;
-instance_checked(Instance) ->
-    {error, {invalid, instance, Instance}}.
+    end.
 
 interval_checked(_Setting, Ms) when is_integer(Ms), Ms >= 0 -> ok;
 interval_checked(Setting, Ms) -> {error, {invalid, Setting, Ms}}.

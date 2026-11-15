@@ -31,6 +31,8 @@ event (with metadata) and every shigoto telemetry event the case produced.
     a_job_put_back_for_its_worker_is_not_decrypted/1,
     a_frame_that_does_not_open_fails_the_job/1,
     a_plaintext_job_is_refused_when_encryption_is_required/1,
+    a_plaintext_job_is_refused_when_the_setting_became_nonsense/1,
+    an_instance_that_became_nonsense_is_not_used/1,
     a_v1_frame_is_refused_once_only_v2_is_read/1,
     v1_is_still_written_and_read_when_set/1,
     v1_is_written_unless_v2_is_set/1,
@@ -101,6 +103,8 @@ cases() ->
         a_job_put_back_for_its_worker_is_not_decrypted,
         a_frame_that_does_not_open_fails_the_job,
         a_plaintext_job_is_refused_when_encryption_is_required,
+        a_plaintext_job_is_refused_when_the_setting_became_nonsense,
+        an_instance_that_became_nonsense_is_not_used,
         a_v1_frame_is_refused_once_only_v2_is_read,
         v1_is_still_written_and_read_when_set,
         v1_is_written_unless_v2_is_set,
@@ -322,6 +326,41 @@ a_plaintext_job_is_refused_when_encryption_is_required(_Config) ->
     Encrypted = enqueue(~"ok", Canary),
     _ = performed(),
     _ = await(Encrypted, ~"completed").
+
+%% A setting changed while the node runs is not checked the way the boot
+%% checks it. Whatever is not `false` still requires encryption.
+a_plaintext_job_is_refused_when_the_setting_became_nonsense(_Config) ->
+    Canary = canary(),
+    Plain = iolist_to_binary(json:encode(args(~"ok", Canary))),
+    [
+        begin
+            application:set_env(shigoto, require_encrypted, Value),
+            Id = insert_row(~"shigoto_canary_worker", Plain, 1),
+            Row = await(Id, ~"discarded"),
+            ?assertMatch([#{~"error" := ~"plaintext_refused"}], errors(Row))
+        end
+     || Value <- [yes, "true"]
+    ],
+    ok = not_performed(shigoto_canary_worker).
+
+%% It is neither read as no instance, which is the lock space and the channel
+%% of every unnamed installation, nor written into the trigger function.
+an_instance_that_became_nonsense_is_not_used(_Config) ->
+    Source = notify_source(),
+    try
+        [
+            begin
+                application:set_env(shigoto, instance, Instance),
+                Invalid = {shigoto_config, {invalid, instance, Instance}},
+                ?assertEqual({error, Invalid}, shigoto_migration:up(?POOL)),
+                ?assertError(Invalid, shigoto_lock:acquire_xact(?POOL, [1]))
+            end
+         || Instance <- [billing, ~"a', NEW.queue); PERFORM pg_sleep(0); PERFORM pg_notify('b"]
+        ]
+    after
+        application:unset_env(shigoto, instance)
+    end,
+    ?assertEqual(Source, notify_source()).
 
 a_v1_frame_is_refused_once_only_v2_is_read(_Config) ->
     Canary = canary(),

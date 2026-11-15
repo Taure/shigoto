@@ -52,6 +52,8 @@ config_test_() ->
         fun every_default_is_the_documented_one/0,
         fun a_setting_is_read_as_configured/0,
         fun a_setting_read_leniently_falls_back/0,
+        fun only_false_turns_required_encryption_off/0,
+        fun an_instance_that_is_not_a_valid_name_is_never_used/0,
         fun the_smallest_value_of_a_setting_is_accepted/0,
         fun a_testing_mode_needs_its_confirmation/0,
         fun the_shutdown_budget_counts_every_queue/0,
@@ -305,23 +307,22 @@ a_setting_is_read_as_configured() ->
     ?assertEqual([v2], shigoto_config:encryption_read_formats()).
 
 %% `check/0` refuses these values at boot. Set later, while jobs run, they do
-%% not raise where they are read.
+%% not raise where they are read, and what they fall back to is the careful
+%% side: nothing is read, no worker is allowed, plaintext is refused.
 a_setting_read_leniently_falls_back() ->
     Odd = #{
         propagator => ~"a_module",
         encryption_read_formats => v2,
         require_encrypted => yes,
         workers => a_module,
-        instance => billing,
         advisory_lock_timeout => -1,
         notify_min_interval => -1
     },
     [application:set_env(shigoto, Setting, Value) || Setting := Value <- Odd],
     ?assertEqual(undefined, shigoto_config:propagator()),
     ?assertEqual([], shigoto_config:encryption_read_formats()),
-    ?assertEqual(false, shigoto_config:require_encrypted()),
+    ?assertEqual(true, shigoto_config:require_encrypted()),
     ?assertEqual([], shigoto_config:workers()),
-    ?assertEqual(undefined, shigoto_config:instance()),
     ?assertEqual(5000, shigoto_config:advisory_lock_timeout()),
     ?assertEqual(10, shigoto_config:notify_min_interval()),
     application:set_env(shigoto, advisory_lock_timeout, soon),
@@ -412,3 +413,43 @@ requiring_encryption_needs_a_key() ->
     application:unset_env(shigoto, encryption_keys),
     application:set_env(shigoto, require_encrypted, false),
     ?assertEqual(ok, shigoto_config:check()).
+
+only_false_turns_required_encryption_off() ->
+    ?assertEqual(false, shigoto_config:require_encrypted()),
+    application:set_env(shigoto, require_encrypted, false),
+    ?assertEqual(false, shigoto_config:require_encrypted()),
+    [
+        begin
+            application:set_env(shigoto, require_encrypted, Value),
+            ?assertEqual({Value, true}, {Value, shigoto_config:require_encrypted()})
+        end
+     || Value <- [true, yes, "true", ~"true", 1, 0, undefined, ~"false", "false"]
+    ].
+
+%% Read as no instance, it would put this installation in the lock space and
+%% on the channel every unnamed installation in the database shares.
+an_instance_that_is_not_a_valid_name_is_never_used() ->
+    [
+        begin
+            application:set_env(shigoto, instance, Instance),
+            ?assertError(
+                {shigoto_config, {invalid, instance, Instance}}, shigoto_config:instance()
+            ),
+            ?assertError(
+                {shigoto_config, {invalid, instance, Instance}}, shigoto_config:notify_channel()
+            )
+        end
+     || Instance <- [
+            billing,
+            "billing",
+            ~"Billing",
+            ~"",
+            ~"a', NEW.queue); DROP TABLE shigoto_jobs; --",
+            binary:copy(~"a", 33),
+            ~"billing\n"
+        ]
+    ],
+    application:set_env(shigoto, instance, binary:copy(~"a", 32)),
+    ?assertEqual(binary:copy(~"a", 32), shigoto_config:instance()),
+    application:set_env(shigoto, instance, undefined),
+    ?assertEqual(undefined, shigoto_config:instance()).

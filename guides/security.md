@@ -174,6 +174,14 @@ wrong with it.
 With a key configured, `shigoto_plaintext_jobs_accepted` is logged once per
 boot while `require_encrypted` is not set.
 
+A setting changed while the application runs (`application:set_env/3`, a
+release upgrade) is not checked again, so the two that guard something are
+read to fail closed. `require_encrypted` is on unless it is exactly `false`.
+An `instance` that is not a valid name raises
+`{shigoto_config, {invalid, instance, Value}}` wherever it is read (a lock,
+the stager, the migration, which answers it as `{error, _}`): it is never
+taken for no instance.
+
 ## Options
 
 | Option | Default | |

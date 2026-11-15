@@ -119,6 +119,7 @@ up(Pool) ->
 
 locked(Pool) ->
     try
+        Channel = shigoto_config:notify_channel(),
         shigoto_db:transaction(Pool, fun() ->
             %% The advisory lock first: lock_timeout would also cut short the
             %% wait for another node's migration.
@@ -139,9 +140,10 @@ locked(Pool) ->
                         )
                     )
             end,
-            announced_on(Pool, shigoto_config:notify_channel())
+            announced_on(Pool, Channel)
         end)
     catch
+        error:{shigoto_config, {invalid, _Setting, _Value}} = Invalid -> {error, Invalid};
         throw:{?MODULE, lock_timeout} -> {error, lock_timeout};
         throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
         throw:{?MODULE, {invalid_index, _} = Invalid} -> {error, Invalid};
@@ -313,8 +315,8 @@ announced_on(Pool, Channel) ->
             throw({?MODULE, Reason})
     end.
 
-%% `Channel` is `shigoto_config:notify_channel/0`, whose instance part is
-%% checked at boot to be lower-case letters, digits and `_`.
+%% `Channel` is `shigoto_config:notify_channel/0`, which raises unless its
+%% instance part is lower-case letters, digits and `_`.
 -spec notify_function(binary()) -> binary().
 notify_function(Channel) ->
     iolist_to_binary([
