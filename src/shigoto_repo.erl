@@ -144,10 +144,11 @@ the unique locks of every such job are taken first, and a lock that cannot be
 had in `advisory_lock_timeout` answers `{error, {lock_timeout, unique}}` with
 nothing inserted. A call may take `unique_lock_limit` locks (1000 unless set):
 one that needs more answers `{error, {too_many_unique_locks, Needed, Limit}}`
-and inserts nothing. Split such a list; each call is then its own unit. A job that turns out to be a duplicate, of a stored job or of
-an earlier one in the same call, is answered as the job that is already there
-(replaced or debounced as its `unique` options say), in its place in the list.
-`unique => false` in `Opts` inserts every job without looking.
+and inserts nothing. Split such a list; each call is then its own unit. A job
+that turns out to be a duplicate, of a stored job or of an earlier one in the
+same call, is answered as the job that is already there (replaced or debounced
+as its `unique` options say), in its place in the list. `unique => false` in
+`Opts` inserts every job without looking.
 """.
 -spec insert_all(atom(), [map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(Pool, JobParamsList, Opts) ->
