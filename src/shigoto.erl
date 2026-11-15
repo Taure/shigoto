@@ -153,7 +153,17 @@ value does not open under any configured key. `scanned` counts rows.
 insert(JobParams) ->
     insert(JobParams, #{}).
 
--doc "Insert a job with options. Params: worker, args, meta, queue, priority, scheduled_at, max_attempts, unique, tags, batch, depends_on, on_dependency_failure. `meta` keys that start with `_shigoto` are reserved: setting one, other than `_shigoto_carrier`, answers `{error, {reserved_key, meta, Key}}`.".
+-doc """
+Insert a job with options. Params: worker, args, meta, queue, priority,
+scheduled_at, max_attempts, unique, tags, batch, depends_on,
+on_dependency_failure. `meta` keys that start with `_shigoto` are reserved:
+setting one, other than `_shigoto_carrier`, answers
+`{error, {reserved_key, meta, Key}}`.
+
+An insert PostgreSQL refuses answers `{error, {pgsql_error, Fields}}` with
+`Fields` cut down by `shigoto_db:reduced/1` to `code`, `constraint` and the
+severity: its `message` and `detail` can quote the row, args included.
+""".
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
     case shigoto_config:testing_mode() of
@@ -193,6 +203,9 @@ between them (1000 unless set, `shigoto_config:unique_lock_limit/0` says how
 many a job takes). A call that needs more answers
 `{error, {too_many_unique_locks, Needed, Limit}}` with nothing inserted: split
 the list and insert each part with a call of its own.
+
+A call PostgreSQL refuses answers `{error, {pgsql_error, Fields}}`, cut down
+as `insert/2` cuts it.
 """.
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->

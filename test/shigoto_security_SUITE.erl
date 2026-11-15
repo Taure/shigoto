@@ -65,6 +65,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     insert_all_takes_no_more_unique_locks_than_its_limit/1,
     a_full_lock_table_is_answered_not_raised/1,
     a_unique_insert_the_database_refuses_is_answered_not_raised/1,
+    an_insert_the_database_refuses_does_not_quote_the_row/1,
     insert_all_encrypts_the_meta/1,
     insert_all_validates_dependencies/1,
     a_bad_key_stops_the_boot_without_printing_it/1,
@@ -150,6 +151,7 @@ cases() ->
         insert_all_takes_no_more_unique_locks_than_its_limit,
         a_full_lock_table_is_answered_not_raised,
         a_unique_insert_the_database_refuses_is_answered_not_raised,
+        an_insert_the_database_refuses_does_not_quote_the_row,
         insert_all_encrypts_the_meta,
         insert_all_validates_dependencies,
         a_bad_key_stops_the_boot_without_printing_it,
@@ -270,6 +272,8 @@ overrides(a_held_concurrency_lock_snoozes_the_job) ->
     #{advisory_lock_timeout => 200};
 overrides(a_flood_of_notifications_is_rate_limited) ->
     #{poll_interval => 60000, notify_min_interval => 250, notifier => connection()};
+overrides(an_insert_the_database_refuses_does_not_quote_the_row) ->
+    #{encryption_key => undefined};
 overrides(errors_are_bounded) ->
     #{encryption_key => undefined};
 overrides(_TestCase) ->
@@ -1251,6 +1255,44 @@ a_unique_insert_the_database_refuses_is_answered_not_raised(_Config) ->
         ok = accepting()
     end,
     ?assertMatch({ok, #{id := _}}, shigoto:insert(waiting(shigoto_unique_worker, 1))).
+
+%% PostgreSQL quotes the row a constraint refused in the `detail` of its
+%% error ("Failing row contains ..."), args and all.
+an_insert_the_database_refuses_does_not_quote_the_row(_Config) ->
+    Canary = canary(),
+    Job = (waiting(shigoto_canary_other_worker, 1))#{
+        args => #{~"canary" => Canary}, priority => 1000
+    },
+    #{} = shigoto_db:query(
+        ?POOL,
+        ~"ALTER TABLE shigoto_jobs ADD CONSTRAINT shigoto_test_priority CHECK (priority < 1000)",
+        []
+    ),
+    try
+        Refusals = [
+            shigoto:insert(Job),
+            shigoto:insert_all([Job, Job]),
+            shigoto:insert(Job, #{unique => #{keys => [worker]}}),
+            shigoto:insert_all([Job, Job], #{unique => #{keys => [worker]}})
+        ],
+        ?assertMatch(
+            [{error, {pgsql_error, #{code := ~"23514", constraint := ~"shigoto_test_priority"}}}],
+            lists:usort([
+                {error, {pgsql_error, maps:with([code, constraint], Fields)}}
+             || {error, {pgsql_error, #{} = Fields}} <- Refusals
+            ])
+        ),
+        ?assertEqual(
+            lists:duplicate(4, [code, constraint, severity, severity_non_localised]),
+            [lists:sort(maps:keys(Fields)) || {error, {pgsql_error, #{} = Fields}} <- Refusals]
+        ),
+        ok = no_canary(Canary, Refusals),
+        ?assertEqual(0, job_count())
+    after
+        #{} = shigoto_db:query(
+            ?POOL, ~"ALTER TABLE shigoto_jobs DROP CONSTRAINT IF EXISTS shigoto_test_priority", []
+        )
+    end.
 
 refusing(Timing, When) ->
     #{} = shigoto_db:query(

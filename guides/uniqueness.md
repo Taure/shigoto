@@ -138,8 +138,9 @@ call is then its own all-or-nothing unit. Calls made inside one
 keep the whole transaction under the limit.
 
 An insert the database refuses is answered, not raised: `{error, Reason}`
-with a `{pgsql_error, _}` cut down to its code, and nothing of the call is
-kept.
+with a `{pgsql_error, Fields}` cut down as for any insert (see
+[Getting Started](getting-started.md#bulk-insert)), and nothing of the call
+is kept.
 
 The answer is still `{ok, Jobs}` with one job per job given. Where a job was a
 duplicate (of a stored job, or of an earlier one in the same list) its place

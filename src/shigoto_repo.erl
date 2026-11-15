@@ -83,6 +83,9 @@ discarded or cancelled: `run` without it, or be `cancel`led or `discard`ed in
 turn. Left out, `shigoto_config:on_dependency_failure/0` decides when the
 dependency fails. A job that would be cancelled or discarded for a dependency
 that has already failed is not inserted: `{error, {dependency_failed, Ids}}`.
+
+A statement PostgreSQL refuses answers `{error, {pgsql_error, Fields}}` cut
+down by `shigoto_db:reduced/1`, here and in `insert_all/3`.
 """.
 -spec insert_job(atom(), map(), map()) ->
     {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
@@ -94,11 +97,17 @@ insert_job(Pool, JobParams0, Opts) ->
             ),
             case insertable(JobParams1, Opts) of
                 {error, _} = Invalid -> Invalid;
-                ok -> insert_validated(Pool, JobParams1, Opts)
+                ok -> answered(insert_validated(Pool, JobParams1, Opts))
             end;
         {error, _} = Reserved ->
             Reserved
     end.
+
+%% Every insert answers through here. What PostgreSQL says about a statement
+%% it refused can quote the row, args included, and a caller logs the reason.
+-spec answered(Answer) -> Answer | {error, term()}.
+answered({error, Reason}) -> {error, shigoto_db:reduced(Reason)};
+answered(Answer) -> Answer.
 
 insert_validated(Pool, JobParams1, Opts) ->
     DependsOn = maps:get(depends_on, JobParams1, []),
@@ -153,7 +162,7 @@ placed_all(_Pool, [], _Opts) ->
 placed_all(Pool, JobParamsList, Opts) ->
     case [Reserved || Job <- JobParamsList, {error, _} = Reserved <- [own_meta(Job)]] of
         [Reserved | _] -> Reserved;
-        [] -> placed_own(Pool, JobParamsList, Opts)
+        [] -> answered(placed_own(Pool, JobParamsList, Opts))
     end.
 
 placed_own(Pool, JobParamsList, Opts) ->
@@ -213,8 +222,8 @@ placed_with_unique(Pool, Resolved, Opts) ->
                     end
                 end)
             catch
-                throw:{?MODULE, insert_all_failed, {error, Reason}} ->
-                    {error, shigoto_db:reduced(Reason)}
+                throw:{?MODULE, insert_all_failed, {error, _} = Refused} ->
+                    Refused
             end
     end.
 

@@ -244,6 +244,12 @@ holds the job already there. See [Unique Jobs](uniqueness.md). A `depends_on`
 that names a job that does not exist answers
 `{error, {missing_dependencies, Ids}}`.
 
+An insert PostgreSQL refuses (a constraint or trigger of your own, a full
+disk) answers `{error, {pgsql_error, Fields}}`. `Fields` holds only `code`,
+`constraint`, `severity` and `severity_non_localised`: PostgreSQL's `message`
+and `detail` can quote the row, args included, and the reason of a failed
+insert tends to end up in a log.
+
 ## Transactional Enqueue
 
 With `{repo, Repo}`, a job inserted inside the repo's transaction is part of
