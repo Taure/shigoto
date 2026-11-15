@@ -289,12 +289,20 @@ with_dependencies([Job | Jobs], Found, Validated) ->
 waiting_for(Job, []) ->
     Job;
 waiting_for(Job, DependsOn) ->
-    case {shigoto_crypto:is_enabled(), maps:get(meta, Job, #{})} of
-        {true, Meta} when is_map(Meta) ->
-            Job#{meta => (maps:remove('_shigoto_deps', Meta))#{~"_shigoto_deps" => DependsOn}};
-        _NoKeyOrNoObject ->
-            Job
+    case shigoto_crypto:is_enabled() andalso meta_object(maps:get(meta, Job, #{})) of
+        Meta when is_map(Meta) -> Job#{meta => Meta#{~"_shigoto_deps" => DependsOn}};
+        _NoKeyOrNoObject -> Job
     end.
+
+%% Meta is handed over as a map or as the JSON text of one.
+meta_object(Json) when is_binary(Json) ->
+    try
+        json:decode(Json)
+    catch
+        error:_ -> Json
+    end;
+meta_object(Meta) ->
+    Meta.
 
 -define(LOCKS_PER_STATEMENT, 64).
 

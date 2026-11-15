@@ -686,7 +686,19 @@ a_result_copied_under_its_own_id_reaches_no_other_job(_Config) ->
         [#{~"n" => 1}, #{~"n" => 2, deps_results => #{Source => #{~"secret" => Canary}}}],
         lists:sort([Args || {_Worker, Args} <- Seen])
     ),
-    _ = await(Bulk, ~"completed").
+    _ = await(Bulk, ~"completed"),
+    %% And one whose meta was handed over as JSON text.
+    {ok, #{id := Text}} = shigoto:insert(#{
+        worker => shigoto_canary_other_worker,
+        args => #{~"n" => 3},
+        meta => ~"{\"trace\":\"t1\"}",
+        depends_on => [Source]
+    }),
+    {_, TextArgs} = performed(shigoto_canary_other_worker),
+    ?assertEqual(#{Source => #{~"secret" => Canary}}, maps:get(deps_results, TextArgs)),
+    _ = await(Text, ~"completed"),
+    {ok, #{meta := TextMeta}} = shigoto:get_job(Text),
+    ?assertEqual(#{~"trace" => ~"t1", ~"_shigoto_deps" => [Source]}, json:decode(TextMeta)).
 
 a_result_a_job_did_not_wait_for_is_not_handed_to_it(_Config) ->
     Canary = canary(),
