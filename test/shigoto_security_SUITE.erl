@@ -64,6 +64,7 @@ event (with metadata) and every shigoto telemetry event the case produced.
     unique_states_that_are_no_job_state_are_refused/1,
     keys_that_belong_to_shigoto_are_refused/1,
     insert_all_takes_no_more_unique_locks_than_its_limit/1,
+    insert_all_takes_exactly_its_limit_of_unique_locks/1,
     a_full_lock_table_is_answered_not_raised/1,
     a_unique_insert_the_database_refuses_is_answered_not_raised/1,
     an_insert_the_database_refuses_does_not_quote_the_row/1,
@@ -151,6 +152,7 @@ cases() ->
         unique_states_that_are_no_job_state_are_refused,
         keys_that_belong_to_shigoto_are_refused,
         insert_all_takes_no_more_unique_locks_than_its_limit,
+        insert_all_takes_exactly_its_limit_of_unique_locks,
         a_full_lock_table_is_answered_not_raised,
         a_unique_insert_the_database_refuses_is_answered_not_raised,
         an_insert_the_database_refuses_does_not_quote_the_row,
@@ -267,6 +269,8 @@ overrides(insert_all_inserts_nothing_when_a_unique_lock_is_held) ->
 overrides(a_node_without_queues_stops_looking_for_unique_fields_too) ->
     #{queues => [], rescue_interval => 100};
 overrides(insert_all_takes_no_more_unique_locks_than_its_limit) ->
+    #{unique_lock_limit => 6};
+overrides(insert_all_takes_exactly_its_limit_of_unique_locks) ->
     #{unique_lock_limit => 6};
 overrides(a_full_lock_table_is_answered_not_raised) ->
     #{unique_lock_limit => 5000};
@@ -1221,6 +1225,15 @@ insert_all_takes_no_more_unique_locks_than_its_limit(_Config) ->
     [First, Second, Third | _] = Unique,
     ?assertMatch({ok, [_ | _]}, shigoto:insert_all(Plain ++ [First, Second, Third])),
     ?assertEqual(23, job_count()).
+
+%% One key and no unique key in the clear: a unique job takes one lock.
+insert_all_takes_exactly_its_limit_of_unique_locks(_Config) ->
+    Unique = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 7)],
+    ?assertEqual({error, {too_many_unique_locks, 7, 6}}, shigoto:insert_all(Unique)),
+    ?assertEqual(0, job_count()),
+    [_Seventh | AtTheLimit] = Unique,
+    ?assertMatch({ok, [_, _, _, _, _, _]}, shigoto:insert_all(AtTheLimit)),
+    ?assertEqual(6, job_count()).
 
 a_full_lock_table_is_answered_not_raised(_Config) ->
     Jobs = [waiting(shigoto_unique_worker, N) || N <- lists:seq(1, 600)],
