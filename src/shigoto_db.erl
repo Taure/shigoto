@@ -169,6 +169,25 @@ opened through kura raises them the same way. A server error keeps only its
     prepared_statements,
     frame_opts
 ]).
+-define(SPELLED, [host, hostname, database, user, username, password]).
+%% Keys that say nothing about a connection and are left out without a word.
+%% `pool_size` is the pool's, read in `start_pool/2`. The rest are the keys
+%% of a kura repo's configuration, which is handed to shigoto as it is.
+-define(NOT_A_CONNECTION_OPTION, [
+    pool_size,
+    pool,
+    pool_module,
+    driver_module,
+    backend,
+    dialect,
+    read_only,
+    replicas,
+    uuid_version,
+    encryption,
+    keyring,
+    queue_target,
+    queue_interval
+]).
 
 -doc """
 The shape a statement answers with. `command` is an atom for a command tag
@@ -280,7 +299,16 @@ written: `port`, `ssl`, `ssl_options`, `auth`, `channel_binding`, `timeout`,
 `connect_timeout`, `cancel_timeout`, `socket_options`, `parameters`,
 `transport`, `prepared_statements` and `frame_opts`. What each does is in
 minato's configuration guide. `pool_size` is the most connections the pool
-holds, 10 unless given. Any other key is left out.
+holds, 10 unless given.
+
+Any other key is left out, and the connection is opened as if it had not been
+given. Each start logs one warning that names such keys,
+`shigoto_connection_keys_not_read`: `sslmode`, or a misspelt `ssl_options`,
+is a setting somebody believes is in force. A later major release will refuse
+them. The keys of a kura repo's configuration are left out without the
+warning, so that map can be given as it is: `pool`, `pool_module`,
+`driver_module`, `backend`, `dialect`, `read_only`, `replicas`,
+`uuid_version`, `encryption`, `keyring`, `queue_target` and `queue_interval`.
 
 minato refuses a connection it will not open as asked. No pool is started
 then, and the answer is minato's:
@@ -310,6 +338,7 @@ start_pool(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
     case connection(Config) of
         {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
             Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
             started(minato:start_pool(Name, Opts));
         {error, Reason} ->
@@ -330,8 +359,11 @@ connection minato will not open as asked is refused the same way.
 start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
     case connection(Config) of
-        {ok, Connection} -> started(minato:start_listener(Name, #{connection => Connection}));
-        {error, Reason} -> {error, Reason}
+        {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
+            started(minato:start_listener(Name, #{connection => Connection}));
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 -doc false.
@@ -346,6 +378,33 @@ connection(Config) ->
         ok -> {ok, Connection};
         {error, Reason} -> {error, Reason}
     end.
+
+%% A key nothing reads changes nothing, and whoever wrote `sslmode`, or
+%% misspelt `ssl_options`, believes it did. The keys are named and never
+%% their values, and a key that is not an atom is not repeated: a map
+%% written the wrong way round has its values for keys.
+-spec warned_of_keys_not_read(atom(), map()) -> ok.
+warned_of_keys_not_read(Name, Config) ->
+    Read = ?SPELLED ++ ?AS_WRITTEN ++ ?NOT_A_CONNECTION_OPTION,
+    case lists:usort([named(Key) || Key := _Value <- Config, not lists:member(Key, Read)]) of
+        [] ->
+            ok;
+        Keys ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_connection_keys_not_read",
+                name => Name,
+                keys => Keys,
+                warning =>
+                    ~"these keys are no option of a connection and change nothing: it is opened as if they were not given",
+                action =>
+                    ~"correct or remove them; a later major release refuses a key it does not read"
+            }),
+            ok
+    end.
+
+-spec named(term()) -> atom().
+named(Key) when is_atom(Key) -> Key;
+named(_Key) -> not_an_atom.
 
 -spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
 started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};

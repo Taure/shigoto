@@ -85,7 +85,9 @@ options_test_() ->
         fun an_option_minato_does_not_take_as_written_is_named/0,
         fun a_name_minato_keeps_for_itself_is_no_pool/0,
         fun every_option_of_a_minato_connection_is_handed_on/0,
-        fun an_option_handed_on_is_one_minato_can_refuse/0
+        fun an_option_handed_on_is_one_minato_can_refuse/0,
+        fun a_key_nothing_reads_is_warned_about_by_name/0,
+        fun a_key_of_a_pool_or_of_a_kura_repo_is_not_warned_about/0
     ].
 
 tls_options_without_tls_start_no_pool() ->
@@ -194,6 +196,94 @@ an_option_handed_on_is_one_minato_can_refuse() ->
             {auth, scram_sha_256}
         ]
     ].
+
+%% `sslmode` is libpq's and `ssl_optons` is misspelt: neither is read, and
+%% the connection is opened without what they were meant to set. The warning
+%% names them and holds no value, nor a key that is not an atom.
+a_key_nothing_reads_is_warned_about_by_name() ->
+    Config = (nowhere())#{
+        sslmode => ~"require_and_verify",
+        ssl_optons => [{cacertfile, "/secret/ca.pem"}],
+        ~"secret_password" => true,
+        "secret_host" => true
+    },
+    Expected = [#{name => ?POOL, keys => [not_an_atom, ssl_optons, sslmode]}],
+    Pool = keys_not_read(fun() ->
+        {ok, _} = shigoto_db:start_pool(?POOL, Config),
+        minato:stop_pool(?POOL)
+    end),
+    Listener = keys_not_read(fun() ->
+        {ok, _} = shigoto_db:start_listener(?POOL, Config),
+        minato:stop_listener(?POOL)
+    end),
+    ?assertEqual(Expected, [maps:with([name, keys], Report) || Report <- Pool]),
+    ?assertEqual(Expected, [maps:with([name, keys], Report) || Report <- Listener]),
+    ?assertEqual(
+        nomatch, re:run(io_lib:format("~0tp", [Pool ++ Listener]), "secret|require_and_verify")
+    ).
+
+%% Every key shigoto or minato reads, and the keys of a kura repo's
+%% configuration, which is a map people hand to shigoto as it is.
+a_key_of_a_pool_or_of_a_kura_repo_is_not_warned_about() ->
+    Config = (nowhere())#{
+        hostname => "localhost",
+        username => "postgres",
+        parameters => #{~"application_name" => ~"shigoto"},
+        ssl => false,
+        channel_binding => disable,
+        auth => [scram_sha_256],
+        connect_timeout => 1000,
+        timeout => 60000,
+        cancel_timeout => 2000,
+        socket_options => [{send_timeout, 30000}],
+        transport => inet,
+        prepared_statements => 0,
+        frame_opts => #{max_message_length => 1048576},
+        pool_size => 1,
+        pool => my_repo,
+        pool_module => kura_pool_minato,
+        driver_module => kura_driver_minato,
+        backend => kura_backend_postgres,
+        dialect => kura_dialect_pg,
+        read_only => false,
+        replicas => [],
+        uuid_version => v7,
+        encryption => #{},
+        keyring => kura_keyring_env,
+        queue_target => 50,
+        queue_interval => 1000
+    },
+    ?assertEqual(
+        [],
+        keys_not_read(fun() ->
+            {ok, _} = shigoto_db:start_pool(?POOL, Config),
+            ok = minato:stop_pool(?POOL),
+            {ok, _} = shigoto_db:start_listener(?POOL, Config),
+            minato:stop_listener(?POOL)
+        end)
+    ).
+
+%% A port nothing listens on: a pool and a listener start without a server.
+nowhere() ->
+    (connection())#{port => 1}.
+
+keys_not_read(Fun) ->
+    ok = shigoto_log_probe:attach(),
+    try
+        ok = Fun(),
+        keys_not_read()
+    after
+        shigoto_log_probe:detach()
+    end.
+
+keys_not_read() ->
+    receive
+        {log, warning, #{msg := ~"shigoto_connection_keys_not_read"} = Report} ->
+            [Report | keys_not_read()];
+        {log, _Level, _Report} ->
+            keys_not_read()
+    after 0 -> []
+    end.
 
 connection() ->
     #{host => "localhost", database => "shigoto_test", user => "postgres", password => "root"}.

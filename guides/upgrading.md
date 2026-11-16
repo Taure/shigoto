@@ -143,8 +143,10 @@ The API:
 - `[shigoto, job, start]`, `[shigoto, job, stop]`, `[shigoto, job, exception]`
   and `[shigoto, job, lost | rescued | transition_failed]` telemetry events.
 
-New in the log: `shigoto_workers_not_listed`, a warning once per boot while an
-encryption key is configured and `workers` is not set, and
+New in the log: `shigoto_connection_keys_not_read`, a warning when a pool or
+the notifier is started with keys that are no option of a connection (see
+[minato 1.2](#minato-1-2)), `shigoto_workers_not_listed`, a warning once per
+boot while an encryption key is configured and `workers` is not set, and
 `shigoto_raw_unique_check_failed`, a warning when a node cannot find out
 whether a unique key is still stored in the clear (see
 [Encryption](encryption.md#unique-jobs)).
@@ -196,6 +198,13 @@ A map that held one of the others all along (`timeout`, `connect_timeout`,
 and refused if minato does not take its value: a `timeout` of `"5000"` is
 `{invalid_option, timeout}`. They are listed in
 [Getting Started](getting-started.md#connection-options).
+
+A key that is none of them, such as `sslmode` or a misspelt `ssl_options`, is
+left out as before, and the connection is opened as if it had not been given.
+That is now said: each time a pool or a listener is started with such keys,
+`shigoto_connection_keys_not_read` is logged as a warning that names them. A
+later major release will refuse them. The keys of a kura repo's configuration
+are not warned about.
 
 ## Connection poolers
 

@@ -113,8 +113,17 @@ connection, and what each does is in minato's
 | `pool_size` | `start_pool/2` only: the most connections the pool holds. `10` unless given |
 
 `host`, `database`, `user` and `password` are taken as strings, binaries or
-atoms. Everything else is handed to minato as it was written. Any other key
-is left out.
+atoms. Everything else is handed to minato as it was written.
+
+Any other key is left out, and the connection is opened as if it had not been
+given: `sslmode => require`, or `ssl_optons` for `ssl_options`, changes
+nothing. Each time a pool or a listener is started with such keys, shigoto
+logs one warning that names them, `shigoto_connection_keys_not_read`. A later
+major release will refuse them, so take them out when you see it. The keys of
+a kura repo's configuration are the exception and are left out without the
+warning, so that the repo's map can be given to shigoto as it is: `pool`,
+`pool_module`, `driver_module`, `backend`, `dialect`, `read_only`, `replicas`,
+`uuid_version`, `encryption`, `keyring`, `queue_target` and `queue_interval`.
 
 The setting for a network anybody else is on, as minato's guide has it:
 
