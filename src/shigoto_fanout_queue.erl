@@ -13,6 +13,10 @@ window are re-processed — workers must be idempotent.
 
 The source of truth is always the database. Fanout is best-effort
 push; if a node misses a job, the client catches up on reconnect.
+
+No node owns a fanout job, so running one changes nothing in its row: it stays
+`available` until the cleanup deletes it, whatever `perform/1` returned on this
+node. A failure or a snooze is reported through telemetry and is not retried.
 """.
 -behaviour(gen_server).
 
@@ -33,7 +37,7 @@ push; if a node misses a job, the client catches up on reconnect.
     shutting_down :: boolean()
 }).
 
--spec start_link(binary(), pos_integer(), map()) -> {ok, pid()}.
+-spec start_link(binary(), pos_integer(), map()) -> gen_server:start_ret().
 start_link(Queue, Concurrency, Opts) ->
     gen_server:start_link(?MODULE, {Queue, Concurrency, Opts}, []).
 
@@ -66,11 +70,11 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({job_finished, _JobId, Pid}, #state{active = Active, executors = Execs} = State) ->
     NewExecs =
-        case maps:find(Pid, Execs) of
-            {ok, Ref} ->
+        case Execs of
+            #{Pid := Ref} ->
                 erlang:demonitor(Ref, [flush]),
                 maps:remove(Pid, Execs);
-            error ->
+            #{} ->
                 Execs
         end,
     {noreply, State#state{active = Active - 1, executors = NewExecs}};
@@ -101,29 +105,13 @@ handle_info(
                 case fetch_recent_jobs(Pool, Queue, Window) of
                     {ok, Jobs} ->
                         Unseen = [J || #{id := Id} = J <- Jobs, not ets:member(Seen, Id)],
-                        Take = lists:sublist(Unseen, Available),
+                        Take = [Job || Job <- lists:sublist(Unseen, Available), is_map(Job)],
                         lists:foreach(
                             fun(#{id := Id}) -> ets:insert(Seen, {Id}) end,
                             Take
                         ),
-                        {Started, Execs1} = lists:foldl(
-                            fun(Job, {Count, AccExecs}) ->
-                                case
-                                    shigoto_executor_sup:start_executor(
-                                        Job, Pool, self()
-                                    )
-                                of
-                                    {ok, Pid} ->
-                                        Ref = erlang:monitor(process, Pid),
-                                        {Count + 1, AccExecs#{Pid => Ref}};
-                                    {error, _} ->
-                                        {Count, AccExecs}
-                                end
-                            end,
-                            {0, Execs},
-                            Take
-                        ),
-                        {Active + Started, Execs1};
+                        Execs1 = executing(Take, Pool, Execs),
+                        {Active + map_size(Execs1) - map_size(Execs), Execs1};
                     {error, _} ->
                         {Active, Execs}
                 end;
@@ -153,7 +141,11 @@ handle_info(
     {'DOWN', _Ref, process, Pid, _Reason}, #state{active = Active, executors = Execs} = State
 ) ->
     NewExecs = maps:remove(Pid, Execs),
-    NewActive = max(0, Active - 1),
+    NewActive =
+        case Active of
+            0 -> 0;
+            _ -> Active - 1
+        end,
     {noreply, State#state{active = NewActive, executors = NewExecs}};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -168,6 +160,16 @@ terminate(_Reason, #state{executors = Execs}) ->
 %% Internal
 %%----------------------------------------------------------------------
 
+-spec executing([map()], atom(), #{pid() => reference()}) -> #{pid() => reference()}.
+executing([], _Pool, Execs) ->
+    Execs;
+executing([Job | Jobs], Pool, Execs) ->
+    case shigoto_executor_sup:start_fanout_executor(Job, Pool, self()) of
+        {ok, Pid} -> executing(Jobs, Pool, Execs#{Pid => erlang:monitor(process, Pid)});
+        {error, _} -> executing(Jobs, Pool, Execs)
+    end.
+
+-spec fetch_recent_jobs(atom(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 fetch_recent_jobs(Pool, Queue, WindowSeconds) ->
     shigoto_repo:fetch_fanout_jobs(Pool, Queue, WindowSeconds).
 

@@ -1,6 +1,15 @@
 [changelog]
+# Text written by hand goes here: the header is the one part of CHANGELOG.md
+# that is not derived from commits, and release notes are generated without it.
 header = """
 # Changelog\n
+Generated from the commit history by [git-cliff](https://git-cliff.org), so an
+edit made here is lost. To change it, regenerate it:\n
+```
+git cliff -o CHANGELOG.md
+```\n
+and commit the result as `chore(changelog): regenerate`, the last commit of
+the pull request. CI fails a pull request whose file differs.\n
 """
 body = """
 {% if version %}\
@@ -28,6 +37,7 @@ commit_parsers = [
     { message = "^perf", group = "Performance" },
     { message = "^refactor", group = "Refactoring" },
     { message = "^test", group = "Testing" },
+    { message = "^chore\\(changelog\\)", skip = true },
     { message = "^chore", group = "Miscellaneous" },
     { message = "^ci", group = "CI" },
 ]

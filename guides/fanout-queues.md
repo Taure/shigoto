@@ -123,6 +123,30 @@ shigoto:insert(#{
 }).
 ```
 
+## Outcomes
+
+No node owns a fanout job, so what `perform/1` returns on one node is not
+written to the job: its row stays `available`, with `attempt` 0 and no errors,
+and the other nodes still run it.
+
+- `ok` / `{ok, _}` emits `[shigoto, job, completed]`.
+- `{error, _}` or a crash emits `[shigoto, job, failed]`. It is **not retried**,
+  on this node or any other, and `on_discard/2` does not run. Handle what needs
+  handling inside `perform/1`.
+- `{snooze, _}` emits `[shigoto, job, snoozed]` and this node skips the job.
+
+`max_attempts`, `backoff/2` and the stale-job rescue do not apply to fanout
+jobs.
+
+A fanout job never ends, so nothing can wait for it:
+
+- It cannot be part of a batch. `shigoto:insert/1,2` and `insert_all/1,2`
+  answer `{error, {fanout_job_in_batch, Queue}}` on a node that has the queue
+  in `fanout_queues`.
+- `depends_on` is not for fanout jobs either: a fanout job runs without
+  waiting for the jobs it names, and a job that names a fanout job waits for
+  ever.
+
 ## Cleanup
 
 Fanout jobs stay in `available` state since no node claims them. The
@@ -134,10 +158,11 @@ periodically if it exceeds 10,000 entries.
 
 | Aspect | Standard Queue | Fanout Queue |
 |--------|---------------|--------------|
-| Delivery | Exactly once (one node) | At-least once (all nodes) |
+| Delivery | At least once, on one node | Best effort, on every node |
 | Idempotency | Nice to have | Required |
 | Node restart | Picks up from last claimed ID | Re-processes recent window |
 | Job state | `available` -> `executing` -> `completed` | Stays `available` until pruned |
+| Failure | Retried with backoff, then discarded | Reported, not retried |
 | Locking | `FOR UPDATE SKIP LOCKED` | None |
 | Use case | Background work | Broadcast events |
 

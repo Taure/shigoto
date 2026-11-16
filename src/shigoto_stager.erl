@@ -2,10 +2,11 @@
 -moduledoc """
 Latency accelerator for delayed jobs. On a short interval it finds
 queues with work due to run now (a job's `scheduled_at` has elapsed,
-including a failed job rescheduled after its backoff) and issues a
-`pg_notify('shigoto_jobs_insert', Queue)` so the existing notifier
+including a `retryable` job whose backoff is over) and issues a
+`pg_notify(Channel, Queue)` on `shigoto_config:notify_channel/0` so the notifier
 wakes the matching queue immediately instead of waiting up to
-`poll_interval`.
+`poll_interval`. Fanout queues are left out: their jobs stay due for the whole
+window, and the notifier wakes no fanout queue.
 
 Uses `pg_try_advisory_xact_lock` so only one node stages in a
 multi-node deployment; the notification still reaches every node.
@@ -23,7 +24,6 @@ never crashes the supervision tree.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(STAGE_LOCK_ID, 839274629).
--define(CHANNEL, ~"shigoto_jobs_insert").
 %% A peer holds the lock for one pass, a few milliseconds of each interval, and
 %% its ticks drift against ours, so a follower misses now and then but not for a
 %% minute on end. At least ten passes, and at least a minute of them.
@@ -129,7 +129,11 @@ stage() ->
     Pool = shigoto_config:pool(),
     case due_queues(Pool) of
         {ok, Queues} ->
-            lists:foreach(fun(Queue) -> notify(Pool, Queue) end, Queues);
+            %% A fanout job stays due for as long as its window, and the
+            %% notifier wakes no fanout queue.
+            Fanout = [Name || {Name, _Concurrency, _Opts} <- shigoto_config:fanout_queues()],
+            _ = [notify(Pool, Queue) || Queue <- Queues, not lists:member(Queue, Fanout)],
+            ok;
         {error, _} ->
             ok
     end.
@@ -140,17 +144,19 @@ due_queues(Pool) ->
     SQL =
         ~"""
         SELECT DISTINCT queue FROM shigoto_jobs
-        WHERE state = 'available'
+        WHERE state IN ('available', 'retryable')
         AND scheduled_at <= now()
         AND depends_on = '{}'
         """,
     case shigoto_db:query(Pool, SQL, []) of
         #{rows := Rows} ->
-            {ok, [maps:get(queue, Row) || Row <- Rows]};
+            {ok, [Queue || #{queue := Queue} <- Rows, is_binary(Queue)]};
         {error, _} = Err ->
             Err
     end.
 
 notify(Pool, Queue) ->
-    _ = shigoto_db:query(Pool, ~"SELECT pg_notify($1, $2)", [?CHANNEL, Queue]),
+    _ = shigoto_db:query(Pool, ~"SELECT pg_notify($1, $2)", [
+        shigoto_config:notify_channel(), Queue
+    ]),
     ok.

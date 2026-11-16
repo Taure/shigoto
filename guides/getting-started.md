@@ -67,15 +67,102 @@ config :shigoto,
 | `queues` | `[{<<"default">>, 10}]` | Queue names with concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling for new jobs |
 | `prune_after_days` | `14` | Days before completed/discarded jobs are archived |
-| `shutdown_timeout` | `15000` | Milliseconds to wait for in-flight jobs during shutdown |
+| `shutdown_timeout` | `15000` | Milliseconds to wait for in-flight jobs during shutdown. A job still running after that is stopped and given back to the queue without using an attempt |
 | `cron` | `[]` | Cron entries (see the [Cron](cron.md) guide) |
 | `middleware` | `[]` | Global middleware chain (see [Middleware](middleware.md)) |
-| `encryption_key` | `undefined` | 32-byte AES-256-GCM key for encrypting job args |
-| `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs |
+| `encryption_key` | `undefined` | 32-byte AES-256-GCM key (see [Encryption](encryption.md)) |
+| `workers` | `undefined` | Modules allowed to run as workers (see [Security](security.md)) |
+| `heartbeat_interval` | `30000` | Heartbeat interval in ms for executing jobs; a job is stale after twice this without a heartbeat |
+| `rescue_interval` | `60000` | Milliseconds between the passes of a node that rescue stale jobs, release jobs waiting on a job that has ended, and settle finished batches. One process per node runs them, and only one node of a cluster at a time. Also how often a node that still looks for unique keys from before encryption checks whether one is left ([Encryption](encryption.md#unique-jobs)) |
+| `unrunnable_snooze_limit` | `20` | How many times in a row a node that cannot run a job (worker unknown there, or a resilience gate that does not answer) puts it back without using an attempt; the next time fails the attempt. `0` to `50` |
+| `on_discard_timeout` | `60000` | Milliseconds an `on_discard/2` callback may run before it is stopped (see [Workers](workers.md#on_discard-callback)) |
+| `unique_lock_limit` | `1000` | Advisory locks one `insert_all/1,2` call may take for its unique jobs, `1` to `5000`; a longer list is refused (see [Unique Jobs](uniqueness.md#opting-out-and-bulk-inserts)) |
+| `propagator` | `undefined` | Module that carries a trace context from insert to run (see [Context Propagation](context-propagation.md)) |
+| `on_dependency_failure` | `run` | What a waiting job does when a dependency fails, unless the job sets it (see [Dependencies](dependencies.md)) |
 | `load_shedding` | `undefined` | Seki load shedding config (see [Resilience](resilience.md)) |
 | `queue_weights` | `#{}` | Queue weight map for weighted polling |
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
 | `fanout_queues` | `[]` | Broadcast queues where all nodes process every job (see [Fanout Queues](fanout-queues.md)) |
+
+### Connection options
+
+`shigoto_db:start_pool/2` and the `notifier` map, which is the connection
+`LISTEN` runs on, read the same keys. They are the options of a minato
+connection, and what each does is in minato's
+[configuration guide](https://hexdocs.pm/minato/configuration.html):
+
+| Key | |
+|-----|---|
+| `host`, or `hostname` | A name or an address. `"localhost"` unless given |
+| `port` | `5432` unless given |
+| `database` | The name of the user unless given |
+| `user`, or `username` | Required |
+| `password` | Text, or a fun of no arguments that answers it |
+| `ssl` | `true` for TLS, with the certificate checked against the trust store of the operating system and for `host` |
+| `ssl_options` | Options for `ssl`, each in place of a default. Only with `ssl => true` |
+| `auth` | The methods the server may ask for. `[scram_sha_256]` accepts nothing else |
+| `channel_binding` | `require` ties SCRAM to the TLS session, or does not connect |
+| `timeout` | Milliseconds a statement has, a write has, and the server may send nothing for. `15000` unless given |
+| `connect_timeout` | Milliseconds to connect in, the TLS handshake included. `5000` unless given |
+| `cancel_timeout` | Milliseconds a cancelled statement has to say so. `5000` unless given |
+| `socket_options` | Options for the socket, such as `{send_timeout, Milliseconds}` |
+| `parameters` | Startup parameters, such as `#{<<"application_name">> => <<"my_app">>}` |
+| `transport` | `socket` unless given, or `inet` |
+| `prepared_statements` | How many statements a connection keeps parsed, `64` unless given. `0` behind a pooler that does not follow named statements |
+| `frame_opts` | `#{max_message_length => Bytes}`, for a single message above 64 MB |
+| `pool_size` | `start_pool/2` only: the most connections the pool holds. `10` unless given |
+
+`host`, `database`, `user` and `password` are taken as strings, binaries or
+atoms. Everything else is handed to minato as it was written.
+
+Any other key is left out, and the connection is opened as if it had not been
+given: `sslmode => require`, or `ssl_optons` for `ssl_options`, changes
+nothing. Each time a pool or a listener is started with such keys, shigoto
+logs one warning that names them, `shigoto_connection_keys_not_read`. A later
+major release will refuse them, so take them out when you see it. The keys of
+a kura repo's configuration are the exception and are left out without the
+warning, so that the repo's map can be given to shigoto as it is: `pool`,
+`pool_module`, `driver_module`, `backend`, `dialect`, `read_only`, `replicas`,
+`uuid_version`, `encryption`, `keyring`, `queue_target` and `queue_interval`.
+
+The setting for a network anybody else is on, as minato's guide has it:
+
+```erlang
+#{ssl => true, auth => [scram_sha_256], channel_binding => require}
+```
+
+`timeout` is the time every statement on the pool has, the ones shigoto runs
+for a queue and for the heartbeat of a running job among them. A longer one
+is also how long a connection that has stopped answering holds each of those
+up, so raise it for the statement that needs it (`shigoto_db:query/4` takes a
+`timeout`) before raising it for the pool.
+
+minato refuses a connection it would not open as asked, before it opens a
+socket: `ssl_options` without `ssl => true`, an `ssl` that is not a boolean,
+a `timeout` that is not a number, a `channel_binding` or an `auth` it does not
+know, `ssl_options` that resume a TLS session, a map without `user`.
+`shigoto_db:start_pool/2` then answers `{error, {invalid_option, Key}}`, or
+`{error, {missing_option, user}}`, and starts no pool. With a `notifier`
+refused that way the application does not start:
+`{shigoto_config, {invalid, notifier, {invalid_option, Key}}}`. Such a
+notifier could never listen. One whose server cannot be reached is another
+matter: the application starts, the notifier logs
+`shigoto_notifier_not_listening` once and keeps asking, and the queues poll
+meanwhile.
+
+### Stopping a node
+
+When the application stops, each queue waits up to `shutdown_timeout` for its
+running jobs, one queue after the other, and stops claiming. Jobs keep their
+heartbeat for all of that time, so no other node takes them over. A job still
+running at the end is stopped and given back: it is `available` again and the
+interrupted run uses no attempt.
+
+The node has to allow that much time. `kernel`'s `shutdown_timeout` is
+`infinity` unless set; if you set it, keep it above
+`shigoto_config:shutdown_budget()`. Below that the node kills shigoto in the
+middle, the cut-off jobs wait for the stale-job rescue, and shigoto logs
+`shigoto_shutdown_cut_short` at boot.
 
 ## Run the Migration
 
@@ -217,6 +304,18 @@ shigoto:insert_all([
 ])
 ```
 
+`insert_all/1,2` answers one job per job given, in the order given. A unique
+job in the list is deduplicated as `insert/1,2` would: its place in the answer
+holds the job already there. See [Unique Jobs](uniqueness.md). A `depends_on`
+that names a job that does not exist answers
+`{error, {missing_dependencies, Ids}}`.
+
+An insert PostgreSQL refuses (a constraint or trigger of your own, a full
+disk) answers `{error, {pgsql_error, Fields}}`. `Fields` holds only `code`,
+`constraint`, `severity` and `severity_non_localised`: PostgreSQL's `message`
+and `detail` can quote the row, args included, and the reason of a failed
+insert tends to end up in a log.
+
 ## Transactional Enqueue
 
 With `{repo, Repo}`, a job inserted inside the repo's transaction is part of
@@ -269,6 +368,35 @@ shigoto:drain_queue(<<"default">>, #{timeout => 30000}).
 :shigoto.drain_queue("default")
 :shigoto.drain_queue("default", %{timeout: 30000})
 ```
+
+## Connection Poolers
+
+shigoto keeps nothing on a session between statements: its advisory locks are
+transaction scoped, the only setting it changes is made with `SET LOCAL`, and
+whatever takes more than one statement runs in a transaction. It runs behind a
+pooler in session mode, and behind PgBouncer in transaction mode with two
+conditions:
+
+- `max_prepared_statements` is above 0 (PgBouncer 1.21 or later). minato
+  prepares the statements it runs more than once, and PgBouncer has to know
+  them to hand a transaction to another server connection. With it at 0, jobs
+  fail to move between states.
+- `notifier` points at PostgreSQL itself, not at the pooler. `LISTEN` belongs
+  to a session, so through transaction mode no notification arrives. The
+  `notifier` map has its own `host` and `port` for this. Without `notifier`,
+  queues poll.
+
+```erlang
+{shigoto, [
+    {pool, my_pool},                       %% a minato pool on PgBouncer, 6432
+    {notifier, #{host => "db.internal", port => 5432,
+                 database => "mydb", user => "shigoto", password => "secret"}}
+]}
+```
+
+The lifecycle suite passes through PgBouncer 1.26 in transaction mode:
+`docker compose --profile pgbouncer up -d --wait`, then
+`SHIGOTO_TEST_DB_PORT=5557 SHIGOTO_TEST_LISTEN_PORT=5556 rebar3 ct --suite test/shigoto_lifecycle_SUITE`.
 
 ## Next Steps
 

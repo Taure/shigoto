@@ -6,6 +6,9 @@
     all/0,
     init_per_suite/1,
     end_per_suite/1,
+    groups/0,
+    init_per_group/2,
+    end_per_group/2,
     init_per_testcase/2,
     end_per_testcase/2
 ]).
@@ -50,7 +53,6 @@ all() ->
         cron_never_moves_the_last_run_back,
         cron_telemetry_fires_after_the_pass_commits,
         cron_logs_no_row_values,
-        cron_encrypts_entry_args,
         cron_resets_a_last_run_far_ahead,
         cron_skips_a_bad_entry,
         cron_warns_once_per_skipped_entry,
@@ -61,8 +63,30 @@ all() ->
         cron_warns_when_its_lock_is_held_elsewhere,
         cron_does_not_warn_while_a_peer_schedules,
         stager_warns_when_its_lock_is_held_elsewhere,
-        stager_notifies_a_due_queue
+        stager_notifies_a_due_queue,
+        {group, frames_v1},
+        {group, frames_v2}
     ].
+
+%% The cases that store something encrypted run once with each
+%% `encryption_write_format`: `v1`, the default, and `v2`.
+groups() ->
+    [{frames_v1, [], encrypting()}, {frames_v2, [], encrypting()}].
+
+encrypting() ->
+    [
+        cron_encrypts_entry_args
+    ].
+
+init_per_group(frames_v1, Config) ->
+    application:set_env(shigoto, encryption_write_format, v1),
+    Config;
+init_per_group(frames_v2, Config) ->
+    application:set_env(shigoto, encryption_write_format, v2),
+    Config.
+
+end_per_group(_Group, _Config) ->
+    application:unset_env(shigoto, encryption_write_format).
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(minato),

@@ -4,7 +4,8 @@ Brings the schema up to date at boot, and holds the queues back until it is.
 
 `boot/1` runs `shigoto_migration:up/1` up to 5 times, 1 to 5 seconds apart
 (jittered, so nodes that boot together do not retry in step). An error a retry
-cannot fix (SQLSTATE class 42, such as `42501 insufficient_privilege`) skips the
+cannot fix (SQLSTATE class 42, such as `42501 insufficient_privilege`, or
+`{invalid_index, Names}` for an index an operator has to rebuild) skips the
 remaining attempts. When the schema is still not current, the application
 starts with an empty queue supervisor, logs `shigoto_migration_pending` at error
 level, emits `[shigoto, migration, pending]`, and this process retries every 30
@@ -64,6 +65,7 @@ boot(Pool, Attempt) ->
     end.
 
 retryable({pgsql_error, #{code := <<"42", _/binary>>}}) -> false;
+retryable({invalid_index, _}) -> false;
 retryable(_Reason) -> true.
 
 -doc """

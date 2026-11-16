@@ -16,7 +16,7 @@ start_link(Queues) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, Queues).
 
 -doc false.
--spec child_specs([{binary(), pos_integer()}]) -> [supervisor:child_spec()].
+-spec child_specs([{term(), term()}]) -> [supervisor:child_spec()].
 child_specs(Queues) ->
     ShutdownMs = shutdown_ms(),
     StandardChildren = [queue_spec(Queue, Concurrency) || {Queue, Concurrency} <- Queues],
@@ -32,7 +32,7 @@ child_specs(Queues) ->
     StandardChildren ++ FanoutChildren.
 
 -doc false.
--spec queue_spec(binary(), pos_integer()) -> supervisor:child_spec().
+-spec queue_spec(term(), term()) -> supervisor:child_spec().
 queue_spec(Queue, Concurrency) ->
     #{
         id => {shigoto_queue, Queue},

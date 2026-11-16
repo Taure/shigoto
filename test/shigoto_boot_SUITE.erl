@@ -12,7 +12,14 @@
     boot_does_not_retry_a_refused_migration/1,
     the_migrator_stops_before_the_queue_supervisor/1,
     retries_asked_together_run_once/1,
-    an_unstamped_schema_boots_with_a_dml_role/1
+    an_unstamped_schema_boots_with_a_dml_role/1,
+    the_heartbeat_stops_after_the_queues_and_executors/1,
+    a_node_that_cuts_the_shutdown_short_is_warned_about/1,
+    a_node_that_requires_encryption_without_a_key_does_not_start/1,
+    a_node_whose_notifier_minato_will_not_connect_with_does_not_start/1,
+    a_node_whose_notifier_cannot_reach_its_server_starts/1,
+    a_node_with_a_key_and_no_list_of_workers_is_warned_about/1,
+    every_column_is_an_atom_once_the_database_module_is_loaded/1
 ]).
 
 -define(POOL, shigoto_test_pool).
@@ -26,7 +33,14 @@ all() ->
         boot_does_not_retry_a_refused_migration,
         the_migrator_stops_before_the_queue_supervisor,
         retries_asked_together_run_once,
-        an_unstamped_schema_boots_with_a_dml_role
+        an_unstamped_schema_boots_with_a_dml_role,
+        the_heartbeat_stops_after_the_queues_and_executors,
+        a_node_that_cuts_the_shutdown_short_is_warned_about,
+        a_node_that_requires_encryption_without_a_key_does_not_start,
+        a_node_whose_notifier_minato_will_not_connect_with_does_not_start,
+        a_node_whose_notifier_cannot_reach_its_server_starts,
+        a_node_with_a_key_and_no_list_of_workers_is_warned_about,
+        every_column_is_an_atom_once_the_database_module_is_loaded
     ].
 
 init_per_suite(Config) ->
@@ -56,7 +70,189 @@ end_per_testcase(_TestCase, _Config) ->
     _ = persistent_term:erase({shigoto_migrator, pending}),
     application:unset_env(shigoto, notifier),
     application:unset_env(shigoto, fanout_queues),
+    application:unset_env(shigoto, shutdown_timeout),
+    application:unset_env(kernel, shutdown_timeout),
+    application:unset_env(shigoto, require_encrypted),
+    application:unset_env(shigoto, encryption_key),
+    application:unset_env(shigoto, workers),
     ok = shigoto_migration:up(?POOL).
+
+%% A key that was meant to come from a secret and did not.
+a_node_that_requires_encryption_without_a_key_does_not_start(_Config) ->
+    application:set_env(shigoto, require_encrypted, true),
+    ?assertMatch(
+        {error,
+            {shigoto, {
+                {shigoto_config, {invalid, require_encrypted, no_encryption_key}},
+                {shigoto_app, start, _}
+            }}},
+        application:ensure_all_started(shigoto)
+    ).
+
+%% TLS options without `ssl => true` are a connection minato does not open,
+%% so this notifier could never listen.
+a_node_whose_notifier_minato_will_not_connect_with_does_not_start(_Config) ->
+    application:set_env(
+        shigoto, notifier, (connection())#{ssl_options => [{verify, verify_peer}]}
+    ),
+    ?assertMatch(
+        {error,
+            {shigoto, {
+                {shigoto_config, {invalid, notifier, {invalid_option, ssl_options}}},
+                {shigoto_app, start, _}
+            }}},
+        application:ensure_all_started(shigoto)
+    ).
+
+%% Nothing listens on the port. That is a server to wait for, not a setting
+%% to refuse: the node starts, its queues run, and the notifier keeps asking.
+a_node_whose_notifier_cannot_reach_its_server_starts(_Config) ->
+    application:set_env(shigoto, notifier, (connection())#{port => 1}),
+    _ = minato:stop_listener(shigoto_listener),
+    ok = shigoto_log_probe:attach(),
+    try
+        {ok, _} = application:ensure_all_started(shigoto),
+        ok = wait_for(fun() -> not_listening_reported() =/= [] end, 50),
+        ?assertNot(notifier_listening()),
+        ?assert(is_pid(whereis(shigoto_listener))),
+        ?assertMatch(
+            [{{shigoto_queue, ~"boot_probe"}, Pid, _, _}] when is_pid(Pid),
+            supervisor:which_children(shigoto_queue_sup)
+        )
+    after
+        shigoto_log_probe:detach(),
+        minato:stop_listener(shigoto_listener)
+    end.
+
+not_listening_reported() ->
+    receive
+        {log, warning, #{msg := ~"shigoto_notifier_not_listening", reason := Reason}} ->
+            [Reason | not_listening_reported()]
+    after 0 -> []
+    end.
+
+a_node_with_a_key_and_no_list_of_workers_is_warned_about(_Config) ->
+    Warned = fun() ->
+        {ok, _} = application:ensure_all_started(shigoto),
+        Reports = unlisted_reports(),
+        ok = application:stop(shigoto),
+        Reports
+    end,
+    ok = shigoto_log_probe:attach(),
+    try
+        ?assertEqual([], Warned()),
+        application:set_env(shigoto, encryption_key, binary:copy(<<7>>, 32)),
+        ?assertMatch([#{action := _}], Warned()),
+        application:set_env(shigoto, workers, [shigoto_test_worker]),
+        ?assertEqual([], Warned())
+    after
+        shigoto_log_probe:detach()
+    end.
+
+unlisted_reports() ->
+    receive
+        {log, warning, #{msg := ~"shigoto_workers_not_listed"} = Report} ->
+            [Report | unlisted_reports()]
+    after 300 -> []
+    end.
+
+%% A client that makes no atom for a name the server sends answers a column
+%% under an atom only where the atom exists already. A node that has loaded
+%% nothing of shigoto but `shigoto_db` stands for the worst case: a row handed
+%% to a module that is loaded after the row was read.
+every_column_is_an_atom_once_the_database_module_is_loaded(_Config) ->
+    Tables = [~"shigoto_batches", ~"shigoto_cron", ~"shigoto_jobs", ~"shigoto_jobs_archive"],
+    %% A table the migration gains has to be named here, and its columns below.
+    #{rows := Found} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT table_name::text AS name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name LIKE 'shigoto\_%'
+        ORDER BY 1
+        """,
+        []
+    ),
+    ?assertEqual(Tables, [Name || #{name := Name} <- Found]),
+    #{rows := Rows} = shigoto_db:query(
+        ?POOL,
+        ~"""
+        SELECT DISTINCT column_name::text AS name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name::text = ANY($1::text[])
+        ORDER BY 1
+        """,
+        [Tables]
+    ),
+    Columns = [Name || #{name := Name} <- Rows],
+    ?assert(length(Columns) > 30),
+    {ok, Peer, _Node} = peer:start_link(#{
+        connection => standard_io, args => code_path_args(code:get_path())
+    }),
+    try
+        {module, shigoto_db} = peer:call(Peer, code, ensure_loaded, [shigoto_db]),
+        ?assertEqual([], [Name || Name <- Columns, not is_atom_on(Peer, Name)]),
+        Named = [
+            atom_to_binary(Column)
+         || Column <- named_columns(peer:call(Peer, shigoto_db, columns, []))
+        ],
+        ?assertEqual(Columns, lists:sort(Named))
+    after
+        peer:stop(Peer)
+    end.
+
+-spec code_path_args([string()]) -> [string()].
+code_path_args([]) ->
+    [];
+code_path_args([Dir | Dirs]) ->
+    case filelib:is_dir(Dir) of
+        true -> ["-pa", Dir | code_path_args(Dirs)];
+        false -> code_path_args(Dirs)
+    end.
+
+-spec named_columns(term()) -> [atom()].
+named_columns(Columns) when is_list(Columns) ->
+    [Column || Column <- Columns, is_atom(Column)].
+
+is_atom_on(Peer, Name) ->
+    try peer:call(Peer, erlang, binary_to_existing_atom, [Name]) of
+        Atom -> is_atom(Atom)
+    catch
+        error:badarg -> false
+    end.
+
+%% A supervisor stops its children last started first.
+the_heartbeat_stops_after_the_queues_and_executors(_Config) ->
+    {ok, _} = application:ensure_all_started(shigoto),
+    StopOrder = [Id || {Id, _Pid, _Type, _Modules} <- supervisor:which_children(shigoto_sup)],
+    Before = fun(First, Then) ->
+        lists:member(Then, lists:dropwhile(fun(Id) -> Id =/= First end, StopOrder))
+    end,
+    ?assert(Before(shigoto_queue_sup, shigoto_executor_sup)),
+    ?assert(Before(shigoto_executor_sup, shigoto_heartbeat)),
+    ?assertEqual(shigoto_heartbeat, lists:last(StopOrder)).
+
+a_node_that_cuts_the_shutdown_short_is_warned_about(_Config) ->
+    application:set_env(shigoto, shutdown_timeout, 15000),
+    ?assertEqual(16000 + shigoto_executor_sup:stop_timeout(), shigoto_config:shutdown_budget()),
+    ok = shigoto_log_probe:attach(),
+    try
+        application:set_env(kernel, shutdown_timeout, 60000),
+        {ok, _} = application:ensure_all_started(shigoto),
+        receive
+            {log, warning, #{msg := ~"shigoto_shutdown_cut_short"} = Unexpected} ->
+                ct:fail({warned_with_time_to_stop, Unexpected})
+        after 200 -> ok
+        end,
+        ok = application:stop(shigoto),
+        application:set_env(kernel, shutdown_timeout, 10000),
+        {ok, _} = application:ensure_all_started(shigoto),
+        receive
+            {log, warning, #{msg := ~"shigoto_shutdown_cut_short"} = Report} ->
+                ?assertMatch(#{kernel_shutdown_timeout := 10000, needed := 24000}, Report)
+        after 2000 -> ct:fail(no_shutdown_warning)
+        end
+    after
+        shigoto_log_probe:detach()
+    end.
 
 queues_wait_for_the_migration(_Config) ->
     #{} = shigoto_db:query(?POOL, ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto 5'", []),
@@ -76,7 +272,7 @@ queues_wait_for_the_migration(_Config) ->
     ok = wait_for(fun() -> whereis(shigoto_migrator) =:= undefined end, 50),
     ?assertEqual(not_running, shigoto_migrator:retry_now()),
     ?assertMatch(
-        #{rows := [#{version := ~"shigoto 6"}]},
+        #{rows := [#{version := ~"shigoto 7"}]},
         shigoto_db:query(?POOL, ~"SELECT obj_description('shigoto_jobs'::regclass) AS version", [])
     ).
 
@@ -290,8 +486,7 @@ connection() ->
 
 notifier_listening() ->
     case sys:get_state(shigoto_notifier) of
-        {state, undefined} -> false;
-        {state, _Listener} -> true
+        State when is_tuple(State) -> element(2, State) =/= undefined
     end.
 
 read_the_archive() ->

@@ -204,3 +204,73 @@ alias_hourly_test() ->
     {ok, Expr} = shigoto_cron_parser:parse(~"@hourly"),
     ?assert(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 0, 0}})),
     ?assertNot(shigoto_cron_parser:matches(Expr, {{2026, 3, 18}, {14, 30, 0}})).
+
+%%----------------------------------------------------------------------
+%% What a field holds
+%%----------------------------------------------------------------------
+
+every_field_has_its_own_bounds_test() ->
+    ?assertEqual(
+        {ok, #{
+            minute => {values, lists:seq(0, 59)},
+            hour => {values, lists:seq(0, 23)},
+            dom => {values, lists:seq(1, 31)},
+            month => {values, lists:seq(1, 12)},
+            dow => {values, lists:seq(0, 6)}
+        }},
+        shigoto_cron_parser:parse(~"*/1 */1 */1 */1 */1")
+    ).
+
+a_value_is_kept_as_written_test() ->
+    ?assertEqual(
+        {ok, #{
+            minute => {values, [5]},
+            hour => {values, lists:seq(10, 20)},
+            dom => {values, [1, 15]},
+            month => {values, [2, 4, 6]},
+            dow => star
+        }},
+        shigoto_cron_parser:parse(~"5 10-20 15/3,1 2-6/2 *")
+    ).
+
+a_value_outside_its_field_is_brought_to_the_bound_test() ->
+    ?assertEqual(
+        {ok, #{
+            minute => {values, [59]},
+            hour => {values, lists:seq(20, 23)},
+            dom => {values, [1]},
+            month => {values, [12]},
+            dow => {values, [0, 3, 6]}
+        }},
+        shigoto_cron_parser:parse(~"70 20-30 0 13-40/5 0-9/3")
+    ).
+
+an_alias_is_its_expression_test() ->
+    [
+        ?assertEqual(shigoto_cron_parser:parse(Expression), shigoto_cron_parser:parse(Alias))
+     || {Alias, Expression} <- [
+            {~"@yearly", ~"0 0 1 1 *"},
+            {~"@annually", ~"0 0 1 1 *"},
+            {~"@monthly", ~"0 0 1 * *"},
+            {~"@weekly", ~"0 0 * * 0"},
+            {~"@daily", ~"0 0 * * *"},
+            {~"@midnight", ~"0 0 * * *"},
+            {~"@hourly", ~"0 * * * *"}
+        ]
+    ],
+    ?assertMatch(
+        {ok, #{dom := {values, [1]}, month := {values, [1]}}},
+        shigoto_cron_parser:parse(~"@annually")
+    ),
+    ?assertMatch(
+        {ok, #{dom := star, hour := {values, [0]}}}, shigoto_cron_parser:parse(~"@midnight")
+    ).
+
+what_cannot_be_parsed_is_named_test() ->
+    ?assertEqual({error, {bad_field_count, 3}}, shigoto_cron_parser:parse(~"* * *")),
+    ?assertEqual({error, {bad_field_count, 6}}, shigoto_cron_parser:parse(~"* * * * * *")),
+    ?assertEqual({error, {bad_integer, ~"abc"}}, shigoto_cron_parser:parse(~"abc * * * *")),
+    ?assertEqual({error, {bad_integer, ~"x"}}, shigoto_cron_parser:parse(~"1-x * * * *")),
+    ?assertEqual({error, {bad_step, 0}}, shigoto_cron_parser:parse(~"*/0 * * * *")),
+    ?assertEqual({error, {bad_step, 0}}, shigoto_cron_parser:parse(~"1-5/0 * * * *")),
+    ?assertEqual({error, {bad_step, -2}}, shigoto_cron_parser:parse(~"* */-2 * * *")).

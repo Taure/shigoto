@@ -1,6 +1,5 @@
 -module(shigoto_bench_SUITE).
 -behaviour(ct_suite).
--include_lib("stdlib/include/assert.hrl").
 
 -export([
     all/0,
@@ -16,6 +15,7 @@
     bench_insert_bulk_100/1,
     bench_insert_bulk_1000/1,
     bench_insert_unique/1,
+    bench_insert_bulk_100_unique/1,
     bench_claim_and_complete/1,
     bench_claim_and_complete_concurrent/1,
     bench_full_lifecycle/1,
@@ -37,6 +37,7 @@ groups() ->
             bench_insert_bulk_100,
             bench_insert_bulk_1000,
             bench_insert_unique,
+            bench_insert_bulk_100_unique,
             bench_claim_and_complete,
             bench_claim_and_complete_concurrent,
             bench_full_lifecycle,
@@ -68,32 +69,32 @@ end_per_testcase(_TestCase, _Config) ->
 %% Insert benchmarks
 %%----------------------------------------------------------------------
 
-bench_insert_single(_Config) ->
+bench_insert_single(Config) ->
     N = 1000,
     {Time, _} = timer:tc(fun() ->
         insert_n(N)
     end),
-    report(~"insert_single", N, Time).
+    report(Config, ~"insert_single", N, Time).
 
-bench_insert_bulk_100(_Config) ->
+bench_insert_bulk_100(Config) ->
     Batches = 100,
     BatchSize = 100,
     N = Batches * BatchSize,
     {Time, _} = timer:tc(fun() ->
         insert_bulk(Batches, BatchSize)
     end),
-    report(~"insert_bulk_100", N, Time).
+    report(Config, ~"insert_bulk_100", N, Time).
 
-bench_insert_bulk_1000(_Config) ->
+bench_insert_bulk_1000(Config) ->
     Batches = 10,
     BatchSize = 1000,
     N = Batches * BatchSize,
     {Time, _} = timer:tc(fun() ->
         insert_bulk(Batches, BatchSize)
     end),
-    report(~"insert_bulk_1000", N, Time).
+    report(Config, ~"insert_bulk_1000", N, Time).
 
-bench_insert_unique(_Config) ->
+bench_insert_unique(Config) ->
     N = 1000,
     Unique = #{keys => [worker, args], states => [available]},
     {Time, _} = timer:tc(fun() ->
@@ -108,9 +109,28 @@ bench_insert_unique(_Config) ->
             lists:seq(1, N)
         )
     end),
-    report(~"insert_unique", N, Time).
+    report(Config, ~"insert_unique", N, Time).
 
-bench_insert_with_encryption(_Config) ->
+bench_insert_bulk_100_unique(Config) ->
+    Batches = 10,
+    BatchSize = 100,
+    N = Batches * BatchSize,
+    Unique = #{keys => [worker, args], states => [available]},
+    {Time, _} = timer:tc(fun() ->
+        lists:foreach(
+            fun(B) ->
+                Jobs = [
+                    #{worker => shigoto_test_worker, args => #{~"b" => B, ~"i" => I}}
+                 || I <- lists:seq(1, BatchSize)
+                ],
+                {ok, _} = shigoto_repo:insert_all(?POOL, Jobs, #{unique => Unique})
+            end,
+            lists:seq(1, Batches)
+        )
+    end),
+    report(Config, ~"insert_bulk_100_unique", N, Time).
+
+bench_insert_with_encryption(Config) ->
     Key = crypto:strong_rand_bytes(32),
     application:set_env(shigoto, encryption_key, Key),
     N = 1000,
@@ -118,28 +138,28 @@ bench_insert_with_encryption(_Config) ->
         insert_n(N)
     end),
     application:set_env(shigoto, encryption_key, undefined),
-    report(~"insert_encrypted", N, Time).
+    report(Config, ~"insert_encrypted", N, Time).
 
-bench_insert_with_deps(_Config) ->
+bench_insert_with_deps(Config) ->
     N = 500,
     {Time, _} = timer:tc(fun() ->
         insert_chain(N)
     end),
-    report(~"insert_with_deps", N, Time).
+    report(Config, ~"insert_with_deps", N, Time).
 
 %%----------------------------------------------------------------------
 %% Claim + complete benchmarks
 %%----------------------------------------------------------------------
 
-bench_claim_and_complete(_Config) ->
+bench_claim_and_complete(Config) ->
     N = 1000,
     insert_n(N),
     {Time, _} = timer:tc(fun() ->
         claim_and_complete_loop(N)
     end),
-    report(~"claim_complete", N, Time).
+    report(Config, ~"claim_complete", N, Time).
 
-bench_claim_and_complete_concurrent(_Config) ->
+bench_claim_and_complete_concurrent(Config) ->
     N = 2000,
     Workers = 4,
     PerWorker = N div Workers,
@@ -155,26 +175,26 @@ bench_claim_and_complete_concurrent(_Config) ->
         ],
         wait_all(Pids)
     end),
-    report(~"claim_complete_4x", N, Time).
+    report(Config, ~"claim_complete_4x", N, Time).
 
 %%----------------------------------------------------------------------
 %% Full lifecycle benchmarks
 %%----------------------------------------------------------------------
 
-bench_full_lifecycle(_Config) ->
+bench_full_lifecycle(Config) ->
     N = 500,
     {Time, _} = timer:tc(fun() ->
         insert_n(N),
         drain_all(~"default", N)
     end),
-    report(~"full_lifecycle", N, Time).
+    report(Config, ~"full_lifecycle", N, Time).
 
-bench_full_lifecycle_10_queues(_Config) ->
+bench_full_lifecycle_10_queues(Config) ->
     N = 1000,
     Queues = [<<"q", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 10)],
     {Time, _} = timer:tc(fun() ->
         lists:foreach(
-            fun(I) ->
+            fun(I) when is_integer(I) ->
                 Q = lists:nth((I rem 10) + 1, Queues),
                 shigoto_repo:insert_job(
                     ?POOL,
@@ -189,13 +209,13 @@ bench_full_lifecycle_10_queues(_Config) ->
             Queues
         )
     end),
-    report(~"lifecycle_10_queues", N, Time).
+    report(Config, ~"lifecycle_10_queues", N, Time).
 
 %%----------------------------------------------------------------------
 %% Global concurrency benchmark
 %%----------------------------------------------------------------------
 
-bench_global_concurrency_check(_Config) ->
+bench_global_concurrency_check(Config) ->
     N = 1000,
     lists:foreach(
         fun(I) ->
@@ -210,13 +230,13 @@ bench_global_concurrency_check(_Config) ->
     {ok, Jobs} = shigoto_repo:claim_jobs(?POOL, ~"default", N),
     {Time, _} = timer:tc(fun() ->
         lists:foreach(
-            fun(Job) ->
+            fun(#{} = Job) ->
                 shigoto_resilience:check_global_concurrency(shigoto_global_conc_worker, Job)
             end,
             Jobs
         )
     end),
-    report(~"global_conc_check", length(Jobs), Time).
+    report(Config, ~"global_conc_check", length(Jobs), Time).
 
 %%----------------------------------------------------------------------
 %% Helpers
@@ -252,14 +272,14 @@ insert_chain(N) ->
 insert_chain(0, _PrevId) ->
     ok;
 insert_chain(N, undefined) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"step" => N}},
         #{}
     ),
     insert_chain(N - 1, maps:get(id, Job));
 insert_chain(N, PrevId) ->
-    {ok, Job} = shigoto_repo:insert_job(
+    {ok, #{} = Job} = shigoto_repo:insert_job(
         ?POOL,
         #{worker => shigoto_test_worker, args => #{~"step" => N}, depends_on => [PrevId]},
         #{}
@@ -274,8 +294,8 @@ claim_and_complete_loop(Remaining) ->
             ok;
         {ok, Jobs} ->
             lists:foreach(
-                fun(Job) ->
-                    shigoto_repo:complete_job(?POOL, maps:get(id, Job))
+                fun(#{id := Id}) when is_integer(Id) ->
+                    shigoto_repo:complete_job(?POOL, Id)
                 end,
                 Jobs
             ),
@@ -293,7 +313,7 @@ drain_all(Queue, Remaining, Done) ->
             ok;
         {ok, Jobs} ->
             lists:foreach(
-                fun(Job) ->
+                fun(#{} = Job) ->
                     shigoto_executor:execute_sync(Job, ?POOL, 5000)
                 end,
                 Jobs
@@ -310,7 +330,7 @@ wait_all([Pid | Rest]) ->
         ct:fail(timeout)
     end.
 
-report(Name, N, TimeMicros) ->
+report(Config, Name, N, TimeMicros) ->
     TimeMs = TimeMicros / 1000,
     TimeSec = TimeMicros / 1_000_000,
     OpsPerSec = round(N / TimeSec),
@@ -322,7 +342,13 @@ report(Name, N, TimeMicros) ->
         [Name, TotalStr, N, AvgStr, OpsPerSec]
     ),
     ct:pal("~ts", [Line]),
-    file:write_file("/tmp/shigoto_bench.txt", [Line, "\n"], [append]).
+    ok = file:write_file(results_file(Config), [Line, "\n"], [append]).
+
+results_file(Config) ->
+    Path = io_lib:format("~ts/shigoto_bench.txt", [proplists:get_value(priv_dir, Config)]),
+    case unicode:characters_to_binary(Path) of
+        File when is_binary(File) -> File
+    end.
 
 cleanup() ->
     shigoto_db:query(?POOL, ~"DELETE FROM shigoto_jobs", []),

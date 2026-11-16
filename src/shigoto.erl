@@ -44,9 +44,15 @@ shigoto:insert_all([
     callback_args => #{<<\"report\">> => 1}
 }),
 BatchId = maps:get(id, Batch),
-shigoto:insert(#{worker => step1, args => #{}, batch => BatchId}),
-shigoto:insert(#{worker => step2, args => #{}, batch => BatchId}).
+shigoto:insert_all([
+    #{worker => step1, args => #{}, batch => BatchId},
+    #{worker => step2, args => #{}, batch => BatchId}
+]).
 ```
+
+Insert a batch's jobs in one `insert_all/1,2` or one `transaction/1`: a batch
+only knows the jobs inserted so far, so its callback can run before a job
+that is inserted later. See `m:shigoto_batch`.
 
 ## Transactional Enqueue
 
@@ -82,6 +88,15 @@ Jobs returned by `insert/1,2`, `insert_all/1,2` and `get_job/1` are the stored
 row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
 `deps_results`) are JSON text binaries; decode them with `json:decode/1`.
 `perform/1` always gets `args` decoded.
+
+## Reserved keys
+
+In a job's `meta` and in a batch's `callback_args`, every key that starts with
+`_shigoto` belongs to shigoto, as does `_batch_event` in `callback_args`. An
+insert whose `meta` sets one answers `{error, {reserved_key, meta, Key}}`, and
+`new_batch/1` answers `{error, {reserved_key, callback_args, Key}}`. The one a
+caller may set is `_shigoto_carrier`, to hand over a carrier by hand
+(`m:shigoto_propagator`). Do not rely on ones that are not documented.
 """.
 
 -define(TXN_KEY, '$shigoto_txn').
@@ -107,21 +122,48 @@ row as a map. The JSONB columns (`args`, `meta`, `errors`, `result`,
     drain_queue/2,
     pause_queue/1,
     resume_queue/1,
+    paused_queues/0,
     add_queue/2,
     remove_queue/1,
     new_batch/1,
     get_batch/1,
     report_progress/2,
     get_job/1,
+    reencrypt/0,
+    reencrypt/1,
     health/0
 ]).
+
+-export_type([reencrypt_counts/0]).
+
+-doc """
+What `reencrypt/0,1` did to the values of one table: `rewritten` in the current
+form, `skipped` because the row changed while it was read, `failed` because the
+value does not open under any configured key. `scanned` counts rows.
+""".
+-type reencrypt_counts() :: #{
+    scanned := non_neg_integer(),
+    rewritten := non_neg_integer(),
+    skipped := non_neg_integer(),
+    failed := non_neg_integer()
+}.
 
 -doc "Insert a job with default options.".
 -spec insert(map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams) ->
     insert(JobParams, #{}).
 
--doc "Insert a job with options. Params: worker, args, queue, priority, scheduled_at, max_attempts, unique, tags, batch.".
+-doc """
+Insert a job with options. Params: worker, args, meta, queue, priority,
+scheduled_at, max_attempts, unique, tags, batch, depends_on,
+on_dependency_failure. `meta` keys that start with `_shigoto` are reserved:
+setting one, other than `_shigoto_carrier`, answers
+`{error, {reserved_key, meta, Key}}`.
+
+An insert PostgreSQL refuses answers `{error, {pgsql_error, Fields}}` with
+`Fields` cut down by `shigoto_db:reduced/1` to `code`, `constraint` and the
+severity: its `message` and `detail` can quote the row, args included.
+""".
 -spec insert(map(), map()) -> {ok, map()} | {ok, {conflict, map()}} | {error, term()}.
 insert(JobParams, Opts) ->
     case shigoto_config:testing_mode() of
@@ -145,18 +187,37 @@ insert(JobParams, Opts) ->
 insert_all(JobParamsList) ->
     insert_all(JobParamsList, #{}).
 
--doc "Bulk insert multiple jobs with options.".
+-doc """
+Bulk insert multiple jobs with options. Answers one job per job given, in the
+order given.
+
+A job that is unique (its worker exports `unique/0`, or `Opts` has a `unique`
+map) is inserted as `insert/1,2` inserts it, and the call is then one
+transaction: all of it is inserted or none of it. Where such a job is a
+duplicate, the answer holds the job that is already there in its place, and no
+`[shigoto, job, inserted]` is emitted for it. `unique => false` in `Opts`
+inserts every job without looking.
+
+The unique jobs of one call may take `unique_lock_limit` advisory locks
+between them (1000 unless set, `shigoto_config:unique_lock_limit/0` says how
+many a job takes). A call that needs more answers
+`{error, {too_many_unique_locks, Needed, Limit}}` with nothing inserted: split
+the list and insert each part with a call of its own.
+
+A call PostgreSQL refuses answers `{error, {pgsql_error, Fields}}`, cut down
+as `insert/2` cuts it.
+""".
 -spec insert_all([map()], map()) -> {ok, [map()]} | {error, term()}.
 insert_all(JobParamsList, Opts) ->
     case shigoto_config:testing_mode() of
         disabled ->
             Pool = txn_pool(),
-            case shigoto_repo:insert_all(Pool, JobParamsList, Opts) of
-                {ok, Jobs} ->
-                    lists:foreach(fun emit_or_defer/1, Jobs),
-                    {ok, Jobs};
-                Other ->
-                    Other
+            case shigoto_repo:placed_all(Pool, JobParamsList, Opts) of
+                {ok, Placed} ->
+                    _ = [emit_or_defer(Job) || {inserted, Job} <- Placed],
+                    {ok, [Job || {_Outcome, Job} <- Placed]};
+                {error, _} = Refused ->
+                    Refused
             end;
         Mode ->
             shigoto_testing:handle_insert_all(JobParamsList, Mode)
@@ -202,21 +263,32 @@ transaction(Fun, Opts) when is_function(Fun, 0) ->
             put(?TXN_KEY, {Pool, []}),
             try
                 Result = shigoto_db:transaction(Pool, Fun),
-                lists:foreach(fun shigoto_telemetry:job_inserted/1, take_deferred()),
+                _ = [shigoto_telemetry:job_inserted(Job) || Job <- take_deferred()],
                 Result
             catch
                 Class:Reason:Stack ->
                     _ = take_deferred(),
                     erlang:raise(Class, Reason, Stack)
             end;
-        {Pool, _} ->
+        {Pool, _} when is_atom(Pool) ->
             %% Nested: inherit the outer pool; the outermost transaction owns
             %% commit and the telemetry flush.
             shigoto_db:transaction(Pool, Fun)
     end.
 
 -doc """
-Cancel a job by ID. Stops the job if it is executing on this node.
+Cancel a job by ID.
+
+A job that is waiting will not run. A job that is running is stopped: its
+worker process is shut down (`shutdown`, then `kill` after five seconds if it
+traps exits and has not gone) and nothing it did is recorded. On the node that
+runs it this happens at once; from another node it happens at that node's next
+heartbeat, so within `heartbeat_interval`. `perform/1` may be cut off at any
+point, like any other crash, and the job is not retried.
+
+Answers `ok` also when there is nothing to cancel: no such job, or one that
+has already finished. `[shigoto, job, cancelled]` is only emitted for a job
+this call cancelled, with that job's worker and queue.
 
 Not transaction-aware: the process stop and `job_cancelled` telemetry fire
 immediately, so this always uses the configured pool rather than an enclosing
@@ -226,26 +298,21 @@ immediately, so this always uses the configured pool rather than an enclosing
 cancel(JobId) ->
     cancel(shigoto_config:pool(), JobId).
 
--doc "Cancel a job by ID. Also stops executing jobs on this node.".
+-doc "Cancel a job by ID on the given pool. See `cancel/1`.".
 -spec cancel(atom(), integer()) -> ok | {error, term()}.
 cancel(Pool, JobId) ->
-    case ets:whereis(shigoto_executors) of
-        undefined ->
+    case shigoto_repo:cancelled_job(Pool, JobId) of
+        {ok, {cancelled, Job}} ->
+            _ = [
+                shigoto_executor:stop(Executor, cancelled)
+             || Executor <- shigoto_executor:running(JobId)
+            ],
+            shigoto_telemetry:job_cancelled(Job);
+        {ok, unchanged} ->
             ok;
-        _ ->
-            case ets:lookup(shigoto_executors, JobId) of
-                [{_, Pid}] -> exit(Pid, shutdown);
-                [] -> ok
-            end
-    end,
-    Result = shigoto_repo:cancel_job(Pool, JobId),
-    case Result of
-        ok ->
-            shigoto_telemetry:job_cancelled(#{id => JobId, worker => unknown, queue => unknown});
-        _ ->
-            ok
-    end,
-    Result.
+        {error, _} = Err ->
+            Err
+    end.
 
 -doc "Cancel available or retryable jobs matching a pattern. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, tags, args, state. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec cancel_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
@@ -257,7 +324,11 @@ cancel_by(Filters) ->
 cancel_by(Pool, Filters) ->
     shigoto_repo:cancel_by(Pool, Filters).
 
--doc "Retry a discarded or cancelled job. Uses the active transaction's pool, or the configured pool.".
+-doc """
+Retry a discarded or cancelled job. Uses the active transaction's pool, or the
+configured pool. A job that ended while it waited on other jobs waits on them
+again: see the Retrying section of the Job Dependencies guide.
+""".
 -spec retry(integer()) -> ok | {error, term()}.
 retry(JobId) ->
     retry(txn_pool(), JobId).
@@ -299,7 +370,32 @@ resume_queue(Queue) ->
     end,
     Result.
 
--doc "Create a new batch for grouping jobs.".
+-doc """
+The queues paused on this node.
+
+Pause is per-node process state, so this reports what the local queue
+processes are doing, not a cluster-wide view.
+""".
+-spec paused_queues() -> [binary()].
+paused_queues() ->
+    case whereis(shigoto_queue_sup) of
+        undefined ->
+            [];
+        Sup when is_pid(Sup) ->
+            [
+                Queue
+             || {{shigoto_queue, Queue}, Pid, worker, _} <- supervisor:which_children(Sup),
+                is_binary(Queue),
+                is_pid(Pid),
+                shigoto_queue:is_paused(Pid)
+            ]
+    end.
+
+-doc """
+Create a new batch for grouping jobs. Options: `callback_worker` and
+`callback_args`. `callback_args` with `_batch_event` or a key that starts with
+`_shigoto` answers `{error, {reserved_key, callback_args, Key}}`.
+""".
 -spec new_batch(map()) -> {ok, map()} | {error, term()}.
 new_batch(Opts) ->
     shigoto_batch:create(txn_pool(), Opts).
@@ -316,10 +412,75 @@ report_progress(JobId, Progress) when Progress >= 0, Progress =< 100 ->
     shigoto_telemetry:job_progress(#{id => JobId, worker => unknown, queue => unknown}, Progress),
     Result.
 
--doc "Get a job by ID. JSONB columns come back as JSON text; see the moduledoc.".
+-doc """
+Get a job by ID. JSONB columns come back as JSON text; see the moduledoc. With
+an encryption key configured `args`, `meta`, `result` and `deps_results` are
+decrypted; a column that does not open is the JSON string of the reason
+(`"decrypt_failed"`), never ciphertext.
+""".
 -spec get_job(integer()) -> {ok, map()} | {error, term()}.
 get_job(JobId) ->
     shigoto_repo:get_job(txn_pool(), JobId).
+
+-doc """
+Rewrite stored job data in the form the current encryption settings write:
+under the newest key, in the configured `encryption_write_format`, and
+encrypted where it is still plaintext.
+
+Run it after changing what is written: after setting
+`encryption_write_format` to `v2`, after putting a new key first in
+`encryption_keys`, or after configuring a key for a table that already holds
+plaintext jobs. It walks `shigoto_jobs`, `shigoto_jobs_archive` and
+`shigoto_batches` by id and, for every value that is not already in the
+current form, decrypts it and encrypts it again: `args`, `meta`, `result`,
+each entry of `deps_results`, and a batch's `callback_args`.
+
+It also moves the `unique_key` of every row in `shigoto_jobs` to the digest
+under the current key: a key stored in the clear before encryption was turned
+on, and one stored under an older key. A unique insert looks for a job under
+every listed key, and in the clear while `require_encrypted` is not set, so
+duplicates are found before, during and after the run. Once it reports
+`failed => 0` and `skipped => 0` an old key can be removed and
+`require_encrypted` set. A `unique_key` written under a key that is no longer
+listed cannot be moved and is counted as `failed`. Archived jobs are not looked
+up by a unique insert, and their keys are left as they are.
+
+It is safe while the queue runs. Rows are read in batches without a lock, and
+each value is written back with a compare-and-swap, so a row that changed in
+the meantime is left alone and counted as `skipped`; run it again to pick
+those up. A running job is not affected by its row being rewritten. It can be
+stopped and started again at any point, and running it twice changes nothing
+the second time.
+
+A v1 ciphertext is bound to nothing, so this is also the moment a v1 value
+that was moved between rows gets bound to the row it was moved to. Run it once
+every node writes `v2`, then drop `v1` from `encryption_read_formats`.
+
+A job that waits for other jobs, or holds results of them, and whose `meta`
+does not yet name them (`_shigoto_deps`) gets that list written. A job is
+handed only the results of the jobs named there once `require_encrypted` is
+set, so run this before setting it.
+""".
+-spec reencrypt() ->
+    {ok, #{
+        jobs := reencrypt_counts(),
+        archive := reencrypt_counts(),
+        batches := reencrypt_counts()
+    }}
+    | {error, term()}.
+reencrypt() ->
+    reencrypt(#{}).
+
+-doc "Like `reencrypt/0` with options: `pool`, and `batch_size` (rows read per statement, default 500).".
+-spec reencrypt(map()) ->
+    {ok, #{
+        jobs := reencrypt_counts(),
+        archive := reencrypt_counts(),
+        batches := reencrypt_counts()
+    }}
+    | {error, term()}.
+reencrypt(Opts) ->
+    shigoto_reencrypt:run(maps:get(pool, Opts, shigoto_config:pool()), Opts).
 
 -doc "Retry discarded or cancelled jobs matching a filter. Uses the active transaction's pool, or the configured pool. Filters: worker, queue, state, tags, args. With an encryption key configured an `args` filter answers `{error, args_filter_unsupported_with_encryption}`, since stored args are ciphertext.".
 -spec retry_by(map()) -> {ok, non_neg_integer()} | {error, term()}.
@@ -348,8 +509,8 @@ add_queue(Queue, Concurrency) ->
                     shigoto_queue_sup, shigoto_queue_sup:queue_spec(Queue, Concurrency)
                 )
             of
-                {ok, Pid} -> {ok, Pid};
-                {error, {already_started, Pid}} -> {ok, Pid};
+                {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+                {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
                 {error, _} = Err -> Err
             end
     end.
@@ -416,15 +577,17 @@ emit_or_defer(Job) ->
     case get(?TXN_KEY) of
         undefined ->
             shigoto_telemetry:job_inserted(Job);
-        {Pool, Deferred} ->
+        {Pool, Deferred} when is_list(Deferred) ->
             put(?TXN_KEY, {Pool, [Job | Deferred]}),
             ok
     end.
 
 take_deferred() ->
     case erase(?TXN_KEY) of
-        undefined -> [];
-        {_Pool, Deferred} -> lists:reverse(Deferred)
+        undefined ->
+            [];
+        {_Pool, Deferred} when is_list(Deferred) ->
+            [Job || Job <- lists:reverse(Deferred), is_map(Job)]
     end.
 
 with_queue_pid(Queue, Fun) ->

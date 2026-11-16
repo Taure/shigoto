@@ -26,9 +26,31 @@ all queues. This is separate from per-queue concurrency.
 
 System-level CoDel-based load shedding can be enabled via config. Low-priority
 jobs are shed first when the system is overloaded.
+
+## A gate that cannot answer
+
+`admit/2` runs the gates in order. A gate that fails to answer, because its
+seki primitive is missing, a worker callback raised, the database refused the
+global concurrency count or its advisory lock stayed taken, does not admit the
+job: the job is snoozed for 5 seconds, `shigoto_resilience_gate_failed` is
+logged and `[shigoto, resilience, gate_failed]` is emitted. A snooze is not an
+attempt, and the job's `errors` gain a `gate_failed` entry marked `snoozed`.
+
+That does not go on for ever. After `unrunnable_snooze_limit` such snoozes in a
+row (20 by default) the next gate failure fails the attempt, with
+`{gate_failed, Gate, Reason}` as its error, and the job is retried and in the
+end discarded like any other. Alert on the event.
+
+seki is one of shigoto's applications and runs whenever shigoto does. A job
+can still meet a node without it: seki stopped on its own, or a queue drained
+with `shigoto:drain_queue/1,2` while neither is started. There a worker that
+declares `rate_limit/0`, `concurrency/0` or `circuit_breaker/0` is not run
+ungated: its jobs are snoozed like any other gate failure, with the reason
+`seki_not_running`. A worker that declares none of them runs as it always has.
 """.
 
 -export([
+    admit/2,
     check_rate_limit/2,
     check_bulkhead/2,
     release_bulkhead/1,
@@ -37,6 +59,8 @@ jobs are shed first when the system is overloaded.
     check_load/1,
     complete_load/2,
     ensure_worker_primitives/1,
+    breaker_name/1,
+    new_table/0,
     setup_load_shedder/0
 ]).
 
@@ -45,44 +69,157 @@ jobs are shed first when the system is overloaded.
 -define(INIT_TABLE, shigoto_resilience_init).
 -define(GLOBAL_CONCURRENCY_SNOOZE, 5).
 
--doc "Ensure seki primitives exist for a worker. Lazy and idempotent.".
+-doc false.
+%% Ask every gate whether `Worker` may run `Job` now.
+%%
+%% `{snooze, Seconds}` means the job has to be put back for that long;
+%% `{snoozed, Seconds}` that the gate already did so (the global concurrency
+%% check, inside its own transaction); `{gate_failed, Gate, Reason}` that
+%% `Gate` gave no answer.
+-spec admit(module(), map()) ->
+    ok | {snooze, pos_integer()} | {snoozed, pos_integer()} | {gate_failed, atom(), term()}.
+admit(Worker, Job) ->
+    %% Load shedding is asked last. Its admission is a count that only the
+    %% end of the run gives back, so no gate may refuse the job after it.
+    admitted(
+        [setup, rate_limit, global_concurrency, bulkhead, circuit, load], Worker, Job
+    ).
+
+admitted([], _Worker, _Job) ->
+    ok;
+admitted([Gate | Gates], Worker, Job) ->
+    case asked(Gate, Worker, Job) of
+        ok -> admitted(Gates, Worker, Job);
+        Snooze -> Snooze
+    end.
+
+asked(Gate, Worker, Job) ->
+    try
+        checked(Gate, Worker, Job)
+    catch
+        Class:Reason ->
+            %% What was set up for the worker may be gone (seki restarted):
+            %% its next job sets it up again.
+            _ = forget(Worker),
+            gate_failed(Gate, Worker, shigoto_error:shape({Class, Reason}))
+    end.
+
+checked(setup, Worker, _Job) ->
+    ensure_worker_primitives(Worker);
+checked(load, _Worker, Job) ->
+    check_load(Job);
+checked(rate_limit, Worker, Job) ->
+    check_rate_limit(Worker, Job);
+checked(global_concurrency, Worker, Job) ->
+    case check_global_concurrency(Worker, Job) of
+        {snooze, Seconds} -> {snoozed, Seconds};
+        Answer -> Answer
+    end;
+checked(bulkhead, Worker, Job) ->
+    check_bulkhead(Worker, Job);
+checked(circuit, Worker, Job) ->
+    check_circuit(Worker, Job).
+
+-spec gate_failed(atom(), module(), term()) -> {gate_failed, atom(), term()}.
+gate_failed(Gate, Worker, Reason) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_resilience_gate_failed",
+        gate => Gate,
+        worker => Worker,
+        reason => Reason,
+        action => ~"the job is not run; a gate that cannot answer does not admit"
+    }),
+    shigoto_telemetry:resilience_gate_failed(Worker, Gate, Reason),
+    {gate_failed, Gate, Reason}.
+
+-doc false.
+%% Create the table that remembers which workers have their seki primitives. The
+%% calling process owns it; `shigoto_executor_sup` calls this, so the table lasts
+%% as long as the executors do.
+-spec new_table() -> ok.
+new_table() ->
+    case ets:whereis(?INIT_TABLE) of
+        undefined ->
+            _ = ets:new(?INIT_TABLE, [named_table, public, set, {read_concurrency, true}]),
+            ok;
+        _Table ->
+            ok
+    end.
+
+-doc """
+Ensure seki primitives exist for a worker. Lazy and idempotent: they are
+created on the worker's first job and remembered. Without the table (a job
+drained while the application is not running) they are ensured every time.
+""".
 -spec ensure_worker_primitives(module()) -> ok.
 ensure_worker_primitives(Worker) ->
     case is_seki_running() of
-        false ->
-            ok;
         true ->
-            case ets:whereis(?INIT_TABLE) of
-                undefined ->
-                    _ = ets:new(?INIT_TABLE, [named_table, public, set, {read_concurrency, true}]),
-                    do_ensure(Worker);
-                _ ->
-                    case ets:lookup(?INIT_TABLE, Worker) of
-                        [{_, true}] -> ok;
-                        [] -> do_ensure(Worker)
-                    end
-            end
+            case is_remembered(Worker) of
+                true -> ok;
+                false -> do_ensure(Worker)
+            end;
+        false ->
+            _ = code:ensure_loaded(Worker),
+            ungated([
+                Gate
+             || Gate <- [rate_limit, concurrency, circuit_breaker], declares(Worker, Gate)
+            ])
+    end.
+
+%% Without seki a worker that asks for a gate has none.
+-spec ungated([atom()]) -> ok.
+ungated([]) -> ok;
+ungated([_ | _]) -> error({?MODULE, seki_not_running}).
+
+declares(Worker, Gate) ->
+    erlang:function_exported(Worker, Gate, 0).
+
+-spec gated(module(), atom()) -> boolean().
+gated(Worker, Gate) ->
+    _ = code:ensure_loaded(Worker),
+    case declares(Worker, Gate) of
+        true -> is_seki_running() orelse error({?MODULE, seki_not_running});
+        false -> false
+    end.
+
+is_remembered(Worker) ->
+    try
+        ets:member(?INIT_TABLE, Worker)
+    catch
+        error:badarg -> false
+    end.
+
+remember(Worker) ->
+    try
+        ets:insert(?INIT_TABLE, {Worker, true})
+    catch
+        error:badarg -> true
+    end.
+
+forget(Worker) ->
+    try
+        ets:delete(?INIT_TABLE, Worker)
+    catch
+        error:badarg -> true
     end.
 
 -doc "Check per-worker rate limit. Returns ok or {snooze, Seconds}.".
 -spec check_rate_limit(module(), map()) -> ok | {snooze, pos_integer()}.
 check_rate_limit(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    case gated(Worker, rate_limit) of
         false ->
             ok;
         true ->
-            _ = code:ensure_loaded(Worker),
-            case erlang:function_exported(Worker, rate_limit, 0) of
-                false ->
+            LimiterName = limiter_name(Worker),
+            case seki:check(LimiterName, Worker) of
+                {allow, _} ->
                     ok;
-                true ->
-                    LimiterName = limiter_name(Worker),
-                    case seki:check(LimiterName, Worker) of
-                        {allow, _} ->
-                            ok;
-                        {deny, #{retry_after := Ms}} ->
-                            shigoto_telemetry:resilience_rate_limited(Worker, Ms),
-                            {snooze, max(1, Ms div 1000)}
+                {deny, #{retry_after := Ms}} ->
+                    shigoto_telemetry:resilience_rate_limited(Worker, Ms),
+                    case Ms div 1000 of
+                        Seconds when Seconds >= 1 -> {snooze, Seconds};
+                        _Sooner -> {snooze, 1}
                     end
             end
     end.
@@ -90,23 +227,17 @@ check_rate_limit(Worker, _Job = #{}) ->
 -doc "Check per-worker bulkhead. Returns ok or {snooze, 5}.".
 -spec check_bulkhead(module(), map()) -> ok | {snooze, pos_integer()}.
 check_bulkhead(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    case gated(Worker, concurrency) of
         false ->
             ok;
         true ->
-            _ = code:ensure_loaded(Worker),
-            case erlang:function_exported(Worker, concurrency, 0) of
-                false ->
+            BulkheadName = bulkhead_name(Worker),
+            case seki_bulkhead:acquire(BulkheadName) of
+                ok ->
                     ok;
-                true ->
-                    BulkheadName = bulkhead_name(Worker),
-                    case seki_bulkhead:acquire(BulkheadName) of
-                        ok ->
-                            ok;
-                        {error, bulkhead_full} ->
-                            shigoto_telemetry:resilience_bulkhead_full(Worker),
-                            {snooze, 5}
-                    end
+                {error, bulkhead_full} ->
+                    shigoto_telemetry:resilience_bulkhead_full(Worker),
+                    {snooze, 5}
             end
     end.
 
@@ -137,8 +268,14 @@ observes the reduced count. That makes a burst of concurrently claimed jobs snoo
 one at a time until exactly `global_concurrency/0` remain running, instead of all
 snoozing together and livelocking.
 
-Returns `ok` or `{snooze, Seconds}`. Fails open (`ok`) on any database error, so a
-transient DB problem never turns the check into a job failure.
+Returns `ok`, or `{snooze, Seconds}` once it has put the job back.
+
+It fails closed. When the count cannot be made, or the advisory lock is not
+free within `shigoto_config:advisory_lock_timeout/0` (anything in the database
+can hold it), the job is not admitted: this raises
+`error({shigoto_resilience, Reason})`, which `admit/2` turns into a snooze and
+`[shigoto, resilience, gate_failed]`. The cap is a promise about what runs at
+once, and a check that cannot count must not let everything through.
 """.
 -spec check_global_concurrency(module(), map()) -> ok | {snooze, pos_integer()}.
 check_global_concurrency(Worker, Job = #{}) ->
@@ -150,15 +287,16 @@ check_global_concurrency(Worker, Job = #{}) ->
             MaxGlobal = Worker:global_concurrency(),
             Pool = shigoto_config:pool(),
             WorkerBin = atom_to_binary(Worker, utf8),
-            JobId = maps:get(id, Job),
             LockKey = erlang:phash2({global_concurrency, WorkerBin}),
-            admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey)
+            admit_global(Pool, WorkerBin, Job, MaxGlobal, LockKey)
     end.
 
 -doc "Check circuit breaker for a worker. Returns ok or {snooze, 10}.".
 -spec check_circuit(module(), map()) -> ok | {snooze, pos_integer()}.
 check_circuit(Worker, _Job = #{}) ->
-    case is_seki_running() of
+    %% Every worker has a breaker with the defaults; one that sets its own
+    %% asked for it.
+    case is_seki_running() orelse gated(Worker, circuit_breaker) of
         false ->
             ok;
         true ->
@@ -192,7 +330,10 @@ check_load(Job) ->
             end
     end.
 
--doc "Report load shedder completion.".
+-doc """
+Give back the place `check_load/1` took, with how long the run was. Called for
+every job the gates admitted, whatever came of it.
+""".
 -spec complete_load(map(), non_neg_integer()) -> ok.
 complete_load(_Job = #{}, DurationMs) ->
     case shigoto_config:load_shedding() of
@@ -220,34 +361,37 @@ setup_load_shedder() ->
 %% Internal
 %%----------------------------------------------------------------------
 
-admit_global(Pool, WorkerBin, JobId, MaxGlobal, LockKey) ->
-    try
-        shigoto_db:transaction(Pool, fun() ->
-            _ = shigoto_db:query(Pool, ~"SELECT pg_advisory_xact_lock($1)::text", [LockKey]),
-            CountSQL =
-                ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
-            case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
-                #{rows := [#{count := Others}]} when Others >= MaxGlobal ->
-                    _ = shigoto_repo:snooze_job(Pool, JobId, ?GLOBAL_CONCURRENCY_SNOOZE),
-                    {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
-                _ ->
-                    ok
-            end
-        end)
-    of
+admit_global(Pool, WorkerBin, #{id := JobId} = Job, MaxGlobal, LockKey) ->
+    Answer =
+        try
+            shigoto_db:transaction(Pool, fun() ->
+                case shigoto_lock:acquire_xact(Pool, [LockKey]) of
+                    ok -> counted(Pool, WorkerBin, JobId, Job, MaxGlobal);
+                    {error, Reason} -> {failed, shigoto_db:reduced(Reason)}
+                end
+            end)
+        catch
+            Class:Reason -> {failed, shigoto_error:shape({Class, Reason})}
+        end,
+    case Answer of
+        ok -> ok;
         {snooze, _} = Snooze -> Snooze;
-        _ -> ok
-    catch
-        Class:Reason:Stack ->
-            ?LOG_WARNING(#{
-                msg => ~"global concurrency check failed, admitting job",
-                worker => WorkerBin,
-                job_id => JobId,
-                class => Class,
-                reason => Reason,
-                stacktrace => Stack
-            }),
-            ok
+        {failed, Why} -> error({?MODULE, Why})
+    end.
+
+counted(Pool, WorkerBin, JobId, Job, MaxGlobal) ->
+    CountSQL =
+        ~"SELECT count(*) AS count FROM shigoto_jobs WHERE worker = $1 AND state = 'executing' AND id <> $2",
+    case shigoto_db:query(Pool, CountSQL, [WorkerBin, JobId]) of
+        #{rows := [#{count := Others}]} when is_integer(Others), Others >= MaxGlobal ->
+            case shigoto_repo:snooze_job(Pool, Job, ?GLOBAL_CONCURRENCY_SNOOZE) of
+                ok -> {snooze, ?GLOBAL_CONCURRENCY_SNOOZE};
+                {error, Reason} -> {failed, shigoto_db:reduced(Reason)}
+            end;
+        #{rows := [#{count := Others}]} when is_integer(Others) ->
+            ok;
+        {error, Reason} ->
+            {failed, shigoto_db:reduced(Reason)}
     end.
 
 do_ensure(Worker) ->
@@ -255,7 +399,7 @@ do_ensure(Worker) ->
     _ = maybe_create_limiter(Worker),
     _ = maybe_create_bulkhead(Worker),
     _ = maybe_create_breaker(Worker),
-    ets:insert(?INIT_TABLE, {Worker, true}),
+    _ = remember(Worker),
     ok.
 
 maybe_create_limiter(Worker) ->
@@ -297,19 +441,16 @@ maybe_create_breaker(Worker) ->
         end,
     seki:new_breaker(Name, Opts).
 
-%% Atom creation is safe: bounded by the number of worker modules (loaded at compile time).
-%% Each worker creates at most 3 atoms, once, on first use.
 limiter_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_rl_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_limiter, Worker}.
 
 bulkhead_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_bh_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_bulkhead, Worker}.
 
+-doc false.
+-spec breaker_name(module()) -> {shigoto_breaker, module()}.
 breaker_name(Worker) ->
-    % elp:ignore W0023
-    binary_to_atom(<<"shigoto_cb_", (atom_to_binary(Worker))/binary>>).
+    {shigoto_breaker, Worker}.
 
 priority_to_seki(P) when P >= 10 -> 0;
 priority_to_seki(P) when P >= 5 -> 1;

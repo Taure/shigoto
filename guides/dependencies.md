@@ -2,7 +2,8 @@
 
 Jobs can declare dependencies on other jobs using `depends_on`. A dependent
 job stays in `available` state but won't be claimed until all its dependencies
-have completed, been discarded, or been cancelled.
+have finished. What it does when one of them fails instead of completing is up
+to the job: see [When a Dependency Fails](#when-a-dependency-fails).
 
 ## Basic Usage
 
@@ -48,32 +49,127 @@ The merge job only runs after all three fetch jobs finish.
 
 ## Dependency Resolution
 
-When a job completes, gets discarded, or gets cancelled, shigoto automatically
-removes its ID from all `depends_on` arrays. Once a job's `depends_on` array
-is empty, it becomes claimable.
+When a job completes, shigoto removes its ID from all `depends_on` arrays and
+adds its result to each dependent's `deps_results`. Once a job's `depends_on`
+array is empty, it becomes claimable.
 
-This means dependent jobs aren't permanently stuck if a parent fails — they
-still execute after the parent reaches a terminal state.
+## When a Dependency Fails
 
-## Cycle Detection
+A dependency has failed when it is discarded (out of attempts, discarded by
+hand, or rescued on its last attempt) or cancelled. What a job waiting on it
+does then is the waiting job's choice, set with `on_dependency_failure`:
+
+| Value | The waiting job |
+|-------|-----------------|
+| `run` (default) | Is released and runs without the failed job. Its `deps_results` holds `null` for it. |
+| `cancel` | Is cancelled. |
+| `discard` | Is discarded: `on_discard/2` runs, as for a job out of attempts. |
+
+```erlang
+{ok, Extract} = shigoto:insert(#{worker => extract_worker, args => #{}}),
+
+%% Pointless without the extract: goes when the extract does.
+{ok, _Load} = shigoto:insert(#{
+    worker => load_worker,
+    args => #{},
+    depends_on => [maps:get(id, Extract)],
+    on_dependency_failure => cancel
+}),
+
+%% Runs either way, and can tell from deps_results what happened.
+{ok, _Report} = shigoto:insert(#{
+    worker => report_worker,
+    args => #{},
+    depends_on => [maps:get(id, Extract)]
+}).
+```
+
+A job that is cancelled or discarded this way has itself failed, so the jobs
+waiting on *it* follow their own setting in turn, all the way down, in the same
+database statement as the failure that started it. It never ran: its `attempt`
+is unchanged, its `errors` gain a `dependency_failed` entry, and it counts as
+discarded in its batch. A job waiting on several jobs goes as soon as one of
+them fails.
+
+The default for jobs that set nothing is the `on_dependency_failure`
+application setting, `run` unless configured:
+
+```erlang
+{shigoto, [
+    {on_dependency_failure, cancel}
+]}
+```
+
+It is read when the dependency fails, on the node that records the failure, so
+keep it the same on every node. Set the option on the job where the behaviour
+matters.
+
+With `cancel` or `discard`, a job cannot be inserted behind a dependency that
+has already failed: `shigoto:insert/1` answers
+`{error, {dependency_failed, [Id, ...]}}`.
+
+With an encryption key, the ids in `depends_on` are also written into the
+job's `meta` as `_shigoto_deps`, encrypted with it. They say whose results the
+job may be handed: see
+[Security](security.md#what-a-moved-ciphertext-does). The key is shigoto's;
+leave it as it is.
+
+A dependency that has already finished when the dependent job is inserted is
+not waited for. Its result is put into the new job's `deps_results` straight
+away, so depending on a job that completed a moment ago behaves like depending
+on one that completes a moment later.
+
+A dependency that ends in the instant its dependent is being inserted can miss
+it: neither statement sees the other. Each queue therefore looks, every
+`rescue_interval`, for jobs waiting on a job that has ended or no longer
+exists, and releases them the way the dependency would have: with the result,
+or by `on_dependency_failure`. A job waiting on a deleted job runs with `null`
+for it. Such a job waits at most one `rescue_interval` (default 60 s).
+
+## Retrying
+
+A job that was cancelled or discarded because a dependency failed still names
+that dependency. `shigoto:retry/1` puts it back in the queue, where it waits on
+it again:
+
+- Retry the dependency too (first, or in the same `shigoto:transaction/1`) and
+  the job waits for it, then runs with its result.
+- Leave the dependency failed and the job follows its `on_dependency_failure`
+  again, within one `rescue_interval`: `cancel` or `discard` end it again, with
+  a second `dependency_failed` entry in `errors`; `run` releases it.
+
+The same holds for a job you cancelled yourself while it was waiting: retried,
+it waits on whatever it was still waiting on, and follows its policy for the
+ones that have failed since.
+
+A job released to run without a failed dependency (`run`) has stopped waiting
+on it. Retrying the dependency afterwards does not hold that job back.
+
+## Validation
 
 Shigoto validates dependencies on insert:
 
 - **Missing IDs**: Returns `{error, {missing_dependencies, [Id, ...]}}` if
-  any dependency ID doesn't exist.
-- **Cycles**: Returns `{error, dependency_cycle}` if the new job's dependencies
-  would create a circular dependency (e.g., A depends on B, B depends on A).
+  any dependency ID doesn't exist. A finished job that has been pruned or
+  archived no longer exists.
+- **Cycles**: there is nothing to check. A job gets its ID when it is
+  inserted, so nothing can depend on it before then and inserting a job can
+  never close a circle. Any shape of dependencies between existing jobs is
+  accepted, including a diamond, or a job that waits both on a job and on that
+  job's own dependency:
 
-```erlang
-%% This would fail with {error, dependency_cycle}
-{ok, X} = shigoto:insert(#{worker => w, args => #{}}),
-{ok, Y} = shigoto:insert(#{worker => w, args => #{}, depends_on => [maps:get(id, X)]}),
-{error, dependency_cycle} = shigoto:insert(#{
-    worker => w,
-    args => #{},
-    depends_on => [maps:get(id, X), maps:get(id, Y)]
-}).
-```
+  ```erlang
+  {ok, A} = shigoto:insert(#{worker => w, args => #{}}),
+  {ok, B} = shigoto:insert(#{worker => w, args => #{}, depends_on => [maps:get(id, A)]}),
+  {ok, _} = shigoto:insert(#{
+      worker => w,
+      args => #{},
+      depends_on => [maps:get(id, A), maps:get(id, B)]
+  }).
+  ```
+
+  Earlier versions refused that last insert with `{error, dependency_cycle}`.
+  That error is no longer returned.
 
 ## Combining with Batches
 

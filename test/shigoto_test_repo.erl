@@ -1,6 +1,6 @@
 -module(shigoto_test_repo).
 
--export([start/0, port/0]).
+-export([start/0, port/0, listen_port/0]).
 
 start() ->
     case
@@ -21,3 +21,8 @@ start() ->
 
 port() ->
     list_to_integer(os:getenv("SHIGOTO_TEST_DB_PORT", "5556")).
+
+%% LISTEN needs a session of its own, so behind a pooler in transaction mode the
+%% notifier connects to PostgreSQL itself.
+listen_port() ->
+    list_to_integer(os:getenv("SHIGOTO_TEST_LISTEN_PORT", integer_to_list(port()))).

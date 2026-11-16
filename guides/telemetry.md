@@ -27,12 +27,58 @@ logger for filtering); it is omitted from the tables below for brevity.
 |-------|-------------|----------|
 | `[shigoto, job, inserted]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, claimed]` | `count, queue_wait_ms` | job_id, worker, queue, attempt, priority |
+| `[shigoto, job, start]` | `system_time, monotonic_time` | job_id, worker, queue, attempt, priority, carrier |
+| `[shigoto, job, stop]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, outcome |
+| `[shigoto, job, exception]` | `duration, monotonic_time` | job_id, worker, queue, attempt, priority, carrier, kind, reason |
 | `[shigoto, job, completed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, failed]` | `count, duration, duration_ms, queue_wait_ms` | job_id, worker, queue, attempt, priority, reason |
 | `[shigoto, job, snoozed]` | `count` | job_id, worker, queue, attempt, priority, snooze_reason |
 | `[shigoto, job, discarded]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, cancelled]` | `count` | job_id, worker, queue, attempt, priority |
 | `[shigoto, job, progress]` | `progress` | job_id, worker, queue, attempt, priority, progress |
+| `[shigoto, job, lost]` | `count` | job_id, worker, queue, attempt, priority, transition |
+| `[shigoto, job, transition_failed]` | `count` | job_id, worker, queue, attempt, priority, transition, reason |
+| `[shigoto, job, rescued]` | `count` | job_id, worker, queue, attempt, priority |
+
+`start`, `stop` and `exception` bracket one attempt, as `telemetry:span/3`
+would: `start`, then exactly one of `stop` (`outcome`: `completed`, `failed`,
+`snoozed` or `stopped`) or `exception` (`kind`, `reason`). They fire before
+the outcome is written, so `completed`, `failed` or `snoozed` still follows.
+`carrier` is the job's context, see
+[Context Propagation](context-propagation.md).
+
+`snoozed` has `snooze_reason` `snooze`, or `gate_failed` or `unknown_worker`
+when the node put the job back because it could not run it.
+
+`lost` fires when a run's claim no longer held: the job had been rescued and
+claimed again, or cancelled on another node, while this run was going. Either
+the run finished and its outcome (`transition`: `completed`, `failed` or
+`snoozed`) was not written, or the heartbeat noticed first and the run was
+stopped (`transition`: `stopped`), or the node was stopping and the claim it
+tried to give back was no longer its own (`transition`: `released`). No `completed`, `failed` or `snoozed` event
+fires for that run. It comes with a
+`shigoto_job_transition_lost` warning. A steady rate of it means jobs outlive
+the stale threshold (`heartbeat_interval * 2`) without a heartbeat, and each of
+them ran twice.
+
+`rescued` fires when the stale-job sweep takes a job from an owner that stopped
+heartbeating. `attempt` is the attempt that was lost. The job runs again, or is
+discarded when that was its last attempt (a `discarded` event follows).
+
+`transition_failed` fires when writing the outcome failed for any other reason
+(`reason` is the database error). It comes with a `shigoto_job_transition_failed`
+error log. The row stays `executing` until the stale-job rescue returns it to
+the queue, so the job runs again.
+
+A run stopped because its node is stopping ends with `[shigoto, job, stop]`
+and `outcome` `stopped`, and its claim is given back: the job is `available`
+again and no attempt is used. `transition` is `released` in `lost` and
+`transition_failed` when that write did not go through.
+
+The `reason` of `failed` is text. With an encryption key configured it is the
+shape of the failure with every value removed, as in the `errors` column (see
+[Security](security.md#what-is-recorded-about-a-failure)); it is at most 1024
+bytes either way.
 
 ### Queue Events
 
@@ -56,6 +102,14 @@ normal boot a bad queue config fails the application start instead.
 | `[shigoto, resilience, circuit_open]` | `count` | worker |
 | `[shigoto, resilience, bulkhead_full]` | `count` | worker |
 | `[shigoto, resilience, load_shed]` | `count` | priority |
+| `[shigoto, resilience, gate_failed]` | `count` | worker, gate, reason |
+
+`gate_failed` fires when a check could not be made: `gate` is `setup`, `load`,
+`rate_limit`, `global_concurrency`, `bulkhead` or `circuit`. The job is snoozed
+for 5 seconds rather than run unchecked, and `shigoto_resilience_gate_failed`
+is logged. After `unrunnable_snooze_limit` such snoozes in a row the job's
+attempt fails instead (see [Resilience](resilience.md)). For `global_concurrency` the usual reason is `lock_timeout`: another
+session holds the worker's advisory lock.
 
 ### Batch Events
 
@@ -83,10 +137,11 @@ reason on each node, so alert on this event rather than on the log (see the
 |-------|-------------|----------|
 | `[shigoto, leader_lock, unavailable]` | `count, consecutive_misses` | lock |
 
-Emitted with the `shigoto_cron_lock_held_elsewhere` and
-`shigoto_stager_lock_held_elsewhere` warnings, when `lock` (`cron` or
-`stager`) has been taken by something other than a shigoto pass for
-`consecutive_misses` passes in a row. See "Advisory locks" in the
+Emitted with the `shigoto_cron_lock_held_elsewhere`,
+`shigoto_stager_lock_held_elsewhere` and `shigoto_rescuer_lock_held_elsewhere`
+warnings, when `lock` (`cron`, `stager` or `rescuer`) has been taken by
+something other than a pass of this node for `consecutive_misses` passes in a
+row. See "Advisory locks" in the
 [Cron](cron.md) guide.
 
 ### Migration Events

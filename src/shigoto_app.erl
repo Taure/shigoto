@@ -11,6 +11,19 @@ supervision tree, so it blocks the release's boot while it does. Worst case:
 - plus however long another node holds the migration advisory lock, since
   nodes that boot together migrate one at a time.
 
+Before any of that it checks every setting (`shigoto_config:check/0`): an
+encryption key that is not 32 bytes or is listed twice, an unknown
+`encryption_write_format`, a malformed `instance` or `workers`, an interval
+that is zero or negative, a `notifier` minato would not connect with. The
+application does not start with one of those,
+and the reason, `{shigoto_config, {invalid, Setting, Value}}`, names the
+setting, never a key. Once per boot it logs
+`shigoto_plaintext_jobs_accepted` while a key is configured and
+`require_encrypted` is not set, `shigoto_workers_not_listed` while a key is
+configured and `workers` is not set, and `shigoto_shutdown_cut_short` when
+`kernel`'s `shutdown_timeout` is shorter than shigoto needs to stop
+(`shigoto_config:shutdown_budget/0`).
+
 An error a retry cannot fix (SQLSTATE class 42, such as
 `42501 insufficient_privilege`) skips the sleeps. On Kubernetes, give the pod a
 `startupProbe` (for example `failureThreshold: 30`, `periodSeconds: 5`) so the
@@ -24,10 +37,76 @@ liveness probe does not restart it during this window.
 
 -doc false.
 start(_StartType, _StartArgs) ->
-    warn_if_testing_mode(),
-    _ = shigoto_db:kura_available(),
-    ok = shigoto_db:ignore_sandbox(),
-    shigoto_sup:start_link(shigoto_migrator:boot(shigoto_config:pool())).
+    case shigoto_config:check() of
+        ok ->
+            warn_if_testing_mode(),
+            warn_about_encryption(),
+            warn_if_shutdown_is_cut_short(),
+            _ = shigoto_config:on_dependency_failure(),
+            _ = shigoto_db:kura_available(),
+            ok = shigoto_db:ignore_sandbox(),
+            Pool = shigoto_config:pool(),
+            Current = shigoto_migrator:boot(Pool),
+            ok = shigoto_repo:raw_unique_keys_forgotten(Pool),
+            _ = [
+                shigoto_repo:raw_unique_keys_checked(Pool)
+             || Current, shigoto_crypto:is_enabled()
+            ],
+            shigoto_sup:start_link(Current);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% Once per boot, and only with a key configured: plaintext rows still being
+%% accepted, and any module allowed to run them.
+warn_about_encryption() ->
+    case shigoto_crypto:is_enabled() of
+        false ->
+            ok;
+        true ->
+            warn_if_plaintext_accepted(shigoto_config:require_encrypted()),
+            warn_if_workers_not_listed(shigoto_config:workers())
+    end.
+
+warn_if_workers_not_listed(undefined) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_workers_not_listed",
+        warning =>
+            ~"a job row may name any module on this node that exports perform/1, so someone who can write to the jobs table chooses what runs, with args of their choosing",
+        action => ~"set {workers, [Module]} to the modules that are workers"
+    });
+warn_if_workers_not_listed(_Workers) ->
+    ok.
+
+warn_if_plaintext_accepted(true) ->
+    ok;
+warn_if_plaintext_accepted(false) ->
+    ?LOG_WARNING(#{
+        msg => ~"shigoto_plaintext_jobs_accepted",
+        warning =>
+            ~"a job row with plaintext args is run although an encryption key is configured, so someone who can write to the jobs table can enqueue a job without the key",
+        action =>
+            ~"once shigoto:reencrypt/0 reports no plaintext left, set {require_encrypted, true}"
+    }).
+
+%% The node gives an application `kernel`'s `shutdown_timeout` to stop
+%% (`infinity` unless set) and kills it after that.
+warn_if_shutdown_is_cut_short() ->
+    Budget = shigoto_config:shutdown_budget(),
+    case proplists:get_value(shutdown_timeout, application:get_all_env(kernel)) of
+        Allowed when is_integer(Allowed), Allowed < Budget ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_shutdown_cut_short",
+                kernel_shutdown_timeout => Allowed,
+                needed => Budget,
+                warning =>
+                    ~"the node kills shigoto before its queues have waited shutdown_timeout for their jobs: a job cut off that way is not given back, and one on its last attempt is discarded by the rescue",
+                action =>
+                    ~"raise kernel's shutdown_timeout to at least `needed`, or lower shigoto's shutdown_timeout"
+            });
+        _ ->
+            ok
+    end.
 
 warn_if_testing_mode() ->
     case shigoto_config:testing_mode() of

@@ -8,10 +8,19 @@ for a query rather than for a driver.
 
 ## What a caller gets
 
-`#{command := atom(), num_rows := integer(), rows := [row()]}` for a statement
-that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
+`#{command := atom() | binary(), num_rows := integer(), rows := [row()]}` for a
+statement that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
 Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
+
+A row is a map keyed by column name, an atom. The names are chosen by the
+server, and minato makes no atom for a name it is sent: a column is answered
+under an atom where one exists on the node, and under its name as a binary
+otherwise. Every column of shigoto's own tables is an atom from the moment
+this module is loaded (`columns/0`), so a job, a batch or a cron entry is
+keyed by atoms whichever module reads it. A column you add to one of the
+tables, or alias in a statement of your own, is an atom only if your code
+names it.
 
 ## Transactions
 
@@ -19,6 +28,10 @@ reads everywhere.
 commits or rolls back. Statements the function runs find that connection here
 rather than being handed it, because a job queue's transaction functions are
 ordinary code that calls `shigoto_repo` and cannot thread a connection through.
+
+A statement in a transaction is waited for until it ends, however long the
+pool's `timeout` lets it run: minato cancels it at its deadline (`query/4`),
+and its error is the answer.
 
 ## Sharing a transaction with kura
 
@@ -109,7 +122,9 @@ opened through kura raises them the same way. A server error keeps only its
     ignore_sandbox/0,
     ignores_sandbox/0,
     start_pool/2,
-    start_listener/2
+    start_listener/2,
+    connection/1,
+    columns/0
 ]).
 
 -define(HOLDER, {?MODULE, holder}).
@@ -136,9 +151,50 @@ opened through kura raises them the same way. A server error keeps only its
 -define(IGNORES_SANDBOX, {?MODULE, ignores_sandbox}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
+%% The options of a minato connection that are handed on as they were
+%% written. `host`, `database`, `user` and `password` are handed on too, in
+%% the spellings and types shigoto has always taken: see `connection/3`.
+-define(AS_WRITTEN, [
+    port,
+    parameters,
+    ssl,
+    ssl_options,
+    channel_binding,
+    auth,
+    connect_timeout,
+    timeout,
+    cancel_timeout,
+    socket_options,
+    transport,
+    prepared_statements,
+    frame_opts
+]).
+-define(SPELLED, [host, hostname, database, user, username, password]).
+%% Keys that say nothing about a connection and are left out without a word.
+%% `pool_size` is the pool's, read in `start_pool/2`. The rest are the keys
+%% of a kura repo's configuration, which is handed to shigoto as it is.
+-define(NOT_A_CONNECTION_OPTION, [
+    pool_size,
+    pool,
+    pool_module,
+    driver_module,
+    backend,
+    dialect,
+    read_only,
+    replicas,
+    uuid_version,
+    encryption,
+    keyring,
+    queue_target,
+    queue_interval
+]).
 
--doc "The shape a statement answers with.".
--type result() :: #{command := atom(), num_rows := term(), rows := [term()]}.
+-doc """
+The shape a statement answers with. `command` is an atom for a command tag
+minato knows and the tag itself, a binary, for one it does not: match on it
+only with a clause for everything else.
+""".
+-type result() :: #{command := atom() | binary(), num_rows := term(), rows := [term()]}.
 
 -doc "What went wrong. `pgsql_error` is the server refusing the statement.".
 -type error() :: {pgsql_error, map()} | {socket, term()} | term().
@@ -153,9 +209,16 @@ query(Pool, SQL, Params) ->
 -doc """
 Run one statement, on this process's transaction if it is inside one.
 
-`Opts` are minato's query options: `timeout` is a deadline after which the
-statement is cancelled on the server rather than abandoned, and the decoding
-options are the ones `m:minato_protocol` documents.
+`Opts` are minato's query options. `timeout` is how long the whole answer may
+take, in milliseconds or `infinity`, and the pool's `timeout` (15000 unless
+the pool was started with another) unless given. The pool's `timeout` is also
+how long the server may send nothing, so a `timeout` here shortens a
+statement and lengthens only an answer that keeps arriving. A statement still
+running at its deadline, or one whose rows are still arriving, is cancelled
+on the server rather than abandoned and answers
+`{error, {pgsql_error, #{code := ~"57014"}}}`; a server that goes on sending
+after that answers `{error, {socket, timeout}}` and the connection is closed.
+The decoding options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
@@ -195,7 +258,10 @@ kura holds.
 """.
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
-    erlang:get({?HOLDER, Pool}).
+    case erlang:get({?HOLDER, Pool}) of
+        Holder when is_pid(Holder) -> Holder;
+        _None -> undefined
+    end.
 
 -doc false.
 -spec transaction_open(atom()) -> boolean().
@@ -225,16 +291,61 @@ Start a pool from shigoto's configuration.
 
 Takes what shigoto and its users already write - `host`, `port`, `database`,
 `user`, `password`, `pool_size` - and gives minato what it takes.
+
+`host` (or `hostname`), `database`, `user` (or `username`) and `password` are
+taken as strings, binaries or atoms, and `password` also as a fun of no
+arguments. Every other option of a minato connection is handed on as it was
+written: `port`, `ssl`, `ssl_options`, `auth`, `channel_binding`, `timeout`,
+`connect_timeout`, `cancel_timeout`, `socket_options`, `parameters`,
+`transport`, `prepared_statements` and `frame_opts`. What each does is in
+minato's configuration guide. `pool_size` is the most connections the pool
+holds, 10 unless given.
+
+Any other key is left out, and the connection is opened as if it had not been
+given. Each start logs one warning that names such keys,
+`shigoto_connection_keys_not_read`: `sslmode`, or a misspelt `ssl_options`,
+is a setting somebody believes is in force. A later major release will refuse
+them. The keys of a kura repo's configuration are left out without the
+warning, so that map can be given as it is: `pool`, `pool_module`,
+`driver_module`, `backend`, `dialect`, `read_only`, `replicas`,
+`uuid_version`, `encryption`, `keyring`, `queue_target` and `queue_interval`.
+
+minato refuses a connection it will not open as asked. No pool is started
+then, and the answer is minato's:
+
+- `{error, {invalid_option, ssl_options}}` for `ssl_options` without
+  `ssl => true`, since the connection would not be encrypted, and for options
+  that resume a TLS session or pause the handshake;
+- `{error, {invalid_option, Key}}` for a value minato does not take: an `ssl`
+  that is not a boolean, a `timeout`, `connect_timeout` or `cancel_timeout`
+  that is neither a number of milliseconds nor `infinity`, a
+  `channel_binding` or an `auth` it does not know, a `host` that is no host,
+  a `password` that is no text;
+- `{error, {reserved_name, Name}}` for `minato_overdue` and `minato_sup`,
+  which are minato's own processes.
+
+Without `user` (or `username`) there is nobody to connect as:
+`{error, {missing_option, user}}`.
+
+`timeout` is the time every statement on the pool has, the ones shigoto runs
+for a queue and for the heartbeat of a running job among them, so a longer
+one is also how long a connection that has stopped answering holds each of
+those up.
+
+minato logs `unencrypted_connection` once for a pool whose `host` is another
+machine and whose options do not mention `ssl`. `ssl => false` says it was
+meant.
 """.
 -spec start_pool(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
-    case minato:start_pool(Name, Opts) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, Reason} -> {error, Reason}
+    case connection(Config) of
+        {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
+            Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
+            started(minato:start_pool(Name, Opts));
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 -doc """
@@ -243,16 +354,71 @@ Start a listener for `LISTEN`, on a connection of its own.
 `LISTEN` is session state, so it cannot share the pool: a notification is
 delivered to the session that registered for it, and a pooled connection would
 deliver it to whichever caller happened to hold it next.
+
+`Config` is read as `start_pool/2` reads it, without `pool_size`, and a
+connection minato will not open as asked is refused the same way.
 """.
 -spec start_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    case minato:start_listener(Name, #{connection => Connection}) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, Reason} -> {error, Reason}
+    case connection(Config) of
+        {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
+            started(minato:start_listener(Name, #{connection => Connection}));
+        {error, Reason} ->
+            {error, Reason}
     end.
+
+-doc false.
+%% The minato connection `Config` describes, or why minato would not open
+%% it, without connecting. Asked before a pool or a listener is started:
+%% minato finds the same in the process it starts, which ends in a crash
+%% report, and the notifier asks for its listener again every five seconds.
+%% `shigoto_config:check/0` asks it of the `notifier` setting.
+-spec connection(map()) ->
+    {ok, map()} | {error, {invalid_option, atom()} | {missing_option, user}}.
+connection(Config) ->
+    case maps:fold(fun connection/3, #{}, Config) of
+        #{user := _} = Connection ->
+            case minato_conn:validate(Connection) of
+                ok -> {ok, Connection};
+                {error, Reason} -> {error, Reason}
+            end;
+        _NoUser ->
+            {error, {missing_option, user}}
+    end.
+
+%% A key nothing reads changes nothing, and whoever wrote `sslmode`, or
+%% misspelt `ssl_options`, believes it did. The keys are named and never
+%% their values, and a key that is not an atom is not repeated: a map
+%% written the wrong way round has its values for keys.
+-spec warned_of_keys_not_read(atom(), map()) -> ok.
+warned_of_keys_not_read(Name, Config) ->
+    Read = ?SPELLED ++ ?AS_WRITTEN ++ ?NOT_A_CONNECTION_OPTION,
+    case lists:usort([named(Key) || Key := _Value <- Config, not lists:member(Key, Read)]) of
+        [] ->
+            ok;
+        Keys ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_connection_keys_not_read",
+                name => Name,
+                keys => Keys,
+                warning =>
+                    ~"these keys are no option of a connection and change nothing: it is opened as if they were not given",
+                action =>
+                    ~"correct or remove them; a later major release refuses a key it does not read"
+            }),
+            ok
+    end.
+
+-spec named(term()) -> atom().
+named(Key) when is_atom(Key) -> Key;
+named(_Key) -> not_an_atom.
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({error, {already_started, Pid}}) when is_pid(Pid) -> {ok, Pid};
+started({error, Reason}) -> {error, Reason}.
 
 %%----------------------------------------------------------------------
 %% Transactions
@@ -292,13 +458,16 @@ opened(Pool, Fun) ->
     _ = erlang:put({?HOLDER, Pool}, Holder),
     try
         ok = begun_on(Holder),
-        committed(Holder, Fun())
-    catch
-        Class:Reason:Stacktrace ->
-            _ = ran(Holder, ~"ROLLBACK", [], #{}),
-            erlang:raise(Class, Reason, Stacktrace)
-    after
+        Result = committed(Holder, Fun()),
         _ = erlang:erase({?HOLDER, Pool}),
+        Result
+    after
+        %% Still registered here, the transaction did not commit.
+        _ =
+            case erlang:erase({?HOLDER, Pool}) of
+                undefined -> ok;
+                _Holder -> ran(Holder, ~"ROLLBACK", [], #{})
+            end,
         release(Holder)
     end.
 
@@ -377,6 +546,9 @@ executed(Conn, SQL, Params, Opts) ->
         {error, Reason} -> {{error, Reason}, Conn}
     end.
 
+%% Waits for the holder's answer for as long as it takes. minato ends the
+%% statement at its `timeout`, so whatever ends it comes back as its error. A
+%% wait that gave up first left the statement running in front of the COMMIT.
 -spec ran(pid(), iodata(), [term()], map()) -> result() | {error, error()}.
 ran(Holder, SQL, Params, Opts) ->
     Tag = make_ref(),
@@ -388,7 +560,6 @@ ran(Holder, SQL, Params, Opts) ->
             Answer;
         {'DOWN', Monitor, process, Holder, Reason} ->
             {error, {holder_died, Reason}}
-    after ?CALL_TIMEOUT -> {error, timeout}
     end.
 
 -spec release(pid()) -> ok.
@@ -616,6 +787,49 @@ kura_repo(Pool) ->
 %% Shapes
 %%----------------------------------------------------------------------
 
+-doc false.
+%% The columns of shigoto's tables. Naming them here is what makes them atoms
+%% before the first statement is sent: see the moduledoc.
+-spec columns() -> [atom(), ...].
+columns() ->
+    [
+        archived_at,
+        args,
+        attempt,
+        attempted_at,
+        batch_id,
+        callback_args,
+        callback_worker,
+        cancelled_at,
+        completed_at,
+        completed_jobs,
+        depends_on,
+        deps_results,
+        discarded_at,
+        discarded_jobs,
+        errors,
+        heartbeat_at,
+        id,
+        inserted_at,
+        last_scheduled_at,
+        max_attempts,
+        meta,
+        name,
+        on_dependency_failure,
+        partition_key,
+        priority,
+        progress,
+        queue,
+        result,
+        schedule,
+        scheduled_at,
+        state,
+        tags,
+        total_jobs,
+        unique_key,
+        worker
+    ].
+
 -spec answered({ok, result()} | {error, error()}) -> result() | {error, error()}.
 answered({ok, Result}) -> Result;
 answered({error, Reason}) -> {error, Reason}.
@@ -624,25 +838,33 @@ answered({error, Reason}) -> {error, Reason}.
 decoding(Opts) ->
     maps:merge(?DEFAULT_DECODE, maps:without([pool, decode_opts], Opts)).
 
--spec connection(term(), term(), map()) -> map().
-connection(host, Value, Connection) -> Connection#{host => text(Value)};
-connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
-connection(port, Value, Connection) -> Connection#{port => Value};
-connection(database, Value, Connection) -> Connection#{database => binary(Value)};
-connection(user, Value, Connection) -> Connection#{user => binary(Value)};
-connection(username, Value, Connection) -> Connection#{user => binary(Value)};
-connection(password, Value, Connection) -> Connection#{password => binary(Value)};
-connection(ssl, Value, Connection) -> Connection#{ssl => Value};
-connection(ssl_options, Value, Connection) -> Connection#{ssl_options => Value};
-connection(socket_options, Value, Connection) -> Connection#{socket_options => Value};
-connection(_Key, _Value, Connection) -> Connection.
+%% Connection options are handed to minato as the caller wrote them, apart
+%% from the spellings shigoto has always taken for a name or a host.
+-spec connection(term(), dynamic(), map()) -> map().
+connection(host, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(hostname, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(database, Value, Connection) ->
+    Connection#{database => binary(Value)};
+connection(user, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(username, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(password, Value, Connection) ->
+    Connection#{password => binary(Value)};
+connection(Key, Value, Connection) ->
+    case lists:member(Key, ?AS_WRITTEN) of
+        true -> Connection#{Key => Value};
+        false -> Connection
+    end.
 
--spec text(term()) -> string().
+-spec text(dynamic()) -> dynamic().
 text(Value) when is_binary(Value) -> binary_to_list(Value);
 text(Value) when is_atom(Value) -> atom_to_list(Value);
 text(Value) -> Value.
 
--spec binary(term()) -> binary().
+-spec binary(dynamic()) -> dynamic().
 binary(Value) when is_list(Value) -> list_to_binary(Value);
 binary(Value) when is_atom(Value) -> atom_to_binary(Value);
 binary(Value) -> Value.
