@@ -19,6 +19,7 @@ the pull request. CI fails a pull request whose file differs.
 - Cut the worker name in the errors entries a statement builds
 - Keep looking for unique fields in the clear while the check fails
 - Read a deps_results key as a job id in one place
+- Start nothing for a connection minato refuses
 
 ### Documentation
 
@@ -26,6 +27,12 @@ the pull request. CI fails a pull request whose file differs.
 - Say what an instance made invalid on a running node does
 - Rewrap the insert_all/3 paragraph on unique locks
 - Name the rebar3 and the Hex publishing main brought in
+- What minato 1.2 changes for a connection and a statement
+
+### Miscellaneous
+
+- Lock seki 0.6.0
+- Require minato 1.2 and relock
 
 ### Refactoring
 
@@ -36,6 +43,7 @@ the pull request. CI fails a pull request whose file differs.
 - Trace what a call sends to PostgreSQL from a module of its own
 - Insert_all at exactly its unique lock limit and one above
 - Name the tables whose columns have to be atoms
+- Hold shigoto_db to what minato 1.2 answers
 
 ## [1.10.2] - 2026-11-15
 
