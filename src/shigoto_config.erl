@@ -469,6 +469,12 @@ described by its position and what is wrong with it, a `notifier` that is not
 a map as `not_a_map`. `require_encrypted` without a key is refused as
 `{invalid, require_encrypted, no_encryption_key}`.
 
+A `notifier` minato would not connect with is refused by the key that is
+wrong, never its value: `{invalid, notifier, {invalid_option, Key}}`, such as
+`ssl_options` without `ssl => true`, and `{invalid, notifier,
+{missing_option, user}}`. Such a notifier could never listen. Whether its
+server can be reached is not checked: that is tried again while the node runs.
+
 The readers of this module raise the same term, as
 `error({shigoto_config, {invalid, Setting, Value}})`, when a setting is changed
 to something invalid while the application runs. The few that do not raise
@@ -486,7 +492,7 @@ check() ->
         _ = middleware(),
         _ = queue_weights(),
         _ = fair_queues(),
-        _ = notifier_config(),
+        ok = checked(notifier_checked(notifier_config())),
         _ = load_shedding(),
         _ = poll_interval(),
         _ = stage_interval(),
@@ -563,6 +569,17 @@ read_formats_checked(Formats) ->
 
 boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
 boolean_checked(Setting, Value) -> {error, {invalid, Setting, Value}}.
+
+%% A notifier minato does not connect with never listens, however often its
+%% listener is asked for again. One whose server cannot be reached is not
+%% found here: it is tried again while the node runs.
+notifier_checked(undefined) ->
+    ok;
+notifier_checked(Notifier) ->
+    case shigoto_db:connection(Notifier) of
+        {ok, _Connection} -> ok;
+        {error, Reason} -> {error, {invalid, notifier, Reason}}
+    end.
 
 required_has_a_key(true, false) -> {error, {invalid, require_encrypted, no_encryption_key}};
 required_has_a_key(_Required, _HasAKey) -> ok.

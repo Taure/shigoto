@@ -9,7 +9,7 @@
 notifier_test_() ->
     {foreach,
         fun() ->
-            application:set_env(shigoto, notifier, #{host => "localhost"}),
+            application:set_env(shigoto, notifier, #{host => "localhost", user => "postgres"}),
             ok
         end,
         fun(_) ->

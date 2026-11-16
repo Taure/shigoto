@@ -291,6 +291,11 @@ rescues jobs that are still running here.
 - Settings fail in one shape, `{shigoto_config, {invalid, Setting, Value}}`,
   and `shigoto_config:check/0` reads every one of them at boot. A new setting
   gets a reader there and a line in `check/0`.
+- A connection map (`notifier`, `shigoto_db:start_pool/2`) goes through
+  `shigoto_db:connection/1`. minato's options are handed on as written
+  (`?AS_WRITTEN`; a new one is added there), a key nothing reads is warned
+  about, and what minato refuses starts nothing and fails `check/0` for
+  `notifier`. Never rewrite an option so that minato takes it.
 - A failure reason is a class and a reason only with its stacktrace
   (`{Class, Reason, Stack}`). Pass a caught exception to `shigoto_error` that
   way, with `[]` when there is no stack; a two-tuple is a term `perform/1`

@@ -324,6 +324,9 @@ then, and the answer is minato's:
 - `{error, {reserved_name, Name}}` for `minato_overdue` and `minato_sup`,
   which are minato's own processes.
 
+Without `user` (or `username`) there is nobody to connect as:
+`{error, {missing_option, user}}`.
+
 `timeout` is the time every statement on the pool has, the ones shigoto runs
 for a queue and for the heartbeat of a running job among them, so a longer
 one is also how long a connection that has stopped answering holds each of
@@ -371,12 +374,18 @@ start_listener(Name, Config) ->
 %% it, without connecting. Asked before a pool or a listener is started:
 %% minato finds the same in the process it starts, which ends in a crash
 %% report, and the notifier asks for its listener again every five seconds.
--spec connection(map()) -> {ok, map()} | {error, {invalid_option, atom()}}.
+%% `shigoto_config:check/0` asks it of the `notifier` setting.
+-spec connection(map()) ->
+    {ok, map()} | {error, {invalid_option, atom()} | {missing_option, user}}.
 connection(Config) ->
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    case minato_conn:validate(Connection) of
-        ok -> {ok, Connection};
-        {error, Reason} -> {error, Reason}
+    case maps:fold(fun connection/3, #{}, Config) of
+        #{user := _} = Connection ->
+            case minato_conn:validate(Connection) of
+                ok -> {ok, Connection};
+                {error, Reason} -> {error, Reason}
+            end;
+        _NoUser ->
+            {error, {missing_option, user}}
     end.
 
 %% A key nothing reads changes nothing, and whoever wrote `sslmode`, or

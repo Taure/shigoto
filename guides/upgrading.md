@@ -17,8 +17,9 @@ things in. Nothing here needs a change in a worker.
    zero or negative, an encryption key that is not 32 bytes, an unknown
    `encryption_write_format`, `encryption_read_formats` or
    `on_dependency_failure`, a `workers` that is not a list of modules, an
-   `instance` outside `[a-z0-9_]{1,32}`, or a `propagator` that is not a
-   module implementing `shigoto_propagator`. The reason always has one shape,
+   `instance` outside `[a-z0-9_]{1,32}`, a `propagator` that is not a
+   module implementing `shigoto_propagator`, or a `notifier` minato would not
+   connect with (see [minato 1.2](#minato-1-2)). The reason always has one shape,
    `{shigoto_config, {invalid, Setting, Value}}`. In 1.10 such a setting failed
    later, at a timer or in a statement.
 
@@ -184,10 +185,18 @@ what reaches an application through shigoto, in the `notifier` map, in what
 | A column no module on the node names: one you added to a shigoto table, or an alias in a statement of your own | keyed by an atom made for it | keyed by its name as a binary. Every column of shigoto's own tables is still an atom |
 
 A refused connection starts nothing. `shigoto_db:start_pool/2` answers
-`{error, Reason}` with the reason in the table. The notifier logs
-`shigoto_notifier_not_listening` once, with that reason, asks again every
-5 seconds, and the queues poll meanwhile, as they do for any listener that
-cannot be started.
+`{error, Reason}` with the reason in the table, and
+`{error, {missing_option, user}}` for a map without `user`, where it answered
+`{error, invalid_connection}`.
+
+With a `notifier` minato refuses, the application does not start:
+`{shigoto_config, {invalid, notifier, {invalid_option, Key}}}`, or
+`{invalid, notifier, {missing_option, user}}`. In 1.10 such a notifier never
+listened, listened without TLS (`ssl_options` and no `ssl => true`), or
+listened because the option that is wrong was not read (a `timeout` of
+`"5000"`). Check the `notifier` map before you deploy: this is one more
+setting of step 3. A notifier whose server cannot be reached still starts,
+and is tried again while the queues poll.
 
 The `notifier` map and `shigoto_db:start_pool/2` now hand every option of a
 minato connection on to it, where 1.10 read `host`, `port`, `database`, `user`,

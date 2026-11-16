@@ -14,7 +14,8 @@ supervision tree, so it blocks the release's boot while it does. Worst case:
 Before any of that it checks every setting (`shigoto_config:check/0`): an
 encryption key that is not 32 bytes or is listed twice, an unknown
 `encryption_write_format`, a malformed `instance` or `workers`, an interval
-that is zero or negative. The application does not start with one of those,
+that is zero or negative, a `notifier` minato would not connect with. The
+application does not start with one of those,
 and the reason, `{shigoto_config, {invalid, Setting, Value}}`, names the
 setting, never a key. Once per boot it logs
 `shigoto_plaintext_jobs_accepted` while a key is configured and

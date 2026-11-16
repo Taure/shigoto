@@ -61,7 +61,9 @@ config_test_() ->
         fun a_job_is_stale_after_two_heartbeats/0,
         fun an_instance_names_its_own_channel/0,
         fun a_complete_configuration_passes_the_check/0,
-        fun requiring_encryption_needs_a_key/0
+        fun requiring_encryption_needs_a_key/0,
+        fun a_notifier_minato_will_not_connect_with_is_refused/0,
+        fun a_notifier_minato_takes_passes_the_check/0
     ]}.
 
 unset() ->
@@ -396,7 +398,7 @@ a_complete_configuration_passes_the_check() ->
         middleware => [fun(_Job, Next) -> Next() end],
         queue_weights => #{~"mail" => 3},
         fair_queues => [~"mail"],
-        notifier => #{host => "localhost"},
+        notifier => #{host => "localhost", user => "shigoto"},
         load_shedding => #{max_in_flight => 10},
         encryption_key => Key,
         encryption_write_format => v2,
@@ -426,6 +428,57 @@ requiring_encryption_needs_a_key() ->
     application:unset_env(shigoto, encryption_keys),
     application:set_env(shigoto, require_encrypted, false),
     ?assertEqual(ok, shigoto_config:check()).
+
+%% The notifier is the connection `LISTEN` runs on. With options minato does
+%% not open a connection with it never listens, however often it is asked
+%% for again, so the node does not start. The reason names the key and holds
+%% no value.
+a_notifier_minato_will_not_connect_with_is_refused() ->
+    application:set_env(shigoto, pool, some_pool),
+    Notifier = #{host => "db.internal", user => "shigoto", password => "secret"},
+    [
+        begin
+            application:set_env(shigoto, notifier, Refused),
+            ?assertEqual(
+                {Reason, {error, {shigoto_config, {invalid, notifier, Reason}}}},
+                {Reason, shigoto_config:check()}
+            )
+        end
+     || {Reason, Refused} <- [
+            {{invalid_option, ssl_options}, Notifier#{ssl_options => [{verify, verify_peer}]}},
+            {{invalid_option, ssl_options}, Notifier#{ssl => false, ssl_options => []}},
+            {{invalid_option, ssl}, Notifier#{ssl => ~"true"}},
+            {{invalid_option, timeout}, Notifier#{timeout => "5000"}},
+            {{invalid_option, channel_binding}, Notifier#{channel_binding => required}},
+            {{invalid_option, auth}, Notifier#{auth => scram_sha_256}},
+            {{missing_option, user}, maps:remove(user, Notifier)}
+        ]
+    ].
+
+%% Whether the server can be reached is not asked: a notifier that cannot
+%% connect yet is tried again while the node runs. Nor is a key refused that
+%% is no option of a connection.
+a_notifier_minato_takes_passes_the_check() ->
+    application:set_env(shigoto, pool, some_pool),
+    [
+        begin
+            application:set_env(shigoto, notifier, Notifier),
+            ?assertEqual({Notifier, ok}, {Notifier, shigoto_config:check()})
+        end
+     || Notifier <- [
+            #{user => "shigoto"},
+            #{username => ~"shigoto", hostname => "no-such-host.invalid", port => 1},
+            #{
+                user => "shigoto",
+                ssl => true,
+                ssl_options => [{verify, verify_peer}],
+                auth => [scram_sha_256],
+                channel_binding => require,
+                timeout => 30000
+            },
+            #{user => "shigoto", sslmode => require, pool_size => 5, pool => my_repo}
+        ]
+    ].
 
 only_false_turns_required_encryption_off() ->
     ?assertEqual(false, shigoto_config:require_encrypted()),

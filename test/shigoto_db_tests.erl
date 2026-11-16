@@ -83,6 +83,7 @@ options_test_() ->
         fun tls_options_without_tls_start_no_pool/0,
         fun tls_options_without_tls_start_no_listener/0,
         fun an_option_minato_does_not_take_as_written_is_named/0,
+        fun a_connection_without_a_user_starts_nothing/0,
         fun a_name_minato_keeps_for_itself_is_no_pool/0,
         fun every_option_of_a_minato_connection_is_handed_on/0,
         fun an_option_handed_on_is_one_minato_can_refuse/0,
@@ -129,6 +130,18 @@ an_option_minato_does_not_take_as_written_is_named() ->
             {password, #{password => 5432}}
         ]
     ].
+
+a_connection_without_a_user_starts_nothing() ->
+    Config = maps:remove(user, connection()),
+    ?assertEqual(
+        {{error, {missing_option, user}}, []},
+        with_errors_logged(fun() -> shigoto_db:start_pool(?POOL, Config) end)
+    ),
+    ?assertEqual(
+        {{error, {missing_option, user}}, []},
+        with_errors_logged(fun() -> shigoto_db:start_listener(?POOL, Config) end)
+    ),
+    ?assertEqual(undefined, whereis(?POOL)).
 
 a_name_minato_keeps_for_itself_is_no_pool() ->
     [

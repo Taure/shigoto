@@ -197,8 +197,9 @@ sees ciphertext.
 The application does not start with a key that is not 32 bytes, a key listed
 twice, an unknown `encryption_write_format` or `encryption_read_formats`, a
 `workers` that is not a list of atoms, an `instance` that is not lower-case
-letters, digits and `_`, `require_encrypted` without a key, or any other
-setting it cannot run with. The error is
+letters, digits and `_`, `require_encrypted` without a key, a `notifier`
+minato would not connect with (`ssl_options` without `ssl => true`, which
+would not be encrypted), or any other setting it cannot run with. The error is
 `{shigoto_config, {invalid, Setting, Value}}`. It names the setting and never
 contains a key: a key is described by its position in the list and what is
 wrong with it.

@@ -140,10 +140,15 @@ up, so raise it for the statement that needs it (`shigoto_db:query/4` takes a
 minato refuses a connection it would not open as asked, before it opens a
 socket: `ssl_options` without `ssl => true`, an `ssl` that is not a boolean,
 a `timeout` that is not a number, a `channel_binding` or an `auth` it does not
-know, `ssl_options` that resume a TLS session. `shigoto_db:start_pool/2` then
-answers `{error, {invalid_option, Key}}` and starts no pool. A `notifier`
-refused that way is logged once as `shigoto_notifier_not_listening`, with the
-same reason, and asked for again every 5 seconds; the queues poll meanwhile.
+know, `ssl_options` that resume a TLS session, a map without `user`.
+`shigoto_db:start_pool/2` then answers `{error, {invalid_option, Key}}`, or
+`{error, {missing_option, user}}`, and starts no pool. With a `notifier`
+refused that way the application does not start:
+`{shigoto_config, {invalid, notifier, {invalid_option, Key}}}`. Such a
+notifier could never listen. One whose server cannot be reached is another
+matter: the application starts, the notifier logs
+`shigoto_notifier_not_listening` once and keeps asking, and the queues poll
+meanwhile.
 
 ### Stopping a node
 

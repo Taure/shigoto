@@ -16,6 +16,8 @@
     the_heartbeat_stops_after_the_queues_and_executors/1,
     a_node_that_cuts_the_shutdown_short_is_warned_about/1,
     a_node_that_requires_encryption_without_a_key_does_not_start/1,
+    a_node_whose_notifier_minato_will_not_connect_with_does_not_start/1,
+    a_node_whose_notifier_cannot_reach_its_server_starts/1,
     a_node_with_a_key_and_no_list_of_workers_is_warned_about/1,
     every_column_is_an_atom_once_the_database_module_is_loaded/1
 ]).
@@ -35,6 +37,8 @@ all() ->
         the_heartbeat_stops_after_the_queues_and_executors,
         a_node_that_cuts_the_shutdown_short_is_warned_about,
         a_node_that_requires_encryption_without_a_key_does_not_start,
+        a_node_whose_notifier_minato_will_not_connect_with_does_not_start,
+        a_node_whose_notifier_cannot_reach_its_server_starts,
         a_node_with_a_key_and_no_list_of_workers_is_warned_about,
         every_column_is_an_atom_once_the_database_module_is_loaded
     ].
@@ -84,6 +88,48 @@ a_node_that_requires_encryption_without_a_key_does_not_start(_Config) ->
             }}},
         application:ensure_all_started(shigoto)
     ).
+
+%% TLS options without `ssl => true` are a connection minato does not open,
+%% so this notifier could never listen.
+a_node_whose_notifier_minato_will_not_connect_with_does_not_start(_Config) ->
+    application:set_env(
+        shigoto, notifier, (connection())#{ssl_options => [{verify, verify_peer}]}
+    ),
+    ?assertMatch(
+        {error,
+            {shigoto, {
+                {shigoto_config, {invalid, notifier, {invalid_option, ssl_options}}},
+                {shigoto_app, start, _}
+            }}},
+        application:ensure_all_started(shigoto)
+    ).
+
+%% Nothing listens on the port. That is a server to wait for, not a setting
+%% to refuse: the node starts, its queues run, and the notifier keeps asking.
+a_node_whose_notifier_cannot_reach_its_server_starts(_Config) ->
+    application:set_env(shigoto, notifier, (connection())#{port => 1}),
+    _ = minato:stop_listener(shigoto_listener),
+    ok = shigoto_log_probe:attach(),
+    try
+        {ok, _} = application:ensure_all_started(shigoto),
+        ok = wait_for(fun() -> not_listening_reported() =/= [] end, 50),
+        ?assertNot(notifier_listening()),
+        ?assert(is_pid(whereis(shigoto_listener))),
+        ?assertMatch(
+            [{{shigoto_queue, ~"boot_probe"}, Pid, _, _}] when is_pid(Pid),
+            supervisor:which_children(shigoto_queue_sup)
+        )
+    after
+        shigoto_log_probe:detach(),
+        minato:stop_listener(shigoto_listener)
+    end.
+
+not_listening_reported() ->
+    receive
+        {log, warning, #{msg := ~"shigoto_notifier_not_listening", reason := Reason}} ->
+            [Reason | not_listening_reported()]
+    after 0 -> []
+    end.
 
 a_node_with_a_key_and_no_list_of_workers_is_warned_about(_Config) ->
     Warned = fun() ->
