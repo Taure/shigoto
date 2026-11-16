@@ -87,7 +87,9 @@ config :shigoto,
 ### Connection options
 
 `shigoto_db:start_pool/2` and the `notifier` map, which is the connection
-`LISTEN` runs on, read the same keys:
+`LISTEN` runs on, read the same keys. They are the options of a minato
+connection, and what each does is in minato's
+[configuration guide](https://hexdocs.pm/minato/configuration.html):
 
 | Key | |
 |-----|---|
@@ -98,20 +100,41 @@ config :shigoto,
 | `password` | Text, or a fun of no arguments that answers it |
 | `ssl` | `true` for TLS, with the certificate checked against the trust store of the operating system and for `host` |
 | `ssl_options` | Options for `ssl`, each in place of a default. Only with `ssl => true` |
+| `auth` | The methods the server may ask for. `[scram_sha_256]` accepts nothing else |
+| `channel_binding` | `require` ties SCRAM to the TLS session, or does not connect |
+| `timeout` | Milliseconds a statement has, a write has, and the server may send nothing for. `15000` unless given |
+| `connect_timeout` | Milliseconds to connect in, the TLS handshake included. `5000` unless given |
+| `cancel_timeout` | Milliseconds a cancelled statement has to say so. `5000` unless given |
 | `socket_options` | Options for the socket, such as `{send_timeout, Milliseconds}` |
+| `parameters` | Startup parameters, such as `#{<<"application_name">> => <<"my_app">>}` |
+| `transport` | `socket` unless given, or `inet` |
+| `prepared_statements` | How many statements a connection keeps parsed, `64` unless given. `0` behind a pooler that does not follow named statements |
+| `frame_opts` | `#{max_message_length => Bytes}`, for a single message above 64 MB |
 | `pool_size` | `start_pool/2` only: the most connections the pool holds. `10` unless given |
 
-Any other key is left out. A pool that needs another of minato's options, such
-as `timeout`, `auth` or `channel_binding`, is started with
-`minato:start_pool/2`, or declared in minato's own configuration, and named
-with `pool`.
+`host`, `database`, `user` and `password` are taken as strings, binaries or
+atoms. Everything else is handed to minato as it was written. Any other key
+is left out.
+
+The setting for a network anybody else is on, as minato's guide has it:
+
+```erlang
+#{ssl => true, auth => [scram_sha_256], channel_binding => require}
+```
+
+`timeout` is the time every statement on the pool has, the ones shigoto runs
+for a queue and for the heartbeat of a running job among them. A longer one
+is also how long a connection that has stopped answering holds each of those
+up, so raise it for the statement that needs it (`shigoto_db:query/4` takes a
+`timeout`) before raising it for the pool.
 
 minato refuses a connection it would not open as asked, before it opens a
 socket: `ssl_options` without `ssl => true`, an `ssl` that is not a boolean,
-`ssl_options` that resume a TLS session. `shigoto_db:start_pool/2` then answers
-`{error, {invalid_option, Key}}` and starts no pool. A `notifier` refused that
-way is logged once as `shigoto_notifier_not_listening`, with the same reason,
-and asked for again every 5 seconds; the queues poll meanwhile.
+a `timeout` that is not a number, a `channel_binding` or an `auth` it does not
+know, `ssl_options` that resume a TLS session. `shigoto_db:start_pool/2` then
+answers `{error, {invalid_option, Key}}` and starts no pool. A `notifier`
+refused that way is logged once as `shigoto_notifier_not_listening`, with the
+same reason, and asked for again every 5 seconds; the queues poll meanwhile.
 
 ### Stopping a node
 

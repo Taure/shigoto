@@ -177,7 +177,7 @@ what reaches an application through shigoto, in the `notifier` map, in what
 | `{server_name_indication, disable}` in `ssl_options` | also turned the hostname check off | the certificate is still checked for `host`, and one without it fails the connect: `{tls, {bad_cert, hostname_check_failed}}`. `{verify, verify_none}` is how to turn the check off |
 | A pool named `minato_overdue` or `minato_sup` | | refused: `{reserved_name, Name}`. They are minato's own processes |
 | A pool to another machine whose options do not mention `ssl` | | minato logs `unencrypted_connection` once when the pool starts. `ssl => false` says it was meant |
-| A statement whose answer takes longer than the pool's `timeout` (15 seconds unless the pool was started with another) to arrive whole | read to its end, as long as rows kept coming | cancelled on the server: `{error, {pgsql_error, #{code := ~"57014"}}}`, or `{error, {socket, timeout}}` and a closed connection from a server that goes on sending. What shigoto runs for its queues answers with few rows. `insert_all/1,2` and `cancel_by/1` answer with every job they touched, so a very large call can reach the deadline: split it. A statement of your own through `shigoto_db:query/4` takes a `timeout` |
+| A statement whose answer takes longer than the pool's `timeout` (15 seconds unless the pool was started with another) to arrive whole | read to its end, as long as rows kept coming | cancelled on the server: `{error, {pgsql_error, #{code := ~"57014"}}}`, or `{error, {socket, timeout}}` and a closed connection from a server that goes on sending. What shigoto runs for its queues answers with few rows. `insert_all/1,2` and `cancel_by/1` answer with every job they touched, so a very large call can reach the deadline: split it. A statement of your own through `shigoto_db:query/4` takes a `timeout`, and a pool started with `shigoto_db:start_pool/2` takes one for all of its statements |
 | A write the server does not read | waited for ever | fails after the pool's `timeout`: `{error, {socket, timeout}}`, and the connection is closed. `{send_timeout, Ms}` in `socket_options` sets another bound |
 | A column no module on the node names: one you added to a shigoto table, or an alias in a statement of your own | keyed by an atom made for it | keyed by its name as a binary. Every column of shigoto's own tables is still an atom |
 
@@ -187,9 +187,15 @@ A refused connection starts nothing. `shigoto_db:start_pool/2` answers
 5 seconds, and the queues poll meanwhile, as they do for any listener that
 cannot be started.
 
-The keys shigoto reads from a connection map are listed in
-[Getting Started](getting-started.md#connection-options). Any other key is
-left out, as before, so minato never sees a key it does not know from shigoto.
+The `notifier` map and `shigoto_db:start_pool/2` now hand every option of a
+minato connection on to it, where 1.10 read `host`, `port`, `database`, `user`,
+`password`, `ssl`, `ssl_options` and `socket_options` and left the rest out.
+A map that held one of the others all along (`timeout`, `connect_timeout`,
+`cancel_timeout`, `auth`, `channel_binding`, `parameters`, `transport`,
+`prepared_statements`, `frame_opts`) is opened with it from this release on,
+and refused if minato does not take its value: a `timeout` of `"5000"` is
+`{invalid_option, timeout}`. They are listed in
+[Getting Started](getting-started.md#connection-options).
 
 ## Connection poolers
 

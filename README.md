@@ -239,7 +239,7 @@ All optional except `perform/1`:
 | `load_shedding` | — | CoDel config map for seki |
 | `queue_weights` | `#{}` | Weighted polling distribution |
 | `fair_queues` | `[]` | Queues using partition-key fair claiming |
-| `notifier` | — | LISTEN/NOTIFY connection config: `host`, `port`, `database`, `user`, `password`, `ssl`, `ssl_options`, `socket_options`. `ssl_options` need `ssl => true` |
+| `notifier` | — | LISTEN/NOTIFY connection config: `host`, `port`, `database`, `user`, `password` and any other option of a minato connection, such as `ssl`, `auth` or `timeout`. `ssl_options` need `ssl => true` |
 | `stage_interval` | `1000` | Milliseconds between due-job stager sweeps (needs `notifier`) |
 
 ## Supervision Tree

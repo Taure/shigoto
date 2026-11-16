@@ -83,7 +83,9 @@ options_test_() ->
         fun tls_options_without_tls_start_no_pool/0,
         fun tls_options_without_tls_start_no_listener/0,
         fun an_option_minato_does_not_take_as_written_is_named/0,
-        fun a_name_minato_keeps_for_itself_is_no_pool/0
+        fun a_name_minato_keeps_for_itself_is_no_pool/0,
+        fun every_option_of_a_minato_connection_is_handed_on/0,
+        fun an_option_handed_on_is_one_minato_can_refuse/0
     ].
 
 tls_options_without_tls_start_no_pool() ->
@@ -130,6 +132,67 @@ a_name_minato_keeps_for_itself_is_no_pool() ->
     [
         ?assertEqual({error, {reserved_name, Name}}, shigoto_db:start_pool(Name, connection()))
      || Name <- [minato_overdue, minato_sup]
+    ].
+
+%% As written, apart from the name of the host, the database, the user and
+%% the password, which keep the spellings and the types shigoto has always
+%% taken. `pool_size` is the pool's and no part of a connection.
+every_option_of_a_minato_connection_is_handed_on() ->
+    Password = fun() -> ~"secret" end,
+    AsWritten = #{
+        port => 6543,
+        parameters => #{~"application_name" => ~"shigoto"},
+        ssl => true,
+        ssl_options => [{verify, verify_peer}],
+        channel_binding => require,
+        auth => [scram_sha_256],
+        connect_timeout => 1000,
+        timeout => 60000,
+        cancel_timeout => 2000,
+        socket_options => [{send_timeout, 30000}],
+        transport => inet,
+        prepared_statements => 0,
+        frame_opts => #{max_message_length => 1048576}
+    },
+    ?assertEqual(
+        {ok, AsWritten#{
+            host => "db.internal", database => ~"jobs", user => ~"shigoto", password => ~"secret"
+        }},
+        shigoto_db:connection(AsWritten#{
+            hostname => ~"db.internal",
+            database => jobs,
+            username => "shigoto",
+            password => "secret",
+            pool_size => 3
+        })
+    ),
+    ?assertEqual(
+        {ok, #{host => "db.internal", user => ~"shigoto", password => Password}},
+        shigoto_db:connection(#{host => 'db.internal', user => shigoto, password => Password})
+    ).
+
+an_option_handed_on_is_one_minato_can_refuse() ->
+    [
+        begin
+            ?assertEqual(
+                {Key, {{error, {invalid_option, Key}}, []}},
+                {Key,
+                    with_errors_logged(fun() ->
+                        shigoto_db:start_pool(?POOL, (connection())#{Key => Value})
+                    end)}
+            ),
+            ?assertEqual(
+                {Key, {error, {invalid_option, Key}}},
+                {Key, shigoto_db:start_listener(?POOL, (connection())#{Key => Value})}
+            )
+        end
+     || {Key, Value} <- [
+            {timeout, "5000"},
+            {connect_timeout, -1},
+            {cancel_timeout, soon},
+            {channel_binding, required},
+            {auth, scram_sha_256}
+        ]
     ].
 
 connection() ->

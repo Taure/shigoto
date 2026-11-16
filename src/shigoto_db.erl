@@ -123,6 +123,7 @@ opened through kura raises them the same way. A server error keeps only its
     ignores_sandbox/0,
     start_pool/2,
     start_listener/2,
+    connection/1,
     columns/0
 ]).
 
@@ -150,6 +151,24 @@ opened through kura raises them the same way. A server error keeps only its
 -define(IGNORES_SANDBOX, {?MODULE, ignores_sandbox}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
+%% The options of a minato connection that are handed on as they were
+%% written. `host`, `database`, `user` and `password` are handed on too, in
+%% the spellings and types shigoto has always taken: see `connection/3`.
+-define(AS_WRITTEN, [
+    port,
+    parameters,
+    ssl,
+    ssl_options,
+    channel_binding,
+    auth,
+    connect_timeout,
+    timeout,
+    cancel_timeout,
+    socket_options,
+    transport,
+    prepared_statements,
+    frame_opts
+]).
 
 -doc """
 The shape a statement answers with. `command` is an atom for a command tag
@@ -254,23 +273,33 @@ Start a pool from shigoto's configuration.
 Takes what shigoto and its users already write - `host`, `port`, `database`,
 `user`, `password`, `pool_size` - and gives minato what it takes.
 
-These keys are read: `host` (or `hostname`), `port`, `database`, `user` (or
-`username`), `password`, `ssl`, `ssl_options`, `socket_options` and
-`pool_size`. Any other key is left out, so a pool that needs another of
-minato's options (`timeout`, `auth`, `channel_binding`, ...) is started with
-`minato:start_pool/2` and named with `pool`.
+`host` (or `hostname`), `database`, `user` (or `username`) and `password` are
+taken as strings, binaries or atoms, and `password` also as a fun of no
+arguments. Every other option of a minato connection is handed on as it was
+written: `port`, `ssl`, `ssl_options`, `auth`, `channel_binding`, `timeout`,
+`connect_timeout`, `cancel_timeout`, `socket_options`, `parameters`,
+`transport`, `prepared_statements` and `frame_opts`. What each does is in
+minato's configuration guide. `pool_size` is the most connections the pool
+holds, 10 unless given. Any other key is left out.
 
-What is read is handed to minato as it was written, and minato refuses a
-connection it will not open as asked. No pool is started then, and the answer
-is minato's:
+minato refuses a connection it will not open as asked. No pool is started
+then, and the answer is minato's:
 
 - `{error, {invalid_option, ssl_options}}` for `ssl_options` without
   `ssl => true`, since the connection would not be encrypted, and for options
   that resume a TLS session or pause the handshake;
-- `{error, {invalid_option, Key}}` for an `ssl` that is not a boolean, a
-  `host` that is no host or a `password` that is no text;
+- `{error, {invalid_option, Key}}` for a value minato does not take: an `ssl`
+  that is not a boolean, a `timeout`, `connect_timeout` or `cancel_timeout`
+  that is neither a number of milliseconds nor `infinity`, a
+  `channel_binding` or an `auth` it does not know, a `host` that is no host,
+  a `password` that is no text;
 - `{error, {reserved_name, Name}}` for `minato_overdue` and `minato_sup`,
   which are minato's own processes.
+
+`timeout` is the time every statement on the pool has, the ones shigoto runs
+for a queue and for the heartbeat of a running job among them, so a longer
+one is also how long a connection that has stopped answering holds each of
+those up.
 
 minato logs `unencrypted_connection` once for a pool whose `host` is another
 machine and whose options do not mention `ssl`. `ssl => false` says it was
@@ -279,11 +308,12 @@ meant.
 -spec start_pool(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
-    case minato_conn:validate(Connection) of
-        ok -> started(minato:start_pool(Name, Opts));
-        {error, Reason} -> {error, Reason}
+    case connection(Config) of
+        {ok, Connection} ->
+            Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
+            started(minato:start_pool(Name, Opts));
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 -doc """
@@ -299,12 +329,21 @@ connection minato will not open as asked is refused the same way.
 -spec start_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
+    case connection(Config) of
+        {ok, Connection} -> started(minato:start_listener(Name, #{connection => Connection}));
+        {error, Reason} -> {error, Reason}
+    end.
+
+-doc false.
+%% The minato connection `Config` describes, or why minato would not open
+%% it, without connecting. Asked before a pool or a listener is started:
+%% minato finds the same in the process it starts, which ends in a crash
+%% report, and the notifier asks for its listener again every five seconds.
+-spec connection(map()) -> {ok, map()} | {error, {invalid_option, atom()}}.
+connection(Config) ->
     Connection = maps:fold(fun connection/3, #{}, Config),
-    %% Asked before anything is started: minato finds the same in the process
-    %% it starts, which ends in a crash report, and the notifier asks for its
-    %% listener again every five seconds.
     case minato_conn:validate(Connection) of
-        ok -> started(minato:start_listener(Name, #{connection => Connection}));
+        ok -> {ok, Connection};
         {error, Reason} -> {error, Reason}
     end.
 
@@ -734,17 +773,23 @@ decoding(Opts) ->
 %% Connection options are handed to minato as the caller wrote them, apart
 %% from the spellings shigoto has always taken for a name or a host.
 -spec connection(term(), dynamic(), map()) -> map().
-connection(host, Value, Connection) -> Connection#{host => text(Value)};
-connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
-connection(port, Value, Connection) -> Connection#{port => Value};
-connection(database, Value, Connection) -> Connection#{database => binary(Value)};
-connection(user, Value, Connection) -> Connection#{user => binary(Value)};
-connection(username, Value, Connection) -> Connection#{user => binary(Value)};
-connection(password, Value, Connection) -> Connection#{password => binary(Value)};
-connection(ssl, Value, Connection) -> Connection#{ssl => Value};
-connection(ssl_options, Value, Connection) -> Connection#{ssl_options => Value};
-connection(socket_options, Value, Connection) -> Connection#{socket_options => Value};
-connection(_Key, _Value, Connection) -> Connection.
+connection(host, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(hostname, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(database, Value, Connection) ->
+    Connection#{database => binary(Value)};
+connection(user, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(username, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(password, Value, Connection) ->
+    Connection#{password => binary(Value)};
+connection(Key, Value, Connection) ->
+    case lists:member(Key, ?AS_WRITTEN) of
+        true -> Connection#{Key => Value};
+        false -> Connection
+    end.
 
 -spec text(dynamic()) -> dynamic().
 text(Value) when is_binary(Value) -> binary_to_list(Value);

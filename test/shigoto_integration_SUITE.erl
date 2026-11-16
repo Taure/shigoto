@@ -41,6 +41,7 @@
     test_an_answer_still_arriving_at_its_deadline_is_cancelled/1,
     test_a_cancelled_answer_rolls_its_transaction_back/1,
     test_a_statement_in_a_transaction_is_waited_for_until_it_ends/1,
+    test_a_pool_and_a_listener_are_opened_with_the_options_given/1,
     test_a_column_no_module_names_is_answered_under_a_binary/1,
     test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
@@ -116,6 +117,7 @@ all() ->
         test_an_answer_still_arriving_at_its_deadline_is_cancelled,
         test_a_cancelled_answer_rolls_its_transaction_back,
         test_a_statement_in_a_transaction_is_waited_for_until_it_ends,
+        test_a_pool_and_a_listener_are_opened_with_the_options_given,
         test_a_column_no_module_names_is_answered_under_a_binary,
         test_worker_inherits_logger_metadata,
         test_insert_and_claim,
@@ -605,6 +607,49 @@ test_a_statement_in_a_transaction_is_waited_for_until_it_ends(_Config) ->
             end)
         )
     after
+        minato:stop_pool(Pool)
+    end.
+
+%% `timeout` and `parameters` are options of a minato connection that shigoto
+%% has no use for itself. The pool cancels at the `timeout` it was started
+%% with, and the server knows both sessions by the name they were given.
+test_a_pool_and_a_listener_are_opened_with_the_options_given(_Config) ->
+    Pool = shigoto_brief_pool,
+    Listener = shigoto_brief_listener,
+    Connection = #{
+        host => "localhost",
+        port => shigoto_test_repo:listen_port(),
+        database => "shigoto_test",
+        user => "postgres",
+        password => "root"
+    },
+    {ok, _} = shigoto_db:start_pool(Pool, Connection#{
+        pool_size => 1,
+        timeout => 200,
+        parameters => #{~"application_name" => ~"shigoto_brief_pool"}
+    }),
+    {ok, _} = shigoto_db:start_listener(Listener, Connection#{
+        parameters => #{~"application_name" => ~"shigoto_brief_listener"}
+    }),
+    try
+        ?assertMatch(
+            {error, {pgsql_error, #{code := ~"57014"}}},
+            shigoto_db:query(Pool, long_answer(), [])
+        ),
+        ok = wait_until(fun() -> minato:listen(Listener, ~"shigoto_brief") =:= ok end),
+        ?assertMatch(
+            #{rows := [#{name := ~"shigoto_brief_listener"}, #{name := ~"shigoto_brief_pool"}]},
+            shigoto_db:query(
+                Pool,
+                ~"""
+                SELECT DISTINCT application_name AS name FROM pg_stat_activity
+                WHERE application_name LIKE 'shigoto\_brief\_%' ORDER BY 1
+                """,
+                []
+            )
+        )
+    after
+        minato:stop_listener(Listener),
         minato:stop_pool(Pool)
     end.
 
