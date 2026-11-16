@@ -19,8 +19,13 @@ catch up the missed notifications would have caused.
 A listener that cannot be started, a subscription it refuses and a listener
 that goes away are all tried again (after 5, 5 and 1 seconds). The first
 failure logs `shigoto_notifier_not_listening`; the queues poll throughout.
+That goes for a `notifier` minato will not connect with as well, such as
+`ssl_options` without `ssl => true`: the reason logged is
+`{invalid_option, ssl_options}`, and no listener is started until the setting
+is one minato takes.
 
-Requires `notifier` config with database connection details:
+Requires `notifier` config with database connection details, the keys
+`shigoto_db:start_pool/2` reads apart from `pool_size`:
 
 ```erlang
 {shigoto, [

@@ -19,7 +19,8 @@ notifier_test_() ->
         end,
         [
             {timeout, 30, fun a_refused_subscription_is_tried_again/0},
-            fun a_listener_that_dies_while_asked_does_not_take_the_notifier_down/0
+            fun a_listener_that_dies_while_asked_does_not_take_the_notifier_down/0,
+            fun a_connection_minato_refuses_is_reported_once_and_starts_nothing/0
         ]}.
 
 a_refused_subscription_is_tried_again() ->
@@ -43,6 +44,42 @@ a_listener_that_dies_while_asked_does_not_take_the_notifier_down() ->
     ?assertEqual(undefined, listening()),
     ?assert(is_process_alive(Notifier)),
     ?assertNot(is_process_alive(Listener)).
+
+%% TLS options without `ssl => true` are a connection minato does not open.
+%% The notifier says so in its own warning, and no listener is started only
+%% to stop with a crash report, which would come again with every retry.
+a_connection_minato_refuses_is_reported_once_and_starts_nothing() ->
+    application:set_env(shigoto, notifier, #{
+        host => "localhost", user => "postgres", ssl_options => [{verify, verify_peer}]
+    }),
+    ok = shigoto_log_probe:attach(),
+    try
+        {ok, Notifier} = shigoto_notifier:start_link(),
+        ?assertEqual(undefined, listening()),
+        ?assertMatch(
+            [
+                {warning, #{
+                    msg := ~"shigoto_notifier_not_listening",
+                    reason := {invalid_option, ssl_options},
+                    retry_ms := 5000
+                }}
+            ],
+            warnings_and_errors()
+        ),
+        ?assertEqual(undefined, whereis(shigoto_listener)),
+        ?assert(is_process_alive(Notifier))
+    after
+        shigoto_log_probe:detach()
+    end.
+
+warnings_and_errors() ->
+    receive
+        {log, Level, Report} when Level =:= warning; Level =:= error ->
+            [{Level, Report} | warnings_and_errors()];
+        {log, _Level, _Report} ->
+            warnings_and_errors()
+    after 0 -> []
+    end.
 
 listening() ->
     case sys:get_state(shigoto_notifier) of

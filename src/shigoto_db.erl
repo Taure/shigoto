@@ -243,15 +243,36 @@ Start a pool from shigoto's configuration.
 
 Takes what shigoto and its users already write - `host`, `port`, `database`,
 `user`, `password`, `pool_size` - and gives minato what it takes.
+
+These keys are read: `host` (or `hostname`), `port`, `database`, `user` (or
+`username`), `password`, `ssl`, `ssl_options`, `socket_options` and
+`pool_size`. Any other key is left out, so a pool that needs another of
+minato's options (`timeout`, `auth`, `channel_binding`, ...) is started with
+`minato:start_pool/2` and named with `pool`.
+
+What is read is handed to minato as it was written, and minato refuses a
+connection it will not open as asked. No pool is started then, and the answer
+is minato's:
+
+- `{error, {invalid_option, ssl_options}}` for `ssl_options` without
+  `ssl => true`, since the connection would not be encrypted, and for options
+  that resume a TLS session or pause the handshake;
+- `{error, {invalid_option, Key}}` for an `ssl` that is not a boolean, a
+  `host` that is no host or a `password` that is no text;
+- `{error, {reserved_name, Name}}` for `minato_overdue` and `minato_sup`,
+  which are minato's own processes.
+
+minato logs `unencrypted_connection` once for a pool whose `host` is another
+machine and whose options do not mention `ssl`. `ssl => false` says it was
+meant.
 """.
 -spec start_pool(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
     Connection = maps:fold(fun connection/3, #{}, Config),
     Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
-    case minato:start_pool(Name, Opts) of
-        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
-        {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
+    case minato_conn:validate(Connection) of
+        ok -> started(minato:start_pool(Name, Opts));
         {error, Reason} -> {error, Reason}
     end.
 
@@ -261,16 +282,26 @@ Start a listener for `LISTEN`, on a connection of its own.
 `LISTEN` is session state, so it cannot share the pool: a notification is
 delivered to the session that registered for it, and a pooled connection would
 deliver it to whichever caller happened to hold it next.
+
+`Config` is read as `start_pool/2` reads it, without `pool_size`, and a
+connection minato will not open as asked is refused the same way.
 """.
 -spec start_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
     Connection = maps:fold(fun connection/3, #{}, Config),
-    case minato:start_listener(Name, #{connection => Connection}) of
-        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
-        {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
+    %% Asked before anything is started: minato finds the same in the process
+    %% it starts, which ends in a crash report, and the notifier asks for its
+    %% listener again every five seconds.
+    case minato_conn:validate(Connection) of
+        ok -> started(minato:start_listener(Name, #{connection => Connection}));
         {error, Reason} -> {error, Reason}
     end.
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({error, {already_started, Pid}}) when is_pid(Pid) -> {ok, Pid};
+started({error, Reason}) -> {error, Reason}.
 
 %%----------------------------------------------------------------------
 %% Transactions
