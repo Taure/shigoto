@@ -84,6 +84,35 @@ config :shigoto,
 | `fair_queues` | `[]` | Queue names that use partition-key fair claiming |
 | `fanout_queues` | `[]` | Broadcast queues where all nodes process every job (see [Fanout Queues](fanout-queues.md)) |
 
+### Connection options
+
+`shigoto_db:start_pool/2` and the `notifier` map, which is the connection
+`LISTEN` runs on, read the same keys:
+
+| Key | |
+|-----|---|
+| `host`, or `hostname` | A name or an address. `"localhost"` unless given |
+| `port` | `5432` unless given |
+| `database` | The name of the user unless given |
+| `user`, or `username` | Required |
+| `password` | Text, or a fun of no arguments that answers it |
+| `ssl` | `true` for TLS, with the certificate checked against the trust store of the operating system and for `host` |
+| `ssl_options` | Options for `ssl`, each in place of a default. Only with `ssl => true` |
+| `socket_options` | Options for the socket, such as `{send_timeout, Milliseconds}` |
+| `pool_size` | `start_pool/2` only: the most connections the pool holds. `10` unless given |
+
+Any other key is left out. A pool that needs another of minato's options, such
+as `timeout`, `auth` or `channel_binding`, is started with
+`minato:start_pool/2`, or declared in minato's own configuration, and named
+with `pool`.
+
+minato refuses a connection it would not open as asked, before it opens a
+socket: `ssl_options` without `ssl => true`, an `ssl` that is not a boolean,
+`ssl_options` that resume a TLS session. `shigoto_db:start_pool/2` then answers
+`{error, {invalid_option, Key}}` and starts no pool. A `notifier` refused that
+way is logged once as `shigoto_notifier_not_listening`, with the same reason,
+and asked for again every 5 seconds; the queues poll meanwhile.
+
 ### Stopping a node
 
 When the application stops, each queue waits up to `shutdown_timeout` for its

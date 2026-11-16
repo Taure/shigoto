@@ -155,6 +155,42 @@ New settings with a default: `on_discard_timeout` (60000),
 `notify_min_interval` (10). They are described
 in [Getting Started](getting-started.md).
 
+## minato 1.2
+
+shigoto needs minato 1.2 or later; 1.10 ran on any 1.x. rebar3 takes one
+version of a package for a build, the one asked for nearest the top of the
+dependency tree, and does not check it against what the other dependencies ask
+for. So look at `rebar.lock` after upgrading: an application that also depends
+on a package asking for an older minato (kura_postgres 1.1.9 asks for
+`~> 1.1.6`) can be left on that one.
+
+minato 1.2 refuses what 1.1 passed over and ends what 1.1 waited for. Its
+[changelog](https://hexdocs.pm/minato/changelog.html) has all of it. This is
+what reaches an application through shigoto, in the `notifier` map, in what
+`shigoto_db:start_pool/2` is given, and in the statements shigoto runs:
+
+| | minato 1.1 | minato 1.2 |
+|---|---|---|
+| `ssl_options` without `ssl => true` | ignored, and the connection opened without TLS | refused: `{invalid_option, ssl_options}`. Add `ssl => true`, or take the options out |
+| An `ssl` that is not `true` or `false`, such as `"true"` out of the environment | raised in every attempt to connect | refused before anything is started: `{invalid_option, ssl}` |
+| `ssl_options` that resume a TLS session (`reuse_sessions` other than `false`, `reuse_session`, `session_tickets` other than `disabled`, `use_ticket`), a `verify` that is neither `verify_peer` nor `verify_none`, or `{handshake, hello}` | handed to `ssl` | refused: `{invalid_option, ssl_options}` |
+| `{server_name_indication, disable}` in `ssl_options` | also turned the hostname check off | the certificate is still checked for `host`, and one without it fails the connect: `{tls, {bad_cert, hostname_check_failed}}`. `{verify, verify_none}` is how to turn the check off |
+| A pool named `minato_overdue` or `minato_sup` | | refused: `{reserved_name, Name}`. They are minato's own processes |
+| A pool to another machine whose options do not mention `ssl` | | minato logs `unencrypted_connection` once when the pool starts. `ssl => false` says it was meant |
+| A statement whose answer takes longer than the pool's `timeout` (15 seconds unless the pool was started with another) to arrive whole | read to its end, as long as rows kept coming | cancelled on the server: `{error, {pgsql_error, #{code := ~"57014"}}}`, or `{error, {socket, timeout}}` and a closed connection from a server that goes on sending. What shigoto runs for its queues answers with few rows. `insert_all/1,2` and `cancel_by/1` answer with every job they touched, so a very large call can reach the deadline: split it. A statement of your own through `shigoto_db:query/4` takes a `timeout` |
+| A write the server does not read | waited for ever | fails after the pool's `timeout`: `{error, {socket, timeout}}`, and the connection is closed. `{send_timeout, Ms}` in `socket_options` sets another bound |
+| A column no module on the node names: one you added to a shigoto table, or an alias in a statement of your own | keyed by an atom made for it | keyed by its name as a binary. Every column of shigoto's own tables is still an atom |
+
+A refused connection starts nothing. `shigoto_db:start_pool/2` answers
+`{error, Reason}` with the reason in the table. The notifier logs
+`shigoto_notifier_not_listening` once, with that reason, asks again every
+5 seconds, and the queues poll meanwhile, as they do for any listener that
+cannot be started.
+
+The keys shigoto reads from a connection map are listed in
+[Getting Started](getting-started.md#connection-options). Any other key is
+left out, as before, so minato never sees a key it does not know from shigoto.
+
 ## Connection poolers
 
 Nothing changes here: shigoto ran behind PgBouncer in transaction mode before

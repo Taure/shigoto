@@ -14,14 +14,13 @@ Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
 
 A row is a map keyed by column name, an atom. The names are chosen by the
-server, and shigoto asks its client for them as atoms. Every column of
-shigoto's own tables is an atom from the moment this module is loaded
-(`columns/0`), which does not depend on the client: a client that makes no
-atom for a name it is sent, and answers a column under an atom only where one
-exists on the node and under the name as a binary otherwise, still keys a job,
-a batch or a cron entry by atoms, whichever module reads it. With such a
-client, a column you add to one of the tables, or alias in a statement of your
-own, is an atom only if your code names it.
+server, and minato makes no atom for a name it is sent: a column is answered
+under an atom where one exists on the node, and under its name as a binary
+otherwise. Every column of shigoto's own tables is an atom from the moment
+this module is loaded (`columns/0`), so a job, a batch or a cron entry is
+keyed by atoms whichever module reads it. A column you add to one of the
+tables, or alias in a statement of your own, is an atom only if your code
+names it.
 
 ## Transactions
 
@@ -168,9 +167,13 @@ query(Pool, SQL, Params) ->
 -doc """
 Run one statement, on this process's transaction if it is inside one.
 
-`Opts` are minato's query options: `timeout` is a deadline after which the
-statement is cancelled on the server rather than abandoned, and the decoding
-options are the ones `m:minato_protocol` documents.
+`Opts` are minato's query options. `timeout` is how long the whole answer may
+take, in milliseconds or `infinity`, and the pool's `timeout` (15000) unless
+given. A statement still running at its deadline, or one whose rows are still
+arriving, is cancelled on the server rather than abandoned and answers
+`{error, {pgsql_error, #{code := ~"57014"}}}`; a server that goes on sending
+after that answers `{error, {socket, timeout}}` and the connection is closed.
+The decoding options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
