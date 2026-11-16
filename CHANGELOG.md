@@ -20,6 +20,8 @@ the pull request. CI fails a pull request whose file differs.
 - Keep looking for unique fields in the clear while the check fails
 - Read a deps_results key as a job id in one place
 - Start nothing for a connection minato refuses
+- Wait for a statement in a transaction until it ends
+- Do not start with a notifier minato will not connect with
 
 ### Documentation
 
@@ -28,6 +30,13 @@ the pull request. CI fails a pull request whose file differs.
 - Rewrap the insert_all/3 paragraph on unique locks
 - Name the rebar3 and the Hex publishing main brought in
 - What minato 1.2 changes for a connection and a statement
+- Say which kura_postgres shigoto needs beside minato 1.2
+- List the wait for a statement in a transaction among what changed
+
+### Features
+
+- Hand every option of a minato connection on to it
+- Warn about connection keys nothing reads
 
 ### Miscellaneous
 
