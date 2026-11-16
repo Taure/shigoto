@@ -29,6 +29,10 @@ commits or rolls back. Statements the function runs find that connection here
 rather than being handed it, because a job queue's transaction functions are
 ordinary code that calls `shigoto_repo` and cannot thread a connection through.
 
+A statement in a transaction is waited for until it ends, however long the
+pool's `timeout` lets it run: minato cancels it at its deadline (`query/4`),
+and its error is the answer.
+
 ## Sharing a transaction with kura
 
 An app on [kura](https://hex.pm/packages/kura) configures shigoto with
@@ -168,9 +172,12 @@ query(Pool, SQL, Params) ->
 Run one statement, on this process's transaction if it is inside one.
 
 `Opts` are minato's query options. `timeout` is how long the whole answer may
-take, in milliseconds or `infinity`, and the pool's `timeout` (15000) unless
-given. A statement still running at its deadline, or one whose rows are still
-arriving, is cancelled on the server rather than abandoned and answers
+take, in milliseconds or `infinity`, and the pool's `timeout` (15000 unless
+the pool was started with another) unless given. The pool's `timeout` is also
+how long the server may send nothing, so a `timeout` here shortens a
+statement and lengthens only an answer that keeps arriving. A statement still
+running at its deadline, or one whose rows are still arriving, is cancelled
+on the server rather than abandoned and answers
 `{error, {pgsql_error, #{code := ~"57014"}}}`; a server that goes on sending
 after that answers `{error, {socket, timeout}}` and the connection is closed.
 The decoding options are the ones `m:minato_protocol` documents.
@@ -432,6 +439,9 @@ executed(Conn, SQL, Params, Opts) ->
         {error, Reason} -> {{error, Reason}, Conn}
     end.
 
+%% Waits for the holder's answer for as long as it takes. minato ends the
+%% statement at its `timeout`, so whatever ends it comes back as its error. A
+%% wait that gave up first left the statement running in front of the COMMIT.
 -spec ran(pid(), iodata(), [term()], map()) -> result() | {error, error()}.
 ran(Holder, SQL, Params, Opts) ->
     Tag = make_ref(),
@@ -443,7 +453,6 @@ ran(Holder, SQL, Params, Opts) ->
             Answer;
         {'DOWN', Monitor, process, Holder, Reason} ->
             {error, {holder_died, Reason}}
-    after ?CALL_TIMEOUT -> {error, timeout}
     end.
 
 -spec release(pid()) -> ok.

@@ -40,6 +40,7 @@
     test_commit_unanswered_raises/1,
     test_an_answer_still_arriving_at_its_deadline_is_cancelled/1,
     test_a_cancelled_answer_rolls_its_transaction_back/1,
+    test_a_statement_in_a_transaction_is_waited_for_until_it_ends/1,
     test_a_column_no_module_names_is_answered_under_a_binary/1,
     test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
@@ -114,6 +115,7 @@ all() ->
         test_commit_unanswered_raises,
         test_an_answer_still_arriving_at_its_deadline_is_cancelled,
         test_a_cancelled_answer_rolls_its_transaction_back,
+        test_a_statement_in_a_transaction_is_waited_for_until_it_ends,
         test_a_column_no_module_names_is_answered_under_a_binary,
         test_worker_inherits_logger_metadata,
         test_insert_and_claim,
@@ -578,6 +580,33 @@ test_a_cancelled_answer_rolls_its_transaction_back(_Config) ->
         end)
     ),
     ?assertEqual(0, count_jobs()).
+
+%% A pool whose statements have a minute, and one that takes 31 seconds. The
+%% transaction waited 30 for any statement and then went on without its
+%% answer, while the statement went on running in front of the COMMIT.
+test_a_statement_in_a_transaction_is_waited_for_until_it_ends(_Config) ->
+    Pool = shigoto_patient_pool,
+    {ok, _} = minato:start_pool(Pool, #{
+        size => 1,
+        connection => #{
+            host => "localhost",
+            port => shigoto_test_repo:port(),
+            database => ~"shigoto_test",
+            user => ~"postgres",
+            password => ~"root",
+            timeout => 60000
+        }
+    }),
+    try
+        ?assertMatch(
+            #{rows := [#{id := 31}]},
+            shigoto_db:transaction(Pool, fun() ->
+                shigoto_db:query(Pool, ~"SELECT 31 AS id FROM pg_sleep(31)", [])
+            end)
+        )
+    after
+        minato:stop_pool(Pool)
+    end.
 
 long_answer() ->
     ~"SELECT repeat('x', 1000) AS args FROM generate_series(1, 2000000)".
