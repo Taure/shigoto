@@ -160,12 +160,12 @@ in [Getting Started](getting-started.md).
 
 ## minato 1.2
 
-shigoto needs minato 1.2 or later; 1.10 ran on any 1.x. rebar3 takes one
-version of a package for a build, the one asked for nearest the top of the
-dependency tree, and does not check it against what the other dependencies ask
-for. So look at `rebar.lock` after upgrading: an application that also depends
-on a package asking for an older minato (kura_postgres 1.1.9 asks for
-`~> 1.1.6`) can be left on that one.
+shigoto needs minato 1.2 or later; 1.10 ran on any 1.x. Used together with
+kura_postgres, it needs a kura_postgres release that accepts minato 1.2.
+rebar3 takes one version of a package for a build, the one asked for nearest
+the top of the dependency tree, and does not check it against what the other
+dependencies ask for. So look at `rebar.lock` after upgrading: it should hold
+minato 1.2.0 or later.
 
 minato 1.2 refuses what 1.1 passed over and ends what 1.1 waited for. Its
 [changelog](https://hexdocs.pm/minato/changelog.html) has all of it. This is
