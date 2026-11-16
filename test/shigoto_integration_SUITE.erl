@@ -38,6 +38,9 @@
     test_migration_refuses_an_index_whose_build_failed/1,
     test_commit_refused_raises/1,
     test_commit_unanswered_raises/1,
+    test_an_answer_still_arriving_at_its_deadline_is_cancelled/1,
+    test_a_cancelled_answer_rolls_its_transaction_back/1,
+    test_a_column_no_module_names_is_answered_under_a_binary/1,
     test_worker_inherits_logger_metadata/1,
     test_prune_old_jobs/1,
     test_unique_prevents_duplicate/1,
@@ -109,6 +112,9 @@ all() ->
         test_migration_refuses_an_index_whose_build_failed,
         test_commit_refused_raises,
         test_commit_unanswered_raises,
+        test_an_answer_still_arriving_at_its_deadline_is_cancelled,
+        test_a_cancelled_answer_rolls_its_transaction_back,
+        test_a_column_no_module_names_is_answered_under_a_binary,
         test_worker_inherits_logger_metadata,
         test_insert_and_claim,
         test_job_execution_success,
@@ -547,6 +553,45 @@ test_commit_unanswered_raises(_Config) ->
             exit(Holder, kill)
         end)
     ).
+
+%% Two gigabytes of rows that arrive without a pause. A `timeout` is on the
+%% whole answer, so the statement is cancelled while they are still coming,
+%% and the connection goes back to the pool.
+test_an_answer_still_arriving_at_its_deadline_is_cancelled(_Config) ->
+    Started = erlang:monotonic_time(millisecond),
+    ?assertMatch(
+        {error, {pgsql_error, #{code := ~"57014"}}},
+        shigoto_db:query(?POOL, long_answer(), [], #{timeout => 200})
+    ),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 5000),
+    ?assertMatch(#{rows := [#{id := 1}]}, shigoto_db:query(?POOL, ~"SELECT 1 AS id", [])).
+
+test_a_cancelled_answer_rolls_its_transaction_back(_Config) ->
+    ?assertError(
+        transaction_rolled_back,
+        shigoto_db:transaction(?POOL, fun() ->
+            {ok, _} = shigoto_repo:insert_job(
+                ?POOL, #{worker => shigoto_test_worker, args => #{}}, #{}
+            ),
+            {error, {pgsql_error, #{code := ~"57014"}}} =
+                shigoto_db:query(?POOL, long_answer(), [], #{timeout => 200})
+        end)
+    ),
+    ?assertEqual(0, count_jobs()).
+
+long_answer() ->
+    ~"SELECT repeat('x', 1000) AS args FROM generate_series(1, 2000000)".
+
+%% The server chooses the names of the columns it answers with, and no atom
+%% is made for one: a column nothing on this node names keeps its name.
+test_a_column_no_module_names_is_answered_under_a_binary(_Config) ->
+    Name = <<"shigoto_alias_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    ?assertError(badarg, binary_to_existing_atom(Name)),
+    ?assertMatch(
+        #{rows := [#{id := 1, Name := 2}]},
+        shigoto_db:query(?POOL, [~"SELECT 1 AS id, 2 AS ", Name], [])
+    ),
+    ?assertError(badarg, binary_to_existing_atom(Name)).
 
 test_worker_inherits_logger_metadata(_Config) ->
     register(shigoto_metadata_probe, self()),
