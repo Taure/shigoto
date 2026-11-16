@@ -128,6 +128,7 @@ The API:
 | `shigoto_repo:claim_jobs/3`, `claim_jobs_fair/3` with an encryption key | answered the jobs decrypted | answer the rows as stored, still encrypted; only the run decrypts |
 | `shigoto_repo:complete_job/3`, `fail_job/4`, `snooze_job/3` | wrote by job id, whatever had become of the job since it was claimed | given the claimed job, write only while its claim holds, and answer `{error, lost}` otherwise |
 | `shigoto_crypto:decrypt/1` of a frame that does not open | answered the ciphertext | raises `{shigoto_crypto, decrypt_failed}` |
+| A statement inside `shigoto:transaction/1` that takes longer than 30 seconds, on a pool whose `timeout` allows that | answered `{error, timeout}` while it went on running, in front of the `COMMIT` | waited for until it ends |
 | The same key twice in `encryption_keys` | accepted | the application does not start |
 | A setting shigoto cannot use | failed where it was used, each in its own way | the application does not start: `{shigoto_config, {invalid, Setting, Value}}` (step 3) |
 | `{require_encrypted, true}` without an encryption key | started, stored and ran plaintext | the application does not start: `{shigoto_config, {invalid, require_encrypted, no_encryption_key}}` |
