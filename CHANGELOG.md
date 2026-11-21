@@ -10,6 +10,12 @@ git cliff -o CHANGELOG.md
 and commit the result as `chore(changelog): regenerate`, the last commit of
 the pull request. CI fails a pull request whose file differs.
 
+## [unreleased]
+
+### CI
+
+- Drop the stale paths-ignore comment
+
 ## [1.11.0] - 2026-11-16
 
 ### Features
