@@ -10,6 +10,12 @@ git cliff -o CHANGELOG.md
 and commit the result as `chore(changelog): regenerate`, the last commit of
 the pull request. CI fails a pull request whose file differs.
 
+## [unreleased]
+
+### CI
+
+- Drop the stale paths-ignore comment
+
 ## [1.11.0] - 2026-11-16
 
 ### Features
@@ -30,10 +36,6 @@ the pull request. CI fails a pull request whose file differs.
 
 ## [1.10.0] - 2026-11-06
 
-### Documentation
-
-- Describe shigoto on Hex as an Oban alternative and add a GitHub link
-
 ### Features
 
 - Cron, migration and kura-transaction fixes from the Nova Book review (#66)
@@ -45,6 +47,10 @@ the pull request. CI fails a pull request whose file differs.
 - Name Oban as the comparison and replace stale pgo references with minato (#67)
 
 ## [1.9.12] - 2026-08-26
+
+### CI
+
+- Run CI weekly to catch dependency rot
 
 ### Miscellaneous
 
