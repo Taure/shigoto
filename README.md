@@ -1,28 +1,28 @@
 # Shigoto 仕事
 
-PostgreSQL-backed background job processing for Erlang.
+PostgreSQL-backed background job processing for Erlang. If you know [Oban](https://github.com/oban-bg/oban) from Elixir, shigoto fills the same role on a plain Erlang/OTP stack.
 
 Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR UPDATE SKIP LOCKED` for safe multi-node operation. No Redis or external broker needed — if you have PostgreSQL, you have a job queue.
 
 ## Features
 
 ### Core
-- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [pgo](https://github.com/erleans/pgo). Transactional enqueue using the same pool as your application.
+- **PostgreSQL-backed** — Jobs stored in PostgreSQL via [minato](https://hex.pm/packages/minato). With [kura](https://hex.pm/packages/kura), shigoto shares the repo's pool and its transactions, so a job enqueued with your writes commits or rolls back with them.
 - **Multi-node safe** — `FOR UPDATE SKIP LOCKED` ensures each job is claimed by exactly one node. No coordination required.
 - **Priority queues** — Higher priority jobs are claimed first. Multiple queues with independent concurrency limits.
 - **Dynamic queues** — Add and remove queues at runtime without restart.
 - **Exponential backoff** — Failed jobs retry with `min(attempt^4 + jitter, 1800)` second delays, or provide a custom `backoff/2` callback.
 
 ### Scheduling
-- **Cron scheduling** — Built-in 5-field cron parser with leader election via advisory locks. Catches up on missed intervals after restarts.
+- **Cron scheduling** — Built-in 5-field cron parser with leader election via advisory locks. Each minute is scheduled once across nodes, and a run missed in the last hour is caught up after a restart.
 - **Scheduled jobs** — Enqueue jobs for future execution with `scheduled_at`.
-- **Job snoozing** — Workers can return `{snooze, Seconds}` to reschedule without consuming a retry attempt.
+- **Job snoozing** — Workers can return `{snooze, Seconds}` to reschedule without using up a retry attempt.
 
 ### Reliability
-- **Job dependencies** — `depends_on` chains ensure jobs execute in order. Cycle detection prevents deadlocks.
+- **Job dependencies** — `depends_on` chains ensure jobs execute in order. `on_dependency_failure` decides whether a job runs, is cancelled or is discarded when a job it waits on fails.
 - **Batches** — Group jobs with completion callbacks. Batch state tracks completed/discarded counts.
 - **Unique jobs** — Prevent duplicates with configurable keys, states, time windows, debounce, and field replacement on conflict.
-- **Stale job rescue** — Heartbeat-based detection of zombie jobs with automatic rescheduling.
+- **Stale job rescue** — Heartbeat-based detection of zombie jobs. A rescued job runs again, and is discarded once it is out of attempts.
 - **Graceful shutdown** — Waits for in-flight jobs to finish before stopping.
 
 ### Resilience ([seki](https://github.com/Taure/seki) integration)
@@ -32,11 +32,12 @@ Shigoto (仕事, "work") is a feature-rich job queue built on PostgreSQL's `FOR 
 - **Load shedding** — CoDel-based system-level protection, shedding low-priority jobs first.
 
 ### Operations
-- **Encryption** — AES-256-GCM encryption for job args at rest with key rotation support.
+- **Encryption** — AES-256-GCM for job `args`, `meta` and cron args at rest; with `encryption_write_format` `v2` also results and batch callback args, bound to their column and worker (opt-in, since 1.10 cannot read it). Key rotation, `shigoto:reencrypt/0`. `errors`, `worker`, `queue` and `tags` are not encrypted; see [Encryption](guides/encryption.md).
+- **Hardened against the database** — the worker a row names is checked (optionally against an allow-list) before anything is decrypted or called, failures are recorded without job data, and no advisory lock is waited for without a bound. See [Security](guides/security.md).
 - **Middleware** — Composable before/after hooks for logging, metrics, authorization.
 - **Telemetry** — 16+ telemetry events covering job lifecycle, queue operations, resilience, batches, and cron.
 - **Health check** — `shigoto:health/0` reports pool status, job counts, stale jobs, and queue health.
-- **Bulk operations** — `insert_all/1`, `cancel_by/2`, `retry_by/2` for batch operations.
+- **Bulk operations** — `insert_all/1,2`, `cancel_by/2`, `retry_by/2` for batch operations.
 - **Auto-archival** — Old jobs archived to `shigoto_jobs_archive` table, then pruned.
 - **Dashboard** — [shigoto_board](https://github.com/Taure/shigoto_board) provides a real-time web dashboard.
 
@@ -52,15 +53,17 @@ Add to your deps:
 
 ```erlang
 {deps, [
-    {shigoto, {git, "https://github.com/Taure/shigoto.git", {branch, "main"}}}
+    {shigoto, "~> 1.10"}
 ]}.
 ```
 
-Configure in `sys.config`:
+Configure in `sys.config`. With kura, name the repo; shigoto runs on the
+minato pool `kura_postgres` starts for it. `repo` must equal that pool's name:
+the repo module, or the repo's `pool` key when kura's config sets one.
 
 ```erlang
 {shigoto, [
-    {pool, my_app_db},
+    {repo, my_app_repo},
     {queues, [{<<"default">>, 10}, {<<"emails">>, 5}]},
     {poll_interval, 5000},
     {cron, [
@@ -69,11 +72,30 @@ Configure in `sys.config`:
 ]}
 ```
 
-Run the migration:
+Without kura, start a pool of its own and name it with `pool`:
 
 ```erlang
-shigoto_migration:up(my_app_db).
+{ok, _} = shigoto_db:start_pool(my_app_jobs, #{
+    host => "localhost", database => "my_app", user => "postgres", password => "postgres"
+}).
 ```
+
+`shigoto` creates or updates its tables when it starts, which needs the pool
+running and the database there. It tries 5 times; if the schema is still not
+current it starts without its queues, logs `shigoto_migration_pending`, retries
+every 30 seconds and starts the queues once the migration succeeds (see the
+getting-started guide). Meanwhile `shigoto:add_queue/2` answers
+`{error, migration_pending}` and `shigoto:health/0` reports
+`reason => migration_pending`. To migrate sooner, for instance right after
+kura's migrator has created the database, call it yourself and start the queues
+at once:
+
+```erlang
+ok = shigoto_migration:up(my_app_repo),
+_ = shigoto_migrator:retry_now().
+```
+
+`retry_now/0` answers `not_running` when nothing is pending.
 
 Define a worker:
 
@@ -111,16 +133,61 @@ shigoto:insert(#{
 }).
 ```
 
+## Transactional Enqueue
+
+With `{repo, Repo}`, shigoto and kura share transactions on the repo's pool, in
+both directions:
+
+```erlang
+%% A job inserted inside a kura transaction commits or rolls back with it.
+my_app_repo:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{
+        worker => welcome_email_worker,
+        args => #{<<"user_id">> => maps:get(id, User)}
+    }),
+    User
+end).
+
+%% kura writes inside shigoto:transaction/1 join it too.
+shigoto:transaction(fun() ->
+    {ok, User} = my_app_repo:insert(UserChangeset),
+    {ok, _Job} = shigoto:insert(#{worker => welcome_email_worker, args => #{}}),
+    User
+end).
+```
+
+A raise inside either rolls back both the rows and the jobs. Telemetry for jobs
+inserted inside `shigoto:transaction/1` fires after the commit; inside a kura
+transaction it fires on insert, before the commit. Use `shigoto:transaction/1`
+as the outer boundary when telemetry has to be commit-accurate.
+
+Jobs inserted inside a kura transaction on a pool of the same name join it
+whether shigoto is configured with `repo` or `pool`. Only the other direction,
+kura writes joining `shigoto:transaction/1`, needs `repo`; with `{pool, Pool}`,
+`shigoto:transaction/1` covers shigoto's own statements on that pool.
+
+In tests, jobs join `kura_sandbox`: a job inserted while the test has the
+repo's sandbox checked out is rolled back at checkin with the test's other
+writes. See [Testing](guides/testing.md#with-kura_sandbox).
+
 ## Job Lifecycle
 
 ```
 available → executing → completed
-                     ↘ retryable → available (retry with backoff)
+                     ↘ retryable → executing (claimed again once the backoff is over)
                      ↘ discarded (max attempts reached)
-                     ↘ snoozed → available (rescheduled, attempt preserved)
+                     ↘ snoozed → available (rescheduled, the attempt given back)
 ```
 
+A failed job with attempts left is `retryable`, with `scheduled_at` set to the
+end of its backoff. The queue claims `retryable` jobs exactly as it claims
+`available` ones, so the retry needs nothing but the polling loop.
+
 Jobs can also be `cancelled` via `shigoto:cancel/2` and retried via `shigoto:retry/2`.
+Cancelling a job that is running stops its worker process: at once on the node
+running it, and within `heartbeat_interval` when the cancel was made on another
+node.
 
 ## Worker Callbacks
 
@@ -147,7 +214,8 @@ All optional except `perform/1`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `pool` | *required* | pgo pool name |
+| `repo` | none | kura repo whose minato pool shigoto shares (read before `pool`) |
+| `pool` | none | minato pool name, when not using `repo`; one of the two is required |
 | `queues` | `[{<<"default">>, 10}]` | Queue names and concurrency limits |
 | `poll_interval` | `5000` | Milliseconds between polling |
 | `cron` | `[]` | `{Name, Schedule, Worker, Args}` tuples |
@@ -156,11 +224,22 @@ All optional except `perform/1`:
 | `middleware` | `[]` | Global middleware chain |
 | `encryption_key` | — | 32-byte AES-256-GCM key |
 | `encryption_keys` | `[]` | Ordered key list for rotation (newest first) |
-| `heartbeat_interval` | `30000` | Stale job detection interval |
+| `encryption_write_format` | `v1` | Frame written: `v1` (what 1.10 writes and reads) or `v2` (bound to column and worker; also covers results and batch callback args). Set `v2` only once no node runs 1.10 or can be rolled back to it |
+| `encryption_read_formats` | `[v1, v2]` | Frames that are opened |
+| `require_encrypted` | `false` | Refuse to run a job with plaintext args or meta. Needs a key: with `true` and no key the application does not start |
+| `workers` | `undefined` | Modules allowed to run as workers; `undefined` allows any module exporting `perform/1` |
+| `instance` | `undefined` | Name of this installation, giving it its own advisory locks and NOTIFY channel |
+| `advisory_lock_timeout` | `5000` | Milliseconds to wait for an advisory lock before giving up |
+| `unique_lock_limit` | `1000` | Advisory locks one `insert_all/1,2` call may take for its unique jobs (1 to 5000); a longer list answers `{error, {too_many_unique_locks, Needed, Limit}}` |
+| `notify_min_interval` | `10` | Minimum milliseconds between notification-driven polls of one queue |
+| `heartbeat_interval` | `30000` | Milliseconds between heartbeats for executing jobs; a job is stale after twice this without one |
+| `rescue_interval` | `60000` | Milliseconds between a node's sweeps that rescue stale jobs |
+| `unrunnable_snooze_limit` | `20` | Times in a row a job is put back by a node that cannot run it before that fails the attempt |
+| `on_dependency_failure` | `run` | What a waiting job does when a dependency is discarded or cancelled, unless the job sets it: `run`, `cancel` or `discard` |
 | `load_shedding` | — | CoDel config map for seki |
 | `queue_weights` | `#{}` | Weighted polling distribution |
 | `fair_queues` | `[]` | Queues using partition-key fair claiming |
-| `notifier` | — | LISTEN/NOTIFY connection config |
+| `notifier` | — | LISTEN/NOTIFY connection config: `host`, `port`, `database`, `user`, `password` and any other option of a minato connection, such as `ssl`, `auth` or `timeout`. `ssl_options` need `ssl => true` |
 | `stage_interval` | `1000` | Milliseconds between due-job stager sweeps (needs `notifier`) |
 
 ## Supervision Tree
@@ -188,7 +267,11 @@ shigoto_sup (one_for_one)
 - [Resilience](guides/resilience.md)
 - [Job Dependencies](guides/dependencies.md)
 - [Encryption](guides/encryption.md)
+- [Security](guides/security.md)
+- [Telemetry](guides/telemetry.md)
+- [Context Propagation](guides/context-propagation.md)
 - [Testing](guides/testing.md)
+- [Upgrading from 1.10](guides/upgrading.md)
 
 ## Ecosystem
 

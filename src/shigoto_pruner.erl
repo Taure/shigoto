@@ -18,6 +18,7 @@ start_link() ->
 
 -doc false.
 init([]) ->
+    ok = shigoto_db:ignore_sandbox(),
     erlang:send_after(?PRUNE_INTERVAL, self(), prune),
     {ok, #{}}.
 

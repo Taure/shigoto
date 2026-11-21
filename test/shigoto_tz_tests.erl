@@ -57,7 +57,7 @@ invalid_zone_rejected_test() ->
 %% A file whose magic is "TZif" but whose body is truncated/garbage must return
 %% {error, _}, not crash the caller (cron relies on this to fall back to UTC).
 malformed_tzfile_returns_error_test() ->
-    Dir = filename:join(["/tmp", "shigoto_tz_test", integer_to_list(erlang:phash2(make_ref()))]),
+    Dir = temporary_dir(),
     File = filename:join([Dir, "Broken", "Zone"]),
     ok = filelib:ensure_dir(File),
     ok = file:write_file(File, <<"TZif2", 0:120, "garbage">>),
@@ -69,5 +69,16 @@ malformed_tzfile_returns_error_test() ->
         case OldTzdir of
             false -> os:unsetenv("TZDIR");
             _ -> os:putenv("TZDIR", OldTzdir)
-        end
+        end,
+        ok = file:del_dir_r(Dir)
     end.
+
+%% A directory of this run's own: nothing another run, or another user of the
+%% machine, has made or is using.
+temporary_dir() ->
+    Name = lists:concat([
+        "shigoto_tz_", os:getpid(), "_", erlang:unique_integer([positive, monotonic])
+    ]),
+    Dir = filename:join(os:getenv("TMPDIR", "/tmp"), Name),
+    ok = file:make_dir(Dir),
+    Dir.

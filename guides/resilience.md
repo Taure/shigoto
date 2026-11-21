@@ -5,7 +5,13 @@ per-worker rate limiting, circuit breaking, bulkhead (concurrency limiting),
 and system-level load shedding. All primitives are lazily initialized on
 first use.
 
-When seki is not running, all resilience checks are no-ops.
+A worker's primitives are named `{shigoto_limiter, Worker}`,
+`{shigoto_bulkhead, Worker}` and `{shigoto_breaker, Worker}`, so seki's own
+functions work on them: `seki:state({shigoto_breaker, my_worker})`. Naming by
+term needs seki 0.6 or later.
+
+When seki is not running, a worker that declares one of these does not run
+without it: see [Execution Pipeline](#execution-pipeline).
 
 ## Rate Limiting
 
@@ -118,14 +124,36 @@ Low-priority jobs are shed first. Shigoto maps job priorities to seki levels:
 The full resilience pipeline for each job:
 
 ```
-1. Load shedding check (system-level)
-2. Rate limit check (per-worker)
+1. Rate limit check (per-worker)
+2. Global concurrency check (per-worker, across nodes)
 3. Bulkhead check (per-worker concurrency)
 4. Circuit breaker check (per-worker health)
-5. Global middleware chain
-6. Worker middleware chain
-7. Worker:perform/1
+5. Load shedding check (system-level)
+6. Global middleware chain
+7. Worker middleware chain
+8. Worker:perform/1
 ```
 
 Any check that fails results in a **snooze** — the job is rescheduled without
 counting as a failure attempt.
+
+A check that cannot be made is treated as a check that failed. If a gate
+raises, or the global concurrency check cannot take its advisory lock within
+`advisory_lock_timeout`, the job is snoozed for 5 seconds,
+`shigoto_resilience_gate_failed` is logged and
+`[shigoto, resilience, gate_failed]` is emitted with the `gate` and a `reason`.
+No gate admits a job it could not check.
+
+Such a snooze is written to the job's `errors`, as an entry with the reason and
+`snoozed`, and it does not go on for ever. After `unrunnable_snooze_limit` of
+them in a row (20 by default, about 100 seconds) the next gate failure fails
+the attempt with `{gate_failed, Gate, Reason}`: the job backs off, is retried,
+and is discarded at `max_attempts` if the gate never answers. A snooze from a
+gate that did answer (rate limit reached, breaker open, bulkhead full, load
+shed) is not counted and has no limit.
+
+That includes seki not running (stopped on its own, or a queue drained with
+`shigoto:drain_queue/1,2` in a node where it was never started): a worker
+that declares `rate_limit/0`, `concurrency/0` or `circuit_breaker/0` is
+snoozed with the reason `seki_not_running` instead of running without its
+gates. A worker that declares none of them is not affected.

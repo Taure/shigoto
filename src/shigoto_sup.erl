@@ -1,48 +1,85 @@
 -module(shigoto_sup).
 -moduledoc """
-Top-level supervisor for Shigoto. Starts the queue supervisor, cron
-scheduler, pruner, heartbeat, and optional LISTEN/NOTIFY notifier
-plus its due-job stager.
+Top-level supervisor for Shigoto. Starts the heartbeat, the `on_discard/2`
+runner, the executor and queue supervisors, the rescuer, the cron scheduler,
+the pruner, and the optional
+LISTEN/NOTIFY notifier plus its due-job stager.
+
+Children stop in the reverse of the order they start in. The heartbeat starts
+first, so it is the last to stop: while the queues wait for their running jobs
+at shutdown, and while the executor supervisor stops what is left, those jobs
+still get their heartbeat, and no other node takes them for abandoned however
+long `shutdown_timeout` is.
+
+When the schema is not current at boot, `shigoto_migrator` also runs, and the
+queue supervisor starts with no queues until the migration succeeds. The
+migrator starts after the queue supervisor, so it stops before it at shutdown
+and a retry never adds queues to a supervisor that is stopping.
 """.
 -behaviour(supervisor).
 
--export([start_link/0]).
+-export([start_link/1]).
 -export([init/1]).
 
 -doc false.
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+start_link(Migrated) ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, Migrated).
 
--doc false.
-init([]) ->
-    Queues = shigoto_config:queues(),
-    BaseChildren = [
+migrator(true) ->
+    [];
+migrator(false) ->
+    [
         #{
-            id => shigoto_executor_sup,
-            start => {shigoto_executor_sup, start_link, []},
-            type => supervisor
-        },
-        #{
-            id => shigoto_queue_sup,
-            start => {shigoto_queue_sup, start_link, [Queues]},
-            type => supervisor
-        },
-        #{
-            id => shigoto_cron,
-            start => {shigoto_cron, start_link, []},
-            type => worker
-        },
-        #{
-            id => shigoto_pruner,
-            start => {shigoto_pruner, start_link, []},
-            type => worker
-        },
-        #{
-            id => shigoto_heartbeat,
-            start => {shigoto_heartbeat, start_link, []},
+            id => shigoto_migrator,
+            start => {shigoto_migrator, start_link, []},
+            restart => transient,
             type => worker
         }
-    ],
+    ].
+
+-doc false.
+init(Migrated) ->
+    BaseChildren =
+        [
+            #{
+                id => shigoto_heartbeat,
+                start => {shigoto_heartbeat, start_link, []},
+                type => worker
+            },
+            #{
+                id => shigoto_callbacks,
+                start => {shigoto_callbacks, start_link, []},
+                type => worker
+            },
+            #{
+                id => shigoto_executor_sup,
+                start => {shigoto_executor_sup, start_link, []},
+                type => supervisor
+            },
+            #{
+                id => shigoto_queue_sup,
+                start => {shigoto_queue_sup, start_link, [shigoto_config:queues()]},
+                type => supervisor
+            }
+        ] ++
+            migrator(Migrated) ++
+            [
+                #{
+                    id => shigoto_rescuer,
+                    start => {shigoto_rescuer, start_link, []},
+                    type => worker
+                },
+                #{
+                    id => shigoto_cron,
+                    start => {shigoto_cron, start_link, []},
+                    type => worker
+                },
+                #{
+                    id => shigoto_pruner,
+                    start => {shigoto_pruner, start_link, []},
+                    type => worker
+                }
+            ],
     Children0 =
         case shigoto_config:notifier_config() of
             undefined ->

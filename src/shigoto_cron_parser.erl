@@ -85,9 +85,11 @@ parse_field(<<"*/", Rest/binary>>, Min, Max) ->
     expand_step(Min, Max, Step);
 parse_field(Bin, Min, Max) ->
     Parts = binary:split(Bin, ~",", [global]),
-    Values = lists:usort(
-        lists:flatmap(fun(P) -> parse_part(P, Min, Max) end, Parts)
-    ),
+    Values = [
+        Value
+     || Value <- lists:usort(lists:append([parse_part(Part, Min, Max) || Part <- Parts])),
+        is_integer(Value)
+    ],
     {values, Values}.
 
 -spec parse_part(binary(), non_neg_integer(), non_neg_integer()) -> [non_neg_integer()].
