@@ -17,19 +17,88 @@ jobs:
       enable-ct: true
       enable-ex-doc: true
       enable-hank: true
-      enable-audit: true
+      enable-audit: false
       enable-coverage: true
       enable-elp-lint: true
-      enable-elp-eqwalize: false
-      enable-sbom: false
-      enable-sbom-scan: false
+      enable-elp-eqwalize: true
+      # Whole modules, not the diff: the threshold is the score these modules
+      # have, and a diff of three lines is three mutants.
+      enable-mutate: true
+      mutate-min-score: '88'
+      mutate-args: '-m shigoto_config,shigoto_job,shigoto_crypto,shigoto_error,shigoto_propagator,shigoto_cron_parser'
+      enable-sbom: true
+      enable-sbom-scan: true
       enable-dependency-submission: true
       enable-summary: true
       extra-services-compose: 'docker-compose.ci.yml'
 
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '17', '18']
+    env:
+      SHIGOTO_PG_VERSION: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: Taure/erlang-ci@v2.1.7
+        with:
+          version-file: '.tool-versions'
+      - name: Start PostgreSQL ${{ matrix.postgres }}
+        run: docker compose -f docker-compose.ci.yml up -d --wait
+      - name: Common Test
+        run: rebar3 ct
+
+  # CHANGELOG.md is generated, and nothing can push it to main after a merge.
+  # So the pull request carries it, and this fails one that does not.
+  changelog:
+    name: Changelog
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate the changelog from this branch
+        id: cliff
+        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4
+        with:
+          version: v2.13.1
+          config: cliff.toml
+      - name: Compare with CHANGELOG.md
+        env:
+          GENERATED: ${{ steps.cliff.outputs.changelog }}
+        run: |
+          if ! diff -u CHANGELOG.md "$GENERATED"; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md is not what git-cliff generates from this branch. Run 'git cliff -o CHANGELOG.md' and commit the result as 'chore(changelog): regenerate', the last commit of the pull request."
+            exit 1
+          fi
+
   release:
-    needs: ci
+    needs: [ci, postgres]
     if: ${{ github.event_name == 'push' }}
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.7
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.3.2
     permissions:
       contents: write
+
+  hex-publish:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    uses: Taure/erlang-ci/.github/workflows/hex-publish.yml@v2.3.2
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      tag: ${{ needs.release.outputs.tag }}

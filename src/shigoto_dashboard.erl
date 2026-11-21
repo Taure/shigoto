@@ -8,7 +8,8 @@ for building admin UIs, monitoring dashboards, and Nova Liveboard pages.
 ```erlang
 shigoto_dashboard:queue_stats() ->
     [#{queue => <<\"default\">>, available => 42, executing => 5,
-       retryable => 2, completed => 1000, discarded => 3}]
+       retryable => 2, completed => 1000, discarded => 3,
+       is_paused => false}]
 ```
 
 ## Job Search
@@ -30,7 +31,13 @@ shigoto_dashboard:search_jobs(#{worker => my_worker, state => failed, limit => 2
 
 -define(POOL, (shigoto_config:pool())).
 
--doc "Get per-queue job counts grouped by state.".
+-doc """
+Get per-queue job counts grouped by state.
+
+Each row also carries `is_paused`, taken from the local queue processes.
+Pause is per-node, so a queue paused on another node reads as `false` here,
+as does a queue with rows in the table but no process on this node.
+""".
 -spec queue_stats() -> {ok, [map()]} | {error, term()}.
 queue_stats() ->
     SQL =
@@ -41,7 +48,7 @@ queue_stats() ->
             "ORDER BY queue, state"
         >>,
     case query(SQL, []) of
-        #{rows := Rows} -> {ok, pivot_queue_stats(Rows)};
+        #{rows := Rows} -> {ok, pivot_queue_stats(Rows, shigoto:paused_queues())};
         {error, _} = Err -> Err
     end.
 
@@ -86,7 +93,15 @@ job_counts() ->
         {error, _} = Err -> Err
     end.
 
--doc "Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.".
+-doc """
+Search jobs with filters. Supports: worker, queue, state, tags, limit, offset.
+
+The jobs are answered like `shigoto:get_job/1` answers one: with an encryption
+key configured their `args`, `meta`, `result` and `deps_results` are decrypted,
+and a column that does not open is replaced by the
+reason. Encrypted args cannot be searched: the database only holds ciphertext,
+so there is no `args` filter.
+""".
 -spec search_jobs(map()) -> {ok, [map()]} | {error, term()}.
 search_jobs(Filters) ->
     Limit = maps:get(limit, Filters, 50),
@@ -96,7 +111,7 @@ search_jobs(Filters) ->
     WhereSQL =
         case WhereClauses of
             [] -> ~"true";
-            _ -> iolist_to_binary(lists:join(~" AND ", WhereClauses))
+            [First | Rest] -> iolist_to_binary([First | [[~" AND ", Clause] || Clause <- Rest]])
         end,
     LimitIdx = integer_to_binary(NextIdx),
     OffsetIdx = integer_to_binary(NextIdx + 1),
@@ -109,11 +124,11 @@ search_jobs(Filters) ->
         OffsetIdx
     ]),
     case query(SQL, Params ++ [Limit, Offset]) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
--doc "Get the most recent failed jobs.".
+-doc "Get the most recent failed jobs, decrypted for reading like `search_jobs/1`.".
 -spec recent_failures(pos_integer()) -> {ok, [map()]} | {error, term()}.
 recent_failures(Limit) ->
     SQL =
@@ -124,30 +139,29 @@ recent_failures(Limit) ->
             "LIMIT $1"
         >>,
     case query(SQL, [Limit]) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
--doc "Get jobs stuck in executing state (potential zombies).".
+-doc """
+The executing jobs the next rescue sweep would take: no claim and no heartbeat
+for `shigoto_config:stale_after/0` seconds. Decrypted for reading like
+`search_jobs/1`.
+""".
 -spec stale_jobs() -> {ok, [map()]} | {error, term()}.
 stale_jobs() ->
-    Threshold = shigoto_config:heartbeat_interval() * 2 div 1000,
     SQL =
-        <<
-            "SELECT * FROM shigoto_jobs\n"
-            "WHERE state = 'executing'\n"
-            "AND (\n"
-            "  (heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1))\n"
-            "  OR\n"
-            "  (heartbeat_at IS NULL AND attempted_at < now() - make_interval(secs => $1))\n"
-            ")"
-        >>,
-    case query(SQL, [Threshold]) of
-        #{rows := Rows} -> {ok, Rows};
+        ~"""
+        SELECT * FROM shigoto_jobs
+        WHERE state = 'executing'
+        AND GREATEST(heartbeat_at, attempted_at) < now() - make_interval(secs => $1)
+        """,
+    case query(SQL, [shigoto_config:stale_after()]) of
+        #{rows := Rows} -> {ok, [shigoto_job:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
--doc "Get batch statistics.".
+-doc "Get the batches that have not finished, with `callback_args` decrypted for reading.".
 -spec batch_stats() -> {ok, [map()]} | {error, term()}.
 batch_stats() ->
     SQL =
@@ -158,7 +172,7 @@ batch_stats() ->
             "LIMIT 100"
         >>,
     case query(SQL, []) of
-        #{rows := Rows} -> {ok, Rows};
+        #{rows := Rows} -> {ok, [shigoto_batch:readable(Row) || Row <- Rows]};
         {error, _} = Err -> Err
     end.
 
@@ -169,30 +183,52 @@ batch_stats() ->
 query(SQL, Params) ->
     shigoto_db:query(?POOL, SQL, Params).
 
-pivot_queue_stats(Rows) ->
-    GroupedByQueue = lists:foldl(
-        fun(#{queue := Queue, state := State, count := Count}, Acc) ->
-            QueueMap = maps:get(Queue, Acc, #{queue => Queue}),
-            StateAtom = binary_to_existing_atom(State, utf8),
-            Acc#{Queue => QueueMap#{StateAtom => Count}}
-        end,
-        #{},
-        Rows
-    ),
-    maps:values(GroupedByQueue).
+%% A row whose state is none of shigoto's is counted under `other`: the
+%% state column is text anyone with write access can set, so it is never
+%% turned into an atom.
+pivot_queue_stats(Rows, Paused) ->
+    Queues = lists:usort([Queue || #{queue := Queue} <- Rows]),
+    [
+        maps:from_list(
+            [{queue, Queue}, {is_paused, lists:member(Queue, Paused)}] ++
+                counts_by_state([Row || #{queue := Q} = Row <- Rows, Q =:= Queue])
+        )
+     || Queue <- Queues
+    ].
 
+counts_by_state(Rows) ->
+    Counted = [{state_name(State), Count} || #{state := State, count := Count} <- Rows],
+    [
+        {Name, lists:sum([Count || {N, Count} <- Counted, N =:= Name])}
+     || Name <- lists:usort([Name || {Name, _Count} <- Counted])
+    ].
+
+state_name(~"available") -> available;
+state_name(~"executing") -> executing;
+state_name(~"retryable") -> retryable;
+state_name(~"completed") -> completed;
+state_name(~"discarded") -> discarded;
+state_name(~"cancelled") -> cancelled;
+state_name(_Other) -> other.
+
+-spec build_search_clauses(map(), pos_integer()) -> {[binary()], [term()], pos_integer()}.
 build_search_clauses(Filters, StartIdx) ->
-    maps:fold(
-        fun(Key, Value, {Clauses, Params, Idx}) ->
-            case search_clause(Key, Value, Idx) of
-                skip -> {Clauses, Params, Idx};
-                {Clause, NewParams, NewIdx} -> {[Clause | Clauses], Params ++ NewParams, NewIdx}
-            end
-        end,
-        {[], [], StartIdx},
-        Filters
-    ).
+    search_clauses(maps:to_list(Filters), {[], [], StartIdx}).
 
+-spec search_clauses([{term(), term()}], {[binary()], [term()], pos_integer()}) ->
+    {[binary()], [term()], pos_integer()}.
+search_clauses([], Built) ->
+    Built;
+search_clauses([{Key, Value} | Filters], {Clauses, Params, Idx}) ->
+    case search_clause(Key, Value, Idx) of
+        skip ->
+            search_clauses(Filters, {Clauses, Params, Idx});
+        {Clause, NewParams, NewIdx} ->
+            search_clauses(Filters, {[Clause | Clauses], Params ++ NewParams, NewIdx})
+    end.
+
+-spec search_clause(term(), term(), pos_integer()) ->
+    skip | {binary(), [term()], pos_integer()}.
 search_clause(worker, Worker, Idx) ->
     IBin = integer_to_binary(Idx),
     WorkerBin =

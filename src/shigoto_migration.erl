@@ -6,19 +6,340 @@ to create or update the jobs and cron tables.
 Migrations are idempotent and safe to run multiple times.
 """.
 
--export([up/1, down/1]).
+-include_lib("kernel/include/logger.hrl").
 
--doc "Create or update the shigoto_jobs and shigoto_cron tables.".
+-export([up/1, down/1, schema_version/0]).
+
+-define(LOCK_ID, 839274630).
+%% The newest vN_statements/0. A CT case fails when a version is added without
+%% raising this.
+-define(SCHEMA_VERSION, 7).
+%% The indexes version 7 builds, which an operator may have built first.
+-define(BUILT_INDEXES, [
+    ~"shigoto_jobs_claimable_idx", ~"shigoto_jobs_waiting_on_idx", ~"shigoto_batches_active_idx"
+]).
+
+-doc """
+Create or update the shigoto tables.
+
+Runs in one transaction that first takes an advisory lock, so nodes booting at
+the same time migrate one after the other rather than racing on
+`CREATE ... IF NOT EXISTS`. The lock is waited for at most
+`shigoto_config:advisory_lock_timeout/0` (`{error, lock_timeout}` after that,
+which the boot and `m:shigoto_migrator` retry), since any session in the
+database can hold it. The last statement records the schema version as
+the comment on `shigoto_jobs` (`shigoto 7`), replacing any comment set there.
+A schema that already records this version or a newer one (written by a newer
+shigoto during a rolling deploy) is left alone: no DDL runs and no table lock is
+taken, so a running system is not blocked. A comment that is not `shigoto <N>`
+(with `N` a positive number of at most 9 digits) counts as no version, and is
+overwritten. A schema with no comment at all that already has the newest
+version's column (`on_dependency_failure`) is also current: `up/1` logs `shigoto_schema_unstamped` once and
+answers `ok` without DDL, so a role that may only read and write rows can run
+it. Run `up/1` once as the table owner to record the version. A schema migrated
+by shigoto 1.9.x has no comment and not that column, so it is migrated like any
+older one, which takes the table owner.
+
+Version 7 adds three partial indexes, drops the claim index the first of them
+replaces, and adds the nullable `shigoto_jobs.on_dependency_failure` column.
+What each statement holds, all of it inside the one transaction that already
+has `shigoto_jobs` in ACCESS EXCLUSIVE mode (below), so until it commits no
+node claims or inserts:
+
+| Statement | Lock | Work |
+|---|---|---|
+| `CREATE INDEX shigoto_jobs_claimable_idx ON shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable')` | SHARE on `shigoto_jobs` | reads the whole table, indexes the waiting rows |
+| `DROP INDEX shigoto_jobs_queue_state_idx` | ACCESS EXCLUSIVE on `shigoto_jobs` | catalog only |
+| `ALTER TABLE shigoto_jobs ADD COLUMN on_dependency_failure TEXT` | ACCESS EXCLUSIVE on `shigoto_jobs` | catalog only, no rewrite |
+| `CREATE INDEX shigoto_jobs_waiting_on_idx ON shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available', 'retryable')` | SHARE on `shigoto_jobs` | reads the whole table again |
+| `CREATE INDEX shigoto_batches_active_idx ON shigoto_batches (id) WHERE state = 'active'` | SHARE on `shigoto_batches` | reads that table; batch counts wait, jobs do not |
+
+The two reads of `shigoto_jobs` are what takes time: on a table of many
+millions of rows, minutes during which every node waits. To migrate such a
+table without that, build the three indexes first, outside any transaction, as
+the table owner:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_claimable_idx
+  ON shigoto_jobs (queue, scheduled_at) WHERE state IN ('available', 'retryable');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_jobs_waiting_on_idx
+  ON shigoto_jobs (id) WHERE depends_on <> '{}' AND state IN ('available', 'retryable');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS shigoto_batches_active_idx
+  ON shigoto_batches (id) WHERE state = 'active';
+```
+
+A concurrent build takes SHARE UPDATE EXCLUSIVE, which claims and inserts do
+not wait for. The migration then finds the indexes, builds nothing, and holds
+its lock only for the catalog changes.
+
+A concurrent build that fails or is cancelled leaves its index behind, marked
+invalid: it has the name and is never used. The migration looks for that before
+it changes anything. With one of the three invalid it logs
+`shigoto_migration_invalid_index`, answers `{error, {invalid_index, Names}}`
+and leaves the schema as it was, old claim index included, so nodes on the
+previous version keep claiming as before. `DROP INDEX CONCURRENTLY` the index,
+build it again, and the next retry migrates. (It does not rebuild the index
+itself: whoever built it concurrently chose not to hold the table lock for a
+build.)
+
+Nodes still on the previous version keep working against a version 7 schema.
+This version's statements also run against a version 6 one, where the only
+thing refused is inserting a job that sets `on_dependency_failure`.
+
+Otherwise it first locks the existing shigoto tables (`shigoto_jobs`,
+`shigoto_jobs_archive`, `shigoto_cron`) in ACCESS EXCLUSIVE mode in one
+statement, then runs every statement in order. Every lock wait is bounded at
+500 ms (`lock_timeout`). A queued ACCESS EXCLUSIVE request makes new claims and
+inserts wait behind it, so the bound is also the longest a migration stalls
+them; short transactions that keep writing to the tables finish within it, and
+the migration gets its locks. Taking every table at once means it never holds
+one table while it waits on another. When a long transaction (a slow reader, an
+open batch) keeps a table past the bound, the migration rolls back and answers
+`{error, lock_timeout}`: retry it, or run migrations from one node at a quiet
+moment. The boot retries and `m:shigoto_migrator` retry it for you.
+
+Stops at the first statement that fails, rolls back, and answers
+`{error, Reason}` (a server error cut down by `shigoto_db:reduced/1`). A
+database that does not exist yet, or a role that may not create tables, is an
+error here rather than a node that boots with no tables. Called inside an open
+shigoto or kura transaction it answers `{error, in_transaction}` and does
+nothing, since the lock and the DDL would join the caller's transaction.
+""".
 -spec up(atom()) -> ok | {error, term()}.
 up(Pool) ->
-    lists:foreach(
-        fun(SQL) ->
-            shigoto_db:query(Pool, SQL, [])
-        end,
-        v1_statements() ++ v2_statements() ++ v3_statements() ++ v4_statements() ++
-            v5_statements() ++ v6_statements()
-    ),
-    ok.
+    case shigoto_db:transaction_open(Pool) of
+        true ->
+            {error, in_transaction};
+        false ->
+            case shigoto_db:query(Pool, ~"SELECT 1", []) of
+                {error, Reason} -> {error, shigoto_db:reduced(Reason)};
+                #{} -> locked(Pool)
+            end
+    end.
+
+locked(Pool) ->
+    try
+        Channel = shigoto_config:notify_channel(),
+        shigoto_db:transaction(Pool, fun() ->
+            %% The advisory lock first: lock_timeout would also cut short the
+            %% wait for another node's migration.
+            answered(shigoto_lock:acquire_xact(Pool, [?LOCK_ID])),
+            answered(shigoto_db:query(Pool, ~"SET LOCAL lock_timeout = '500ms'", [])),
+            case current(Pool) of
+                true ->
+                    ok;
+                false ->
+                    lock_tables(Pool),
+                    built_or_missing(Pool),
+                    answered(
+                        run(
+                            Pool,
+                            v1_statements() ++ v2_statements() ++ v3_statements() ++
+                                v4_statements() ++ v5_statements() ++ v6_statements() ++
+                                v7_statements() ++ [version_statement()]
+                        )
+                    )
+            end,
+            announced_on(Pool, Channel)
+        end)
+    catch
+        error:{shigoto_config, {invalid, _Setting, _Value}} = Invalid -> {error, Invalid};
+        throw:{?MODULE, lock_timeout} -> {error, lock_timeout};
+        throw:{?MODULE, {pgsql_error, #{code := ~"55P03"}}} -> {error, lock_timeout};
+        throw:{?MODULE, {invalid_index, _} = Invalid} -> {error, Invalid};
+        throw:{?MODULE, Reason} -> {error, shigoto_db:reduced(Reason)};
+        error:{shigoto_db, Reason} -> {error, Reason}
+    end.
+
+-doc false.
+-spec schema_version() -> pos_integer().
+schema_version() ->
+    ?SCHEMA_VERSION.
+
+version_statement() ->
+    iolist_to_binary([
+        ~"COMMENT ON TABLE shigoto_jobs IS 'shigoto ", integer_to_binary(?SCHEMA_VERSION), ~"'"
+    ]).
+
+current(Pool) ->
+    SQL =
+        ~"""
+        SELECT obj_description(c.oid, 'pg_class') AS version
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'shigoto_jobs' AND n.nspname = current_schema()
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{version := Version}]} when is_binary(Version) ->
+            recorded(Version) >= ?SCHEMA_VERSION;
+        #{rows := [#{version := _Null}]} ->
+            unstamped(Pool);
+        #{rows := []} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% A schema whose version comment was removed has none. When it already has
+%% the newest version's column it is current: a DML-only role could not record
+%% the version anyway, and would otherwise never get past boot. The column is
+%% the marker, not the index, since the index may have been built by hand
+%% ahead of the migration.
+unstamped(Pool) ->
+    SQL =
+        ~"""
+        SELECT count(*) AS found
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'shigoto_jobs'
+        AND column_name = 'on_dependency_failure'
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{found := 1}]} ->
+            warn_unstamped_once(Pool),
+            true;
+        #{rows := [#{found := _}]} ->
+            false;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+warn_unstamped_once(Pool) ->
+    case persistent_term:get({?MODULE, unstamped_warned}, false) of
+        true ->
+            ok;
+        false ->
+            persistent_term:put({?MODULE, unstamped_warned}, true),
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_schema_unstamped",
+                pool => Pool,
+                action =>
+                    ~"run shigoto_migration:up/1 once as the table owner to record the version"
+            })
+    end.
+
+%% At most 9 digits: a longer number is not a version this code wrote.
+recorded(<<"shigoto ", Number/binary>>) ->
+    case re:run(Number, ~"^[1-9][0-9]{0,8}$", [dollar_endonly, {capture, none}]) of
+        match -> binary_to_integer(Number);
+        nomatch -> 0
+    end;
+recorded(_Comment) ->
+    0.
+
+%% Take every table lock the DDL needs in one statement, so the first ALTER
+%% never holds shigoto_jobs while a later one waits on another table with every
+%% claim queued behind it. Waiting (bounded by lock_timeout) rather than NOWAIT:
+%% NOWAIT fails whenever any short write transaction is open, which under steady
+%% writes is nearly always. A fresh database has no tables to lock.
+lock_tables(Pool) ->
+    SQL =
+        ~"""
+        SELECT t AS name
+        FROM unnest(ARRAY['shigoto_jobs', 'shigoto_jobs_archive', 'shigoto_cron']) AS t
+        WHERE to_regclass(t) IS NOT NULL
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := Rows} ->
+            case [Name || #{name := Name} <- Rows, is_binary(Name)] of
+                [] -> ok;
+                Tables -> answered(shigoto_db:query(Pool, lock_statement(Tables), []))
+            end;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% `CREATE INDEX IF NOT EXISTS` is satisfied by the name alone. An index left
+%% behind by a concurrent build that failed has the name and is never used, so
+%% building on it would drop the index claims use and leave them a table scan.
+%% Read with the table locked: a concurrent build still running holds a lock
+%% the migration waits for, so an index that is invalid here is one whose build
+%% failed (on `shigoto_batches`, which is not locked, possibly one still running).
+built_or_missing(Pool) ->
+    SQL =
+        ~"""
+        SELECT c.relname::text AS name
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema() AND c.relname = ANY($1::text[])
+        AND NOT i.indisvalid
+        ORDER BY c.relname
+        """,
+    case shigoto_db:query(Pool, SQL, [?BUILT_INDEXES]) of
+        #{rows := []} ->
+            ok;
+        #{rows := Rows} ->
+            Invalid = [Name || #{name := Name} <- Rows],
+            ?LOG_ERROR(#{
+                msg => ~"shigoto_migration_invalid_index",
+                pool => Pool,
+                indexes => Invalid,
+                action =>
+                    ~"DROP INDEX CONCURRENTLY each one, build it again with CREATE INDEX CONCURRENTLY, then run the migration"
+            }),
+            throw({?MODULE, {invalid_index, Invalid}});
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+-spec lock_statement([binary(), ...]) -> binary().
+lock_statement([First | Rest]) ->
+    iolist_to_binary([
+        ~"LOCK TABLE ",
+        First,
+        [[~", ", Table] || Table <- Rest],
+        ~" IN ACCESS EXCLUSIVE MODE"
+    ]).
+
+%% The trigger function announces inserts on one channel, written into its
+%% body. It is the default channel unless an `instance` is configured, and is
+%% replaced here when the configured channel is another one. That is not part
+%% of a schema version because it follows configuration: it is checked on every
+%% `up/1` with one catalog read, and replacing a function takes no table lock.
+%% Only the function's owner can replace it.
+announced_on(Pool, Channel) ->
+    SQL =
+        ~"""
+        SELECT p.prosrc AS source
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.proname = 'shigoto_notify_insert' AND n.nspname = current_schema()
+        """,
+    case shigoto_db:query(Pool, SQL, []) of
+        #{rows := [#{source := Source}]} when is_binary(Source) ->
+            case binary:match(Source, <<"'", Channel/binary, "'">>) of
+                nomatch -> answered(shigoto_db:query(Pool, notify_function(Channel), []));
+                _Found -> ok
+            end;
+        #{rows := _NoFunction} ->
+            ok;
+        {error, Reason} ->
+            throw({?MODULE, Reason})
+    end.
+
+%% `Channel` is `shigoto_config:notify_channel/0`, which raises unless its
+%% instance part is lower-case letters, digits and `_`.
+-spec notify_function(binary()) -> binary().
+notify_function(Channel) ->
+    iolist_to_binary([
+        ~"CREATE OR REPLACE FUNCTION shigoto_notify_insert() RETURNS trigger AS $$\n",
+        ~"BEGIN\n",
+        ~"  PERFORM pg_notify('",
+        Channel,
+        ~"', NEW.queue);\n",
+        ~"  RETURN NEW;\n",
+        ~"END;\n",
+        ~"$$ LANGUAGE plpgsql"
+    ]).
+
+answered({error, Reason}) -> throw({?MODULE, Reason});
+answered(_Ran) -> ok.
+
+run(_Pool, []) ->
+    ok;
+run(Pool, [SQL | Rest]) ->
+    case shigoto_db:query(Pool, SQL, []) of
+        {error, Reason} -> {error, Reason};
+        #{} -> run(Pool, Rest)
+    end.
 
 -doc "Drop the shigoto tables.".
 -spec down(atom()) -> ok | {error, term()}.
@@ -59,11 +380,6 @@ v1_statements() ->
         )
         """,
         ~"""
-        CREATE INDEX IF NOT EXISTS shigoto_jobs_queue_state_idx
-        ON shigoto_jobs (queue, state, scheduled_at)
-        WHERE state = 'available'
-        """,
-        ~"""
         CREATE INDEX IF NOT EXISTS shigoto_jobs_state_idx
         ON shigoto_jobs (state)
         """,
@@ -94,14 +410,7 @@ v2_statements() ->
 
 v3_statements() ->
     [
-        <<
-            "CREATE OR REPLACE FUNCTION shigoto_notify_insert() RETURNS trigger AS $$\n"
-            "BEGIN\n"
-            "  PERFORM pg_notify('shigoto_jobs_insert', NEW.queue);\n"
-            "  RETURN NEW;\n"
-            "END;\n"
-            "$$ LANGUAGE plpgsql"
-        >>,
+        notify_function(~"shigoto_jobs_insert"),
         <<
             "DO $$ BEGIN\n"
             "  IF NOT EXISTS (\n"
@@ -190,4 +499,34 @@ v6_statements() ->
         ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'",
         ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS result JSONB",
         ~"ALTER TABLE shigoto_jobs_archive ADD COLUMN IF NOT EXISTS deps_results JSONB NOT NULL DEFAULT '{}'"
+    ].
+
+v7_statements() ->
+    [
+        %% The claim reads jobs that are due in either waiting state. A claim
+        %% for `state = 'available'` alone, from a node still on the previous
+        %% version, implies this predicate and uses the same index, so the
+        %% index v1 created for it goes.
+        ~"""
+        CREATE INDEX IF NOT EXISTS shigoto_jobs_claimable_idx
+        ON shigoto_jobs (queue, scheduled_at)
+        WHERE state IN ('available', 'retryable')
+        """,
+        ~"DROP INDEX IF EXISTS shigoto_jobs_queue_state_idx",
+        %% What a waiting job does when a dependency fails; NULL means the
+        %% application's default. Nullable with no default, so adding it does
+        %% not rewrite the table, and nodes on the previous version ignore it.
+        ~"ALTER TABLE shigoto_jobs ADD COLUMN IF NOT EXISTS on_dependency_failure TEXT",
+        %% The two sweeps a node runs every rescue interval read only the
+        %% jobs still waiting on a dependency and the batches still active.
+        ~"""
+        CREATE INDEX IF NOT EXISTS shigoto_jobs_waiting_on_idx
+        ON shigoto_jobs (id)
+        WHERE depends_on <> '{}' AND state IN ('available', 'retryable')
+        """,
+        ~"""
+        CREATE INDEX IF NOT EXISTS shigoto_batches_active_idx
+        ON shigoto_batches (id)
+        WHERE state = 'active'
+        """
     ].

@@ -15,42 +15,67 @@ Configuration access for Shigoto. Reads from application env.
     prune_after_days/0,
     archive_after_days/0,
     shutdown_timeout/0,
+    shutdown_budget/0,
+    on_discard_timeout/0,
+    unrunnable_snooze_limit/0,
     notifier_config/0,
     middleware/0,
     encryption_key/0,
     heartbeat_interval/0,
+    rescue_interval/0,
+    on_dependency_failure/0,
+    stale_after/0,
     load_shedding/0,
     queue_weights/0,
     fair_queues/0,
     encryption_keys/0,
-    fanout_queues/0
+    encryption_write_format/0,
+    encryption_read_formats/0,
+    require_encrypted/0,
+    workers/0,
+    instance/0,
+    advisory_lock_timeout/0,
+    unique_lock_limit/0,
+    notify_min_interval/0,
+    notify_channel/0,
+    fanout_queues/0,
+    propagator/0,
+    check/0
 ]).
 
 -doc "The minato pool name for job storage. Set `repo` for Kura-based apps or `pool` for a pool of its own.".
 -spec pool() -> atom().
 pool() ->
     case application:get_env(shigoto, repo) of
-        {ok, Repo} ->
+        {ok, Repo} when is_atom(Repo) ->
             Repo;
+        {ok, Repo} ->
+            error({shigoto_config, {invalid, repo, Repo}});
         undefined ->
-            {ok, Pool} = application:get_env(shigoto, pool),
-            Pool
+            case application:get_env(shigoto, pool) of
+                {ok, Pool} when is_atom(Pool) -> Pool;
+                {ok, Pool} -> error({shigoto_config, {invalid, pool, Pool}});
+                undefined -> error({shigoto_config, {invalid, pool, undefined}})
+            end
     end.
 
 -doc "Configured queue names and concurrency. Default: `[{<<\"default\">>, 10}]`.".
--spec queues() -> [{binary(), pos_integer()}].
+-spec queues() -> [{Name :: term(), Concurrency :: term()}].
 queues() ->
-    application:get_env(shigoto, queues, [{~"default", 10}]).
+    case setting(queues, [{~"default", 10}]) of
+        Queues when is_list(Queues) -> [Queue || {_Name, _Concurrency} = Queue <- Queues];
+        Other -> error({shigoto_config, {invalid, queues, Other}})
+    end.
 
 -doc "Poll interval in milliseconds. Default: 5000.".
 -spec poll_interval() -> pos_integer().
 poll_interval() ->
-    application:get_env(shigoto, poll_interval, 5000).
+    positive_setting(poll_interval, 5000).
 
 -doc "Stager interval in milliseconds for surfacing newly-due scheduled/retryable jobs. Default: 1000.".
 -spec stage_interval() -> pos_integer().
 stage_interval() ->
-    application:get_env(shigoto, stage_interval, 1000).
+    positive_setting(stage_interval, 1000).
 
 -doc """
 Testing mode for `insert/1,2` and `insert_all/1,2`. Default: `disabled` (normal
@@ -107,68 +132,474 @@ Cron job entries. Each is `{Name, Schedule, Worker, Args}` or
 """.
 -spec cron_entries() -> list().
 cron_entries() ->
-    application:get_env(shigoto, cron, []).
+    case setting(cron, []) of
+        Entries when is_list(Entries) -> Entries;
+        Other -> error({shigoto_config, {invalid, cron, Other}})
+    end.
 
 -doc "Days to keep completed/discarded jobs before archiving. Default: 14.".
--spec prune_after_days() -> pos_integer().
+-spec prune_after_days() -> non_neg_integer().
 prune_after_days() ->
-    application:get_env(shigoto, prune_after_days, 14).
+    non_negative_setting(prune_after_days, 14).
 
 -doc "Days to keep archived jobs before permanent deletion. Default: 90.".
--spec archive_after_days() -> pos_integer().
+-spec archive_after_days() -> non_neg_integer().
 archive_after_days() ->
-    application:get_env(shigoto, archive_after_days, 90).
+    non_negative_setting(archive_after_days, 90).
 
 -doc "Database connection config for LISTEN/NOTIFY. Returns `undefined` if not configured.".
 -spec notifier_config() -> map() | undefined.
 notifier_config() ->
-    application:get_env(shigoto, notifier, undefined).
+    map_setting(notifier).
 
--doc "Milliseconds to wait for in-flight jobs during shutdown. Default: 15000.".
--spec shutdown_timeout() -> pos_integer().
+-doc """
+Milliseconds to wait for in-flight jobs during shutdown. Default: 15000. A job
+still running after that is stopped and its claim given back: it is
+`available` again and the interrupted run uses no attempt.
+""".
+-spec shutdown_timeout() -> non_neg_integer().
 shutdown_timeout() ->
-    application:get_env(shigoto, shutdown_timeout, 15000).
+    non_negative_setting(shutdown_timeout, 15000).
+
+-doc """
+The longest the application can take to stop, in milliseconds: every queue
+waits `shutdown_timeout` for its jobs, one queue after the other, and the
+executor supervisor then stops what is still running.
+
+The node has to allow this much. When the `kernel` setting `shutdown_timeout`
+is shorter, the node kills shigoto in the middle of it: jobs are cut off
+without giving their claims back, and one on its last attempt is discarded by
+the rescue. The application logs `shigoto_shutdown_cut_short` at boot for
+that.
+""".
+-spec shutdown_budget() -> pos_integer().
+shutdown_budget() ->
+    Queues = length(queues()) + length(fanout_queues()),
+    Queues * (shutdown_timeout() + 1000) + shigoto_executor_sup:stop_timeout().
+
+-doc """
+Milliseconds an `on_discard/2` callback may run before it is stopped. Default:
+60000. The callback runs in a process of its own, so it holds up neither the
+queue nor the caller that discarded the job.
+""".
+-spec on_discard_timeout() -> pos_integer().
+on_discard_timeout() ->
+    positive_setting(on_discard_timeout, 60000).
+
+-doc """
+How many times in a row a job is put back by a node that cannot run it,
+without using an attempt, before that fails the attempt instead. Default: 20,
+at most 50. A node cannot run a job whose worker it does not know (30 seconds
+each time) or whose resilience gate does not answer (5 seconds each time).
+With 0 both fail the attempt at once.
+""".
+-spec unrunnable_snooze_limit() -> 0..50.
+unrunnable_snooze_limit() ->
+    case setting(unrunnable_snooze_limit, 20) of
+        Value when is_integer(Value), Value >= 0, Value =< 50 -> Value;
+        Other -> error({shigoto_config, {invalid, unrunnable_snooze_limit, Other}})
+    end.
 
 -doc "Global middleware chain applied to all jobs. Default: [].".
 -spec middleware() -> [shigoto_middleware:middleware()].
 middleware() ->
-    application:get_env(shigoto, middleware, []).
+    [middleware(Middleware) || Middleware <- list_setting(middleware)].
 
--doc "AES-256-GCM encryption key for job args/meta. Returns `undefined` if not configured.".
+%% What a fun answers cannot be known before it is called.
+-spec middleware(term()) -> dynamic().
+middleware(Middleware) when is_function(Middleware, 2) -> Middleware;
+middleware(Other) -> error({shigoto_config, {invalid, middleware, Other}}).
+
+-doc """
+AES-256-GCM encryption key, exactly 32 bytes. Returns `undefined` if not
+configured. `m:shigoto_crypto` says which columns it covers.
+""".
 -spec encryption_key() -> binary() | undefined.
 encryption_key() ->
-    application:get_env(shigoto, encryption_key, undefined).
+    case setting(encryption_key, undefined) of
+        undefined -> undefined;
+        Key when is_binary(Key) -> Key;
+        _NotAKey -> error({shigoto_config, {invalid, encryption_key, not_a_binary}})
+    end.
 
 -doc "Heartbeat interval in milliseconds for executing jobs. Default: 30000.".
 -spec heartbeat_interval() -> pos_integer().
 heartbeat_interval() ->
-    application:get_env(shigoto, heartbeat_interval, 30000).
+    positive_setting(heartbeat_interval, 30000).
+
+-doc "Milliseconds between sweeps for stale executing jobs. Default: 60000.".
+-spec rescue_interval() -> pos_integer().
+rescue_interval() ->
+    positive_setting(rescue_interval, 60000).
+
+-doc """
+Seconds an executing job may go without a heartbeat before it counts as stale:
+twice the heartbeat interval.
+""".
+-spec stale_after() -> float().
+stale_after() ->
+    heartbeat_interval() * 2 / 1000.
+
+-doc """
+What a waiting job does when a job it depends on is discarded or cancelled,
+unless the job says otherwise with its own `on_dependency_failure`: `run`
+without it (the default), or be `cancel`led or `discard`ed in turn.
+""".
+-spec on_dependency_failure() -> run | cancel | discard.
+on_dependency_failure() ->
+    case application:get_env(shigoto, on_dependency_failure, run) of
+        Policy when Policy =:= run; Policy =:= cancel; Policy =:= discard -> Policy;
+        Other -> error({shigoto_config, {invalid, on_dependency_failure, Other}})
+    end.
 
 -doc "Load shedding config. Default: undefined (disabled).".
 -spec load_shedding() -> map() | undefined.
 load_shedding() ->
-    application:get_env(shigoto, load_shedding, undefined).
+    map_setting(load_shedding).
 
 -doc "Queue weight config. Map of queue name to weight. Default: #{} (equal weight).".
 -spec queue_weights() -> #{binary() => pos_integer()}.
 queue_weights() ->
-    application:get_env(shigoto, queue_weights, #{}).
+    case setting(queue_weights, #{}) of
+        Weights when is_map(Weights) ->
+            #{
+                Queue => Weight
+             || Queue := Weight <- Weights, is_binary(Queue), is_integer(Weight)
+            };
+        Other ->
+            error({shigoto_config, {invalid, queue_weights, Other}})
+    end.
 
 -doc "Queues that use fair partition-based claiming. Default: [] (all use standard claiming).".
 -spec fair_queues() -> [binary()].
 fair_queues() ->
-    application:get_env(shigoto, fair_queues, []).
+    [Queue || Queue <- list_setting(fair_queues), is_binary(Queue)].
 
 -doc "Ordered list of encryption keys (newest first) for key rotation. Default: [].".
 -spec encryption_keys() -> [binary()].
 encryption_keys() ->
-    application:get_env(shigoto, encryption_keys, []).
+    [
+        case Key of
+            _ when is_binary(Key) -> Key;
+            _NotAKey -> error({shigoto_config, {invalid, encryption_keys, not_a_binary}})
+        end
+     || Key <- list_setting(encryption_keys)
+    ].
 
 -doc """
 Fanout queues — every node processes every job. Format:
 `[{QueueName, Concurrency, Opts}]` where Opts may include
 `window` (seconds, default 120). Default: [].
 """.
--spec fanout_queues() -> [{binary(), pos_integer(), map()}].
+-spec fanout_queues() -> [{Name :: term(), Concurrency :: term(), Opts :: term()}].
 fanout_queues() ->
-    application:get_env(shigoto, fanout_queues, []).
+    [Queue || {_Name, _Concurrency, _Opts} = Queue <- list_setting(fanout_queues)].
+
+-doc """
+The module that carries a context from the process that inserts a job to the
+processes that run it (`m:shigoto_propagator`). Default: `undefined`, nothing
+is carried.
+""".
+-spec propagator() -> module() | undefined.
+propagator() ->
+    case setting(propagator, undefined) of
+        Module when is_atom(Module) -> Module;
+        _NotAModule -> undefined
+    end.
+
+-doc """
+The frame `m:shigoto_crypto` writes: `v1` (the default) or `v2`.
+
+`v1` is what releases up to 1.10 write and is all they can read, so with the
+default a 1.10 node can run what this release writes: nodes can be upgraded
+one at a time and a rollback to 1.10 loses nothing. `v2` binds a ciphertext to
+its column and worker and also encrypts results and batch callback args.
+
+Set `v2` only once every node runs this release and you will not go back to
+1.10. A 1.10 node cannot open a `v2` frame: it hands the stored string to
+`perform/1`, the attempt fails, and after `max_attempts` the job is discarded.
+`v2` is planned to become the default in a later release. Both formats are
+read whichever is written. See the
+[Encryption](encryption.md#upgrading-encryption) guide for the steps.
+""".
+-spec encryption_write_format() -> v1 | v2.
+encryption_write_format() ->
+    case application:get_env(shigoto, encryption_write_format, v1) of
+        Format when Format =:= v1; Format =:= v2 -> Format;
+        Other -> error({shigoto_config, {invalid, encryption_write_format, Other}})
+    end.
+
+-doc """
+The frames `m:shigoto_crypto` reads: `[v1, v2]` by default. Set `[v2]` once no
+`v1` ciphertext is left (`shigoto:reencrypt/0,1`), so that one copied from a
+backup or another row is refused.
+""".
+-spec encryption_read_formats() -> [v1 | v2].
+encryption_read_formats() ->
+    case application:get_env(shigoto, encryption_read_formats, [v1, v2]) of
+        Formats when is_list(Formats) -> [v1 || v1 <- Formats] ++ [v2 || v2 <- Formats];
+        _NotAList -> []
+    end.
+
+-doc """
+Whether a plaintext value in a column this installation encrypts fails the job
+instead of being run. Default: `false`. It needs a key: with `true` and no
+`encryption_key` or `encryption_keys` the application does not start.
+
+The boot accepts `true` and `false` only. Changed while the application runs,
+only `false` turns it off: any other value is read as `true`.
+""".
+-spec require_encrypted() -> boolean().
+require_encrypted() ->
+    setting(require_encrypted, false) =/= false.
+
+-doc """
+The worker modules this node runs. Default: `undefined`, any module that
+exports `perform/1`. With a list, a job naming a module outside it fails with
+`unknown_worker` and the module is never loaded or called.
+
+Optional in 1.x and required from 2.0: set it now.
+""".
+-spec workers() -> [term()] | undefined.
+workers() ->
+    case application:get_env(shigoto, workers, undefined) of
+        undefined -> undefined;
+        Workers when is_list(Workers) -> Workers;
+        _NotAList -> []
+    end.
+
+-doc """
+The name of this installation. Default: `undefined`.
+
+With a name, the advisory locks shigoto takes and the `NOTIFY` channel it uses
+are its own, so two installations in one database (two schemas) do not share
+them. Lower-case letters, digits and `_`, at most 32 bytes. Every node of one
+installation has to name the same instance: a node with a name and one without
+do not exclude each other.
+
+Raises `{shigoto_config, {invalid, instance, Value}}` for anything else, also
+when it is changed while the application runs: it is never read as no
+instance, which would be the locks and the channel of every unnamed
+installation in the database.
+
+The application does not start with such a value, so the raise is only seen
+on a node whose `instance` was changed while it ran. There it is raised
+wherever a lock key or the channel is needed: a unique insert raises in its
+caller, a job of a worker with `global_concurrency/0` is put back, and the
+rescue, cron and staging passes fail and are tried again, so no stale job is
+rescued and no cron job scheduled by that node until the value is valid. The
+node itself stays up. Change `instance` in the configuration and restart the
+node.
+""".
+-spec instance() -> binary() | undefined.
+instance() ->
+    case setting(instance, undefined) of
+        undefined ->
+            undefined;
+        Instance when is_binary(Instance) ->
+            case instance_checked(Instance) of
+                ok -> Instance;
+                {error, Invalid} -> error({shigoto_config, Invalid})
+            end;
+        Other ->
+            error({shigoto_config, {invalid, instance, Other}})
+    end.
+
+-doc """
+Milliseconds to wait for an advisory lock another session holds before giving
+up. Default: 5000.
+""".
+-spec advisory_lock_timeout() -> non_neg_integer().
+advisory_lock_timeout() ->
+    case application:get_env(shigoto, advisory_lock_timeout, 5000) of
+        Ms when is_integer(Ms), Ms >= 0 -> Ms;
+        _Invalid -> 5000
+    end.
+
+-doc """
+The most advisory locks one `insert_all/1,2` call may take for its unique
+jobs. Default: 1000, at most 5000. A call that needs more answers
+`{error, {too_many_unique_locks, Needed, Limit}}` and inserts nothing.
+
+A unique job takes one lock per configured encryption key, one without a key,
+and one more while unique keys stored before encryption are still looked for.
+The locks are held until the call ends, or until the caller's transaction
+does, and PostgreSQL keeps the locks of every session in one table of about
+`max_locks_per_transaction * max_connections` entries (6400 by default). A
+session that fills it makes other sessions fail with `out of shared memory`.
+Raise this setting only together with `max_locks_per_transaction`.
+""".
+-spec unique_lock_limit() -> 1..5000.
+unique_lock_limit() ->
+    case setting(unique_lock_limit, 1000) of
+        Limit when is_integer(Limit), Limit >= 1, Limit =< 5000 -> Limit;
+        Other -> error({shigoto_config, {invalid, unique_lock_limit, Other}})
+    end.
+
+-doc """
+The shortest time, in milliseconds, between two polls of one queue caused by
+notifications. Default: 10.
+""".
+-spec notify_min_interval() -> non_neg_integer().
+notify_min_interval() ->
+    case application:get_env(shigoto, notify_min_interval, 10) of
+        Ms when is_integer(Ms), Ms >= 0 -> Ms;
+        _Invalid -> 10
+    end.
+
+-doc """
+The `NOTIFY` channel jobs are announced on: `shigoto_jobs_insert`, or
+`shigoto_jobs_insert_<instance>` when an instance is named.
+""".
+-spec notify_channel() -> binary().
+notify_channel() ->
+    case instance() of
+        undefined -> ~"shigoto_jobs_insert";
+        Instance -> <<"shigoto_jobs_insert_", Instance/binary>>
+    end.
+
+-doc """
+Check every setting, before anything starts.
+
+Answers `{error, {shigoto_config, {invalid, Setting, Value}}}` for the first
+one the application cannot run with: a value of the wrong type, a time that is
+zero or negative, a name that is not one of the choices. `Value` is what was
+configured, except where that could be a secret: an encryption key is
+described by its position and what is wrong with it, a `notifier` that is not
+a map as `not_a_map`. `require_encrypted` without a key is refused as
+`{invalid, require_encrypted, no_encryption_key}`.
+
+A `notifier` minato would not connect with is refused by the key that is
+wrong, never its value: `{invalid, notifier, {invalid_option, Key}}`, such as
+`ssl_options` without `ssl => true`, and `{invalid, notifier,
+{missing_option, user}}`. Such a notifier could never listen. Whether its
+server can be reached is not checked: that is tried again while the node runs.
+
+The readers of this module raise the same term, as
+`error({shigoto_config, {invalid, Setting, Value}})`, when a setting is changed
+to something invalid while the application runs. The few that do not raise
+fall back to the careful side: `require_encrypted` is on unless it is `false`,
+an invalid `workers` allows no worker and an invalid
+`encryption_read_formats` reads nothing.
+""".
+-spec check() -> ok | {error, {shigoto_config, {invalid, atom(), term()}}}.
+check() ->
+    try
+        _ = pool(),
+        _ = queues(),
+        _ = fanout_queues(),
+        _ = cron_entries(),
+        _ = middleware(),
+        _ = queue_weights(),
+        _ = fair_queues(),
+        ok = checked(notifier_checked(notifier_config())),
+        _ = load_shedding(),
+        _ = poll_interval(),
+        _ = stage_interval(),
+        _ = heartbeat_interval(),
+        _ = rescue_interval(),
+        _ = shutdown_timeout(),
+        _ = on_discard_timeout(),
+        _ = unrunnable_snooze_limit(),
+        _ = unique_lock_limit(),
+        _ = prune_after_days(),
+        _ = archive_after_days(),
+        _ = on_dependency_failure(),
+        ok = checked(shigoto_crypto:check_keys()),
+        _ = encryption_write_format(),
+        ok = checked(read_formats_checked(setting(encryption_read_formats, [v1, v2]))),
+        ok = checked(boolean_checked(require_encrypted, setting(require_encrypted, false))),
+        ok = checked(required_has_a_key(require_encrypted(), shigoto_crypto:is_enabled())),
+        ok = checked(workers_checked(setting(workers, undefined))),
+        _ = instance(),
+        ok = checked(interval_checked(advisory_lock_timeout, setting(advisory_lock_timeout, 5000))),
+        ok = checked(interval_checked(notify_min_interval, setting(notify_min_interval, 10))),
+        ok = checked(shigoto_propagator:check(setting(propagator, undefined)))
+    catch
+        error:{shigoto_config, {invalid, Setting, Value}} ->
+            {error, {shigoto_config, {invalid, Setting, Value}}}
+    end.
+
+checked(ok) -> ok;
+checked({error, {invalid, _Setting, _Value} = Reason}) -> error({shigoto_config, Reason}).
+
+%% A setting as it was configured, which is not yet known to be of its type.
+-spec setting(atom(), term()) -> term().
+setting(Key, Default) ->
+    application:get_env(shigoto, Key, Default).
+
+%% A setting of the wrong type never worked: it failed further in, at a timer
+%% or in a statement. Here it fails by name.
+-spec positive_setting(atom(), pos_integer()) -> pos_integer().
+positive_setting(Key, Default) ->
+    case setting(Key, Default) of
+        Value when is_integer(Value), Value > 0 -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
+
+-spec non_negative_setting(atom(), non_neg_integer()) -> non_neg_integer().
+non_negative_setting(Key, Default) ->
+    case setting(Key, Default) of
+        Value when is_integer(Value), Value >= 0 -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
+
+-spec map_setting(atom()) -> map() | undefined.
+map_setting(Key) ->
+    case setting(Key, undefined) of
+        undefined -> undefined;
+        Value when is_map(Value) -> Value;
+        _NotAMap -> error({shigoto_config, {invalid, Key, not_a_map}})
+    end.
+
+-spec list_setting(atom()) -> [term()].
+list_setting(Key) ->
+    case setting(Key, []) of
+        Value when is_list(Value) -> Value;
+        Other -> error({shigoto_config, {invalid, Key, Other}})
+    end.
+
+read_formats_checked(Formats) when is_list(Formats), Formats =/= [] ->
+    case [Format || Format <- Formats, Format =/= v1, Format =/= v2] of
+        [] -> ok;
+        _ -> {error, {invalid, encryption_read_formats, Formats}}
+    end;
+read_formats_checked(Formats) ->
+    {error, {invalid, encryption_read_formats, Formats}}.
+
+boolean_checked(_Setting, Value) when is_boolean(Value) -> ok;
+boolean_checked(Setting, Value) -> {error, {invalid, Setting, Value}}.
+
+%% A notifier minato does not connect with never listens, however often its
+%% listener is asked for again. One whose server cannot be reached is not
+%% found here: it is tried again while the node runs.
+notifier_checked(undefined) ->
+    ok;
+notifier_checked(Notifier) ->
+    case shigoto_db:connection(Notifier) of
+        {ok, _Connection} -> ok;
+        {error, Reason} -> {error, {invalid, notifier, Reason}}
+    end.
+
+required_has_a_key(true, false) -> {error, {invalid, require_encrypted, no_encryption_key}};
+required_has_a_key(_Required, _HasAKey) -> ok.
+
+workers_checked(undefined) ->
+    ok;
+workers_checked(Workers) when is_list(Workers) ->
+    case lists:all(fun erlang:is_atom/1, Workers) of
+        true -> ok;
+        false -> {error, {invalid, workers, Workers}}
+    end;
+workers_checked(Workers) ->
+    {error, {invalid, workers, Workers}}.
+
+-spec instance_checked(binary()) -> ok | {error, {invalid, instance, binary()}}.
+instance_checked(Instance) ->
+    case re:run(Instance, ~"^[a-z0-9_]{1,32}$", [dollar_endonly, {capture, none}]) of
+        match -> ok;
+        nomatch -> {error, {invalid, instance, Instance}}
+    end.
+
+interval_checked(_Setting, Ms) when is_integer(Ms), Ms >= 0 -> ok;
+interval_checked(Setting, Ms) -> {error, {invalid, Setting, Ms}}.

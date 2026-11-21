@@ -8,10 +8,19 @@ for a query rather than for a driver.
 
 ## What a caller gets
 
-`#{command := atom(), num_rows := integer(), rows := [row()]}` for a statement
-that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
+`#{command := atom() | binary(), num_rows := integer(), rows := [row()]}` for a
+statement that ran, and `{error, Reason}` for one that did not, with `{pgsql_error,
 Fields}` as the reason a server refused it. That is the shape shigoto already
 reads everywhere.
+
+A row is a map keyed by column name, an atom. The names are chosen by the
+server, and minato makes no atom for a name it is sent: a column is answered
+under an atom where one exists on the node, and under its name as a binary
+otherwise. Every column of shigoto's own tables is an atom from the moment
+this module is loaded (`columns/0`), so a job, a batch or a cron entry is
+keyed by atoms whichever module reads it. A column you add to one of the
+tables, or alias in a statement of your own, is an atom only if your code
+names it.
 
 ## Transactions
 
@@ -20,27 +29,172 @@ commits or rolls back. Statements the function runs find that connection here
 rather than being handed it, because a job queue's transaction functions are
 ordinary code that calls `shigoto_repo` and cannot thread a connection through.
 
+A statement in a transaction is waited for until it ends, however long the
+pool's `timeout` lets it run: minato cancels it at its deadline (`query/4`),
+and its error is the answer.
+
+## Sharing a transaction with kura
+
+An app on [kura](https://hex.pm/packages/kura) configures shigoto with
+`{repo, Repo}`, and shigoto then runs on the minato pool that `kura_postgres`
+started for the repo. That pool is named after the repo unless the repo's kura
+config sets `pool`; `repo` must name the pool, so with a `pool` override set
+shigoto's `repo` to that name. The two share transactions on that pool, in both
+directions, without shigoto depending on kura:
+
+- A statement shigoto runs while the process is inside a kura transaction on a
+  pool of the same name (`Repo:transaction/1`, or
+  `kura_repo_worker:transaction/2`) runs on that transaction's connection, so a
+  job inserted there commits or rolls back with the caller's writes. This
+  holds whether shigoto is configured with `repo` or `pool`.
+- When the pool is the configured `repo` and `kura_postgres` is loaded,
+  `transaction/2` opens the transaction through `kura_driver_minato`, so kura
+  writes made inside `shigoto:transaction/1` join it too. With `pool`, it opens
+  one of its own, which kura does not see.
+
+Either way a nested call joins the transaction already open. The one opened
+through kura behaves as kura's does: a statement in it that commits or rolls it
+back raises, and nothing meant for it runs outside it. Whether kura_postgres is
+there is decided once (`kura_available/0`).
+
+## Inside kura's test sandbox
+
+A test that checks out `kura_sandbox` for the pool has every statement shigoto
+runs from that process (or one it allowed, or any process with a shared
+checkout) go to the sandbox connection, so jobs commit and roll back with the
+test's own writes and are gone after `kura_sandbox:checkin/1`. kura's sandbox is
+looked at before kura's transaction, as kura itself does. `transaction/2` there
+runs through `kura_db:transaction/2`, which makes it a `SAVEPOINT` on the
+sandbox connection: a raise undoes only its own work and the sandbox stays
+usable, a statement that failed in it raises `transaction_rolled_back`, and
+inside a kura transaction it joins that one, as it does outside the sandbox.
+`kura_db:transaction/2` needs the repo module, so this holds when `repo` names
+the repo and the repo's pool is named after it. Configured with `pool`, or with
+`repo` naming a pool override, `transaction/2` runs its function directly on
+the sandbox connection: nothing leaves the sandbox, but a raise is not undone
+until checkin. Needs kura 2.24 or later and kura_postgres 1.1.7 or later; with
+older ones the sandbox is not joined, and a test that checks one out logs a
+notice saying so.
+
+shigoto's own processes (queues and their executors, the stager, cron, pruner,
+heartbeat, notifier and migrator) never use the sandbox, shared or not, and nor
+do the processes their workers run in. They see only committed rows, so the
+jobs a test inserts are not run in the background: run them from the test with
+`shigoto:drain_queue/1`, which claims and completes them in the sandbox. A
+worker's `perform/1` runs in a process of its own, so with a checkout that is
+not shared, what it reads and writes is outside the sandbox.
+
+A transaction-level advisory lock taken on the sandbox connection is held until
+checkin, even after the savepoint that took it is released. A unique insert, a
+drained job of a worker with `global_concurrency/0`, `shigoto_cron:schedule_once/0`
+and `shigoto_migration:up/1` take one, so another connection inserting the same
+unique key waits for the test to end. A unique insert also opens a transaction,
+so two processes sharing the sandbox that insert at once, or one that inserts
+while the owner is inside `Repo:transaction/1`, can raise
+`{kura_sandbox, overlapping_transactions}`.
+
+## When a transaction does not commit
+
 A `COMMIT` the server answers with `ROLLBACK` raises `transaction_rolled_back`.
 PostgreSQL does that when the transaction had already failed, and a job queue
 that reads it as success has marked jobs done that were never written - which is
 the same job running twice on the next poll.
+
+A `COMMIT` the server refuses raises `{shigoto_db, {commit_failed, Reason}}`, and
+one that gets no answer (a timeout, a lost connection) raises
+`{shigoto_db, {commit_unknown, Reason}}`: whether it committed is not known. A
+`BEGIN` that fails raises `{shigoto_db, {begin_failed, Reason}}` before the
+function runs. These are the shapes kura_driver_minato uses, and a transaction
+opened through kura raises them the same way. A server error keeps only its
+`code`, `constraint` and severity, since its message can carry row values.
 """.
+
+-include_lib("kernel/include/logger.hrl").
 
 -export([
     query/3,
     query/4,
     transaction/2,
     in_transaction/1,
+    transaction_open/1,
+    reduced/1,
+    kura_available/0,
+    ignore_sandbox/0,
+    ignores_sandbox/0,
     start_pool/2,
-    start_listener/2
+    start_listener/2,
+    connection/1,
+    columns/0
 ]).
 
 -define(HOLDER, {?MODULE, holder}).
+-define(KURA_DRIVER, kura_driver_minato).
+-define(KURA_POOL, kura_pool_minato).
+-define(KURA_CALLS, [
+    {?KURA_DRIVER, query, 5},
+    {?KURA_DRIVER, transaction, 4},
+    {?KURA_POOL, transaction_conn, 1}
+]).
+-define(KURA_AVAILABLE, {?MODULE, kura_available}).
+-define(KURA_SANDBOX, kura_sandbox).
+-define(KURA_DB, kura_db).
+-define(SANDBOX_CALLS, [
+    {?KURA_SANDBOX, get_conn, 1},
+    {?KURA_DB, transaction, 2},
+    {?KURA_DB, in_transaction, 1},
+    {?KURA_DB, get_pool, 1},
+    {?KURA_DRIVER, query_on, 4}
+]).
+-define(SANDBOX_SUPPORT, {?MODULE, sandbox_support}).
+-define(SANDBOX_NOTICED, {?MODULE, sandbox_noticed}).
+-define(FLAT, {?MODULE, flat}).
+-define(IGNORES_SANDBOX, {?MODULE, ignores_sandbox}).
 -define(DEFAULT_DECODE, #{return_rows_as_maps => true, column_name_as_atom => true}).
 -define(CALL_TIMEOUT, 30000).
+%% The options of a minato connection that are handed on as they were
+%% written. `host`, `database`, `user` and `password` are handed on too, in
+%% the spellings and types shigoto has always taken: see `connection/3`.
+-define(AS_WRITTEN, [
+    port,
+    parameters,
+    ssl,
+    ssl_options,
+    channel_binding,
+    auth,
+    connect_timeout,
+    timeout,
+    cancel_timeout,
+    socket_options,
+    transport,
+    prepared_statements,
+    frame_opts
+]).
+-define(SPELLED, [host, hostname, database, user, username, password]).
+%% Keys that say nothing about a connection and are left out without a word.
+%% `pool_size` is the pool's, read in `start_pool/2`. The rest are the keys
+%% of a kura repo's configuration, which is handed to shigoto as it is.
+-define(NOT_A_CONNECTION_OPTION, [
+    pool_size,
+    pool,
+    pool_module,
+    driver_module,
+    backend,
+    dialect,
+    read_only,
+    replicas,
+    uuid_version,
+    encryption,
+    keyring,
+    queue_target,
+    queue_interval
+]).
 
--doc "The shape a statement answers with.".
--type result() :: #{command := atom(), num_rows := term(), rows := [term()]}.
+-doc """
+The shape a statement answers with. `command` is an atom for a command tag
+minato knows and the tag itself, a binary, for one it does not: match on it
+only with a clause for everything else.
+""".
+-type result() :: #{command := atom() | binary(), num_rows := term(), rows := [term()]}.
 
 -doc "What went wrong. `pgsql_error` is the server refusing the statement.".
 -type error() :: {pgsql_error, map()} | {socket, term()} | term().
@@ -55,15 +209,30 @@ query(Pool, SQL, Params) ->
 -doc """
 Run one statement, on this process's transaction if it is inside one.
 
-`Opts` are minato's query options: `timeout` is a deadline after which the
-statement is cancelled on the server rather than abandoned, and the decoding
-options are the ones `m:minato_protocol` documents.
+`Opts` are minato's query options. `timeout` is how long the whole answer may
+take, in milliseconds or `infinity`, and the pool's `timeout` (15000 unless
+the pool was started with another) unless given. The pool's `timeout` is also
+how long the server may send nothing, so a `timeout` here shortens a
+statement and lengthens only an answer that keeps arriving. A statement still
+running at its deadline, or one whose rows are still arriving, is cancelled
+on the server rather than abandoned and answers
+`{error, {pgsql_error, #{code := ~"57014"}}}`; a server that goes on sending
+after that answers `{error, {socket, timeout}}` and the connection is closed.
+The decoding options are the ones `m:minato_protocol` documents.
 """.
 -spec query(atom(), iodata(), [term()], map()) -> result() | {error, error()}.
 query(Pool, SQL, Params, Opts) ->
-    case in_transaction(Pool) of
-        undefined -> answered(minato:query(Pool, SQL, Params, decoding(Opts)));
-        Holder -> ran(Holder, SQL, Params, decoding(Opts))
+    case route(Pool) of
+        pool ->
+            answered(minato:query(Pool, SQL, Params, decoding(Opts)));
+        {shigoto, Holder} ->
+            ran(Holder, SQL, Params, decoding(Opts));
+        {kura, _Holder} ->
+            kura(?KURA_DRIVER, query, [?KURA_POOL, Pool, SQL, Params, decoding(Opts)]);
+        {sandbox, Conn} ->
+            kura(?KURA_DRIVER, query_on, [
+                Conn, SQL, Params, (decoding(Opts))#{transaction => inside}
+            ])
     end.
 
 -doc """
@@ -75,31 +244,108 @@ know whether it is nested.
 """.
 -spec transaction(atom(), fun(() -> Result)) -> Result.
 transaction(Pool, Fun) ->
-    case in_transaction(Pool) of
-        undefined -> opened(Pool, Fun);
-        _Holder -> Fun()
+    case route(Pool) of
+        pool -> begun(Pool, Fun);
+        {sandbox, _Conn} -> sandboxed(Pool, Fun);
+        _Open -> Fun()
     end.
 
--doc "The connection holding this process's transaction on `Pool`, or `undefined`.".
+-doc """
+The connection holding this process's transaction on `Pool`, or `undefined`.
+
+Only a transaction `transaction/2` opened on its own; see the moduledoc for one
+kura holds.
+""".
 -spec in_transaction(atom()) -> pid() | undefined.
 in_transaction(Pool) ->
-    erlang:get({?HOLDER, Pool}).
+    case erlang:get({?HOLDER, Pool}) of
+        Holder when is_pid(Holder) -> Holder;
+        _None -> undefined
+    end.
+
+-doc false.
+-spec transaction_open(atom()) -> boolean().
+transaction_open(Pool) ->
+    case route(Pool) of
+        pool -> false;
+        {sandbox, _Conn} -> sandbox_transaction(Pool);
+        _Open -> true
+    end.
+
+-doc """
+`Reason` with a server error cut down to the fields that cannot carry row values.
+
+A PostgreSQL error's `message` and `detail` can quote the failing row ("Failing
+row contains ..."), so a `{pgsql_error, Fields}` keeps only `code`,
+`constraint`, `severity` and `severity_non_localised`. Use it on any reason that
+is logged or raised. Other reasons are answered as they are.
+""".
+-spec reduced(term()) -> term().
+reduced({pgsql_error, Fields}) when is_map(Fields) ->
+    {pgsql_error, maps:with([code, constraint, severity, severity_non_localised], Fields)};
+reduced(Reason) ->
+    Reason.
 
 -doc """
 Start a pool from shigoto's configuration.
 
 Takes what shigoto and its users already write - `host`, `port`, `database`,
 `user`, `password`, `pool_size` - and gives minato what it takes.
+
+`host` (or `hostname`), `database`, `user` (or `username`) and `password` are
+taken as strings, binaries or atoms, and `password` also as a fun of no
+arguments. Every other option of a minato connection is handed on as it was
+written: `port`, `ssl`, `ssl_options`, `auth`, `channel_binding`, `timeout`,
+`connect_timeout`, `cancel_timeout`, `socket_options`, `parameters`,
+`transport`, `prepared_statements` and `frame_opts`. What each does is in
+minato's configuration guide. `pool_size` is the most connections the pool
+holds, 10 unless given.
+
+Any other key is left out, and the connection is opened as if it had not been
+given. Each start logs one warning that names such keys,
+`shigoto_connection_keys_not_read`: `sslmode`, or a misspelt `ssl_options`,
+is a setting somebody believes is in force. A later major release will refuse
+them. The keys of a kura repo's configuration are left out without the
+warning, so that map can be given as it is: `pool`, `pool_module`,
+`driver_module`, `backend`, `dialect`, `read_only`, `replicas`,
+`uuid_version`, `encryption`, `keyring`, `queue_target` and `queue_interval`.
+
+minato refuses a connection it will not open as asked. No pool is started
+then, and the answer is minato's:
+
+- `{error, {invalid_option, ssl_options}}` for `ssl_options` without
+  `ssl => true`, since the connection would not be encrypted, and for options
+  that resume a TLS session or pause the handshake;
+- `{error, {invalid_option, Key}}` for a value minato does not take: an `ssl`
+  that is not a boolean, a `timeout`, `connect_timeout` or `cancel_timeout`
+  that is neither a number of milliseconds nor `infinity`, a
+  `channel_binding` or an `auth` it does not know, a `host` that is no host,
+  a `password` that is no text;
+- `{error, {reserved_name, Name}}` for `minato_overdue` and `minato_sup`,
+  which are minato's own processes.
+
+Without `user` (or `username`) there is nobody to connect as:
+`{error, {missing_option, user}}`.
+
+`timeout` is the time every statement on the pool has, the ones shigoto runs
+for a queue and for the heartbeat of a running job among them, so a longer
+one is also how long a connection that has stopped answering holds each of
+those up.
+
+minato logs `unencrypted_connection` once for a pool whose `host` is another
+machine and whose options do not mention `ssl`. `ssl => false` says it was
+meant.
 """.
 -spec start_pool(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
-    case minato:start_pool(Name, Opts) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, Reason} -> {error, Reason}
+    case connection(Config) of
+        {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
+            Opts = #{size => maps:get(pool_size, Config, 10), connection => Connection},
+            started(minato:start_pool(Name, Opts));
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 -doc """
@@ -108,43 +354,147 @@ Start a listener for `LISTEN`, on a connection of its own.
 `LISTEN` is session state, so it cannot share the pool: a notification is
 delivered to the session that registered for it, and a pooled connection would
 deliver it to whichever caller happened to hold it next.
+
+`Config` is read as `start_pool/2` reads it, without `pool_size`, and a
+connection minato will not open as asked is refused the same way.
 """.
 -spec start_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_listener(Name, Config) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    Connection = maps:fold(fun connection/3, #{}, Config),
-    case minato:start_listener(Name, #{connection => Connection}) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, Reason} -> {error, Reason}
+    case connection(Config) of
+        {ok, Connection} ->
+            ok = warned_of_keys_not_read(Name, Config),
+            started(minato:start_listener(Name, #{connection => Connection}));
+        {error, Reason} ->
+            {error, Reason}
     end.
+
+-doc false.
+%% The minato connection `Config` describes, or why minato would not open
+%% it, without connecting. Asked before a pool or a listener is started:
+%% minato finds the same in the process it starts, which ends in a crash
+%% report, and the notifier asks for its listener again every five seconds.
+%% `shigoto_config:check/0` asks it of the `notifier` setting.
+-spec connection(map()) ->
+    {ok, map()} | {error, {invalid_option, atom()} | {missing_option, user}}.
+connection(Config) ->
+    case maps:fold(fun connection/3, #{}, Config) of
+        #{user := _} = Connection ->
+            case minato_conn:validate(Connection) of
+                ok -> {ok, Connection};
+                {error, Reason} -> {error, Reason}
+            end;
+        _NoUser ->
+            {error, {missing_option, user}}
+    end.
+
+%% A key nothing reads changes nothing, and whoever wrote `sslmode`, or
+%% misspelt `ssl_options`, believes it did. The keys are named and never
+%% their values, and a key that is not an atom is not repeated: a map
+%% written the wrong way round has its values for keys.
+-spec warned_of_keys_not_read(atom(), map()) -> ok.
+warned_of_keys_not_read(Name, Config) ->
+    Read = ?SPELLED ++ ?AS_WRITTEN ++ ?NOT_A_CONNECTION_OPTION,
+    case lists:usort([named(Key) || Key := _Value <- Config, not lists:member(Key, Read)]) of
+        [] ->
+            ok;
+        Keys ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_connection_keys_not_read",
+                name => Name,
+                keys => Keys,
+                warning =>
+                    ~"these keys are no option of a connection and change nothing: it is opened as if they were not given",
+                action =>
+                    ~"correct or remove them; a later major release refuses a key it does not read"
+            }),
+            ok
+    end.
+
+-spec named(term()) -> atom().
+named(Key) when is_atom(Key) -> Key;
+named(_Key) -> not_an_atom.
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({error, {already_started, Pid}}) when is_pid(Pid) -> {ok, Pid};
+started({error, Reason}) -> {error, Reason}.
 
 %%----------------------------------------------------------------------
 %% Transactions
 %%----------------------------------------------------------------------
+
+-spec begun(atom(), fun(() -> Result)) -> Result.
+begun(Pool, Fun) ->
+    case kura_repo(Pool) of
+        true -> kura_opened(Pool, Fun);
+        false -> opened(Pool, Fun)
+    end.
+
+-spec kura_opened(atom(), fun(() -> Result)) -> Result.
+kura_opened(Pool, Fun) ->
+    kura_failures(fun() -> kura(?KURA_DRIVER, transaction, [?KURA_POOL, Pool, Fun, #{}]) end).
+
+-spec kura_failures(fun(() -> Result)) -> Result.
+kura_failures(Opened) ->
+    try
+        Opened()
+    catch
+        error:{kura_driver_minato, {no_connection, checkout_timeout}} ->
+            error({?MODULE, checkout_timeout});
+        error:{kura_driver_minato, {Failure, Reason}} when
+            Failure =:= no_connection;
+            Failure =:= begin_failed;
+            Failure =:= commit_failed;
+            Failure =:= commit_unknown;
+            Failure =:= savepoint_failed
+        ->
+            error({?MODULE, {Failure, Reason}})
+    end.
 
 -spec opened(atom(), fun(() -> Result)) -> Result.
 opened(Pool, Fun) ->
     Holder = holder(Pool),
     _ = erlang:put({?HOLDER, Pool}, Holder),
     try
-        _ = ran(Holder, ~"BEGIN", [], #{}),
-        committed(Holder, Fun())
-    catch
-        Class:Reason:Stacktrace ->
-            _ = ran(Holder, ~"ROLLBACK", [], #{}),
-            erlang:raise(Class, Reason, Stacktrace)
-    after
+        ok = begun_on(Holder),
+        Result = committed(Holder, Fun()),
         _ = erlang:erase({?HOLDER, Pool}),
+        Result
+    after
+        %% Still registered here, the transaction did not commit.
+        _ =
+            case erlang:erase({?HOLDER, Pool}) of
+                undefined -> ok;
+                _Holder -> ran(Holder, ~"ROLLBACK", [], #{})
+            end,
         release(Holder)
+    end.
+
+-spec begun_on(pid()) -> ok.
+begun_on(Holder) ->
+    case ran(Holder, ~"BEGIN", [], #{}) of
+        #{command := 'begin'} -> ok;
+        Answer -> failed(begin_failed, Answer)
     end.
 
 -spec committed(pid(), Result) -> Result.
 committed(Holder, Value) ->
     case ran(Holder, ~"COMMIT", [], #{}) of
+        #{command := commit} -> Value;
         #{command := rollback} -> error(transaction_rolled_back);
-        _Committed -> Value
+        {error, {pgsql_error, _}} = Refused -> failed(commit_failed, Refused);
+        Unknown -> failed(commit_unknown, Unknown)
     end.
+
+%% The same shapes kura_driver_minato raises, so a transaction fails the same
+%% way whichever of the two opened it. A server error keeps only fields that
+%% cannot carry row values.
+-spec failed(atom(), term()) -> no_return().
+failed(Failure, {error, Reason}) ->
+    error({?MODULE, {Failure, reduced(Reason)}});
+failed(Failure, #{command := Command}) ->
+    error({?MODULE, {Failure, {unexpected, Command}}}).
 
 %%----------------------------------------------------------------------
 %% Holding one connection for the length of a transaction
@@ -196,6 +546,9 @@ executed(Conn, SQL, Params, Opts) ->
         {error, Reason} -> {{error, Reason}, Conn}
     end.
 
+%% Waits for the holder's answer for as long as it takes. minato ends the
+%% statement at its `timeout`, so whatever ends it comes back as its error. A
+%% wait that gave up first left the statement running in front of the COMMIT.
 -spec ran(pid(), iodata(), [term()], map()) -> result() | {error, error()}.
 ran(Holder, SQL, Params, Opts) ->
     Tag = make_ref(),
@@ -207,7 +560,6 @@ ran(Holder, SQL, Params, Opts) ->
             Answer;
         {'DOWN', Monitor, process, Holder, Reason} ->
             {error, {holder_died, Reason}}
-    after ?CALL_TIMEOUT -> {error, timeout}
     end.
 
 -spec release(pid()) -> ok.
@@ -225,8 +577,258 @@ release(Holder) ->
     end.
 
 %%----------------------------------------------------------------------
+%% kura, when it is there
+%%----------------------------------------------------------------------
+
+%% Where a statement on `Pool` runs for this process: shigoto's own transaction,
+%% the connection kura's test sandbox checked out, kura's transaction, or the
+%% pool. The sandbox comes before kura's transaction because kura_db looks there
+%% first, so a kura write and a shigoto write land on the same connection.
+-spec route(atom()) -> {shigoto | sandbox | kura, pid()} | pool.
+route(Pool) ->
+    case in_transaction(Pool) of
+        undefined -> unheld(Pool);
+        Holder -> {shigoto, Holder}
+    end.
+
+-spec unheld(atom()) -> {sandbox | kura, pid()} | pool.
+unheld(Pool) ->
+    case sandbox_conn(Pool) of
+        {ok, Conn} ->
+            {sandbox, Conn};
+        not_found ->
+            case kura_transaction(Pool) of
+                undefined -> pool;
+                Holder -> {kura, Holder}
+            end
+    end.
+
+%% The sandbox connection is already inside the test's transaction, and only
+%% kura_db knows how to open one inside it: a savepoint, with the sandbox's
+%% bookkeeping. That needs the repo module, which `repo` names when it is also
+%% the pool's name.
+-spec sandboxed(atom(), fun(() -> Result)) -> Result.
+sandboxed(Pool, Fun) ->
+    case sandbox_repo(Pool) of
+        {ok, Repo} ->
+            case kura(?KURA_DB, in_transaction, [Repo]) of
+                true -> Fun();
+                false -> kura_failures(fun() -> kura(?KURA_DB, transaction, [Repo, Fun]) end)
+            end;
+        none ->
+            flat(Pool, Fun)
+    end.
+
+%% With no repo module to open a savepoint through, `Fun` runs in the sandbox's
+%% own transaction, which `transaction_open/1` still has to see.
+-spec flat(atom(), fun(() -> Result)) -> Result.
+flat(Pool, Fun) ->
+    case erlang:get({?FLAT, Pool}) of
+        true ->
+            Fun();
+        undefined ->
+            _ = erlang:put({?FLAT, Pool}, true),
+            try
+                Fun()
+            after
+                _ = erlang:erase({?FLAT, Pool})
+            end
+    end.
+
+-spec sandbox_transaction(atom()) -> boolean().
+sandbox_transaction(Pool) ->
+    case sandbox_repo(Pool) of
+        {ok, Repo} -> kura(?KURA_DB, in_transaction, [Repo]) =:= true;
+        none -> erlang:get({?FLAT, Pool}) =:= true
+    end.
+
+-spec sandbox_repo(atom()) -> {ok, module()} | none.
+sandbox_repo(Pool) ->
+    case application:get_env(shigoto, repo) of
+        {ok, Pool} ->
+            try kura(?KURA_DB, get_pool, [Pool]) of
+                Pool -> {ok, Pool};
+                _Other -> none
+            catch
+                error:_ -> none
+            end;
+        _NotTheRepo ->
+            none
+    end.
+
+-spec sandbox_conn(atom()) -> {ok, pid()} | not_found.
+sandbox_conn(Pool) ->
+    case ignores_sandbox() of
+        true -> not_found;
+        false -> sandbox_held(sandbox_support(), Pool)
+    end.
+
+-spec sandbox_held(none | partial | full, atom()) -> {ok, pid()} | not_found.
+sandbox_held(none, _Pool) ->
+    not_found;
+sandbox_held(Support, Pool) ->
+    case {Support, kura(?KURA_SANDBOX, get_conn, [Pool])} of
+        {full, {ok, Conn}} when is_pid(Conn) -> {ok, Conn};
+        {partial, {ok, _Conn}} -> unsupported();
+        _NotSandboxed -> not_found
+    end.
+
+-doc false.
+-spec ignore_sandbox() -> ok.
+ignore_sandbox() ->
+    _ = erlang:put(?IGNORES_SANDBOX, true),
+    ok.
+
+-doc false.
+-spec ignores_sandbox() -> boolean().
+ignores_sandbox() ->
+    erlang:get(?IGNORES_SANDBOX) =:= true.
+
+%% `partial` is a kura that has a sandbox but not what shigoto joins it with.
+-spec sandbox_support() -> none | partial | full.
+sandbox_support() ->
+    case persistent_term:get(?SANDBOX_SUPPORT, undefined) of
+        undefined ->
+            Support = sandbox_checked(),
+            persistent_term:put(?SANDBOX_SUPPORT, Support),
+            Support;
+        Support when Support =:= none; Support =:= partial; Support =:= full ->
+            Support
+    end.
+
+-spec sandbox_checked() -> none | partial | full.
+sandbox_checked() ->
+    case kura_available() andalso exported({?KURA_SANDBOX, get_conn, 1}) of
+        false -> none;
+        true -> supported([MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)])
+    end.
+
+-spec supported([mfa()]) -> partial | full.
+supported([]) -> full;
+supported(_Missing) -> partial.
+
+%% Only a test with a sandbox checked out gets here, so production nodes on an
+%% older kura say nothing.
+-spec unsupported() -> not_found.
+unsupported() ->
+    case persistent_term:get(?SANDBOX_NOTICED, false) of
+        true ->
+            not_found;
+        false ->
+            persistent_term:put(?SANDBOX_NOTICED, true),
+            ?LOG_NOTICE(#{
+                msg => ~"shigoto_kura_sandbox_unsupported",
+                missing => [MFA || MFA <- ?SANDBOX_CALLS, not exported(MFA)],
+                action => ~"jobs do not join kura_sandbox before kura 2.24 and kura_postgres 1.1.7"
+            }),
+            not_found
+    end.
+
+-spec exported(mfa()) -> boolean().
+exported({Module, Function, Arity}) ->
+    code:ensure_loaded(Module) =:= {module, Module} andalso
+        erlang:function_exported(Module, Function, Arity).
+
+-spec kura_transaction(atom()) -> pid() | undefined.
+kura_transaction(Pool) ->
+    case kura_available() of
+        true -> kura(?KURA_POOL, transaction_conn, [Pool]);
+        false -> undefined
+    end.
+
+-doc """
+Whether kura_postgres is there to share transactions with, decided once.
+
+Checks that `kura_driver_minato` and `kura_pool_minato` load and export what
+shigoto calls, and keeps the answer. A kura_postgres that loads but lacks one of
+them is logged as a warning rather than quietly not shared with. The shigoto
+application calls this at start; anything else gets the kept answer.
+""".
+-spec kura_available() -> boolean().
+kura_available() ->
+    case persistent_term:get(?KURA_AVAILABLE, undefined) of
+        undefined ->
+            Available = kura_checked(),
+            persistent_term:put(?KURA_AVAILABLE, Available),
+            Available;
+        Available when is_boolean(Available) ->
+            Available
+    end.
+
+-spec kura_checked() -> boolean().
+kura_checked() ->
+    Loaded = [M || M <- [?KURA_DRIVER, ?KURA_POOL], code:ensure_loaded(M) =:= {module, M}],
+    Missing = [MFA || {M, F, A} = MFA <- ?KURA_CALLS, not erlang:function_exported(M, F, A)],
+    case {Loaded, Missing} of
+        {[], _} ->
+            false;
+        {_, []} ->
+            true;
+        {_, _} ->
+            ?LOG_WARNING(#{
+                msg => ~"shigoto_kura_transactions_unavailable",
+                missing => Missing,
+                action =>
+                    ~"shigoto will not share transactions with kura; upgrade kura_postgres"
+            }),
+            false
+    end.
+
+%% Called by name so that kura_postgres stays an optional runtime dependency.
+-spec kura(module(), atom(), [term()]) -> dynamic().
+kura(Module, Function, Args) ->
+    erlang:apply(Module, Function, Args).
+
+-spec kura_repo(atom()) -> boolean().
+kura_repo(Pool) ->
+    application:get_env(shigoto, repo) =:= {ok, Pool} andalso kura_available().
+
+%%----------------------------------------------------------------------
 %% Shapes
 %%----------------------------------------------------------------------
+
+-doc false.
+%% The columns of shigoto's tables. Naming them here is what makes them atoms
+%% before the first statement is sent: see the moduledoc.
+-spec columns() -> [atom(), ...].
+columns() ->
+    [
+        archived_at,
+        args,
+        attempt,
+        attempted_at,
+        batch_id,
+        callback_args,
+        callback_worker,
+        cancelled_at,
+        completed_at,
+        completed_jobs,
+        depends_on,
+        deps_results,
+        discarded_at,
+        discarded_jobs,
+        errors,
+        heartbeat_at,
+        id,
+        inserted_at,
+        last_scheduled_at,
+        max_attempts,
+        meta,
+        name,
+        on_dependency_failure,
+        partition_key,
+        priority,
+        progress,
+        queue,
+        result,
+        schedule,
+        scheduled_at,
+        state,
+        tags,
+        total_jobs,
+        unique_key,
+        worker
+    ].
 
 -spec answered({ok, result()} | {error, error()}) -> result() | {error, error()}.
 answered({ok, Result}) -> Result;
@@ -236,25 +838,33 @@ answered({error, Reason}) -> {error, Reason}.
 decoding(Opts) ->
     maps:merge(?DEFAULT_DECODE, maps:without([pool, decode_opts], Opts)).
 
--spec connection(term(), term(), map()) -> map().
-connection(host, Value, Connection) -> Connection#{host => text(Value)};
-connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
-connection(port, Value, Connection) -> Connection#{port => Value};
-connection(database, Value, Connection) -> Connection#{database => binary(Value)};
-connection(user, Value, Connection) -> Connection#{user => binary(Value)};
-connection(username, Value, Connection) -> Connection#{user => binary(Value)};
-connection(password, Value, Connection) -> Connection#{password => binary(Value)};
-connection(ssl, Value, Connection) -> Connection#{ssl => Value};
-connection(ssl_options, Value, Connection) -> Connection#{ssl_options => Value};
-connection(socket_options, Value, Connection) -> Connection#{socket_options => Value};
-connection(_Key, _Value, Connection) -> Connection.
+%% Connection options are handed to minato as the caller wrote them, apart
+%% from the spellings shigoto has always taken for a name or a host.
+-spec connection(term(), dynamic(), map()) -> map().
+connection(host, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(hostname, Value, Connection) ->
+    Connection#{host => text(Value)};
+connection(database, Value, Connection) ->
+    Connection#{database => binary(Value)};
+connection(user, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(username, Value, Connection) ->
+    Connection#{user => binary(Value)};
+connection(password, Value, Connection) ->
+    Connection#{password => binary(Value)};
+connection(Key, Value, Connection) ->
+    case lists:member(Key, ?AS_WRITTEN) of
+        true -> Connection#{Key => Value};
+        false -> Connection
+    end.
 
--spec text(term()) -> string().
+-spec text(dynamic()) -> dynamic().
 text(Value) when is_binary(Value) -> binary_to_list(Value);
 text(Value) when is_atom(Value) -> atom_to_list(Value);
 text(Value) -> Value.
 
--spec binary(term()) -> binary().
+-spec binary(dynamic()) -> dynamic().
 binary(Value) when is_list(Value) -> list_to_binary(Value);
 binary(Value) when is_atom(Value) -> atom_to_binary(Value);
 binary(Value) -> Value.
