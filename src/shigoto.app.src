@@ -1,5 +1,5 @@
 {application, shigoto, [
-    {description, "Background job processing for the Nova ecosystem"},
+    {description, "PostgreSQL-backed background job queue for Erlang, an Oban alternative"},
     {vsn, "git"},
     {registered, [shigoto_sup]},
     {mod, {shigoto_app, []}},
@@ -7,5 +7,5 @@
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},
-    {links, []}
+    {links, [{"GitHub", "https://github.com/Taure/shigoto"}]}
 ]}.
